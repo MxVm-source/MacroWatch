@@ -1,33 +1,28 @@
-# MacroWatchBot — Unified (Mock)
+# MacroWatch — Clean Rebuild (Bitget + Binance Liquidity)
+Modules:
+- 🎯 SwingWatch — Bitget 4H structure + Binance liquidity (orderbook walls + recent liquidations)
+- 🍊 TrumpWatch — High-impact only (>= 0.7), 6h dedupe, /trumpwatch [force]
+- 🏦 FedWatch — Mock T-24h / T-1h / T-10m
 
-One Telegram bot that posts alerts for:
-- 🎯 **SwingWatch** — Liquidity × Trendline confluences (BTC/ETH) with dark charts (every 4h)
-- 🍊 **TrumpWatch** — Mock headlines with sentiment & impact (every 15m + on /trumpwatch)
-- 🏦 **FedWatch** — Mock Fed events with T−24h / T−1h / T−10m alerts (+ /fedwatch shows next)
+Render:
+- Root Dir: MacroWatch
+- Build: pip install --no-cache-dir -r bot/requirements.txt
+- Start: python -m bot.main
 
-## Commands
-- `/next` — latest SwingWatch setups
-- `/trumpwatch` — force a new TrumpWatch mock headline
-- `/tw_recent` — list recent TrumpWatch headlines
-- `/fedwatch` — show the **next** Fed event only
-
-## Render (Python env)
-- **Root Directory:** `MacroWatch`
-- **Build:** `pip install --no-cache-dir -r bot/requirements.txt`
-- **Start:** `python -m bot.main`
-
-## Env vars
+Env:
 TELEGRAM_TOKEN=...
 CHAT_ID=-1003151813176
 ENABLE_SWINGWATCH=true
 ENABLE_TRUMPWATCH=true
 ENABLE_FEDWATCH=true
-SWINGWATCH_DRIFT_MIN=3
-SWINGWATCH_DRIFT_MAX=8
-SW_BTC_CENTER=113000
-SW_ETH_CENTER=3984
+BITGET_SYMBOLS=BTCUSDT_UMCBL,ETHUSDT_UMCBL
+BITGET_GRANULARITY_SEC=14400
+LIQ_THRESHOLD_USD=150000000
+LIQ_PROXIMITY_PCT=0.6
+BIN_DEPTH_LIMIT=1000
+BIN_BUCKET_BTC=100
+BIN_BUCKET_ETH=10
 TW_INTERVAL_MIN=15
-FW_MOCK_MODE=true
-FW_TZ_LABEL=CET
 
-On boot, the bot posts: **“✅ MacroWatchBot online — monitoring 🎯 🍊 🏦”**
+Commands:
+/next, /trumpwatch, /tw_recent, /fedwatch
