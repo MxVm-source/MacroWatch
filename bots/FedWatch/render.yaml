@@ -1,0 +1,19 @@
+services:
+  - type: worker
+    name: fedwatch
+    env: python
+    plan: starter
+    rootDir: bots/FedWatch
+    buildCommand: "pip install --no-cache-dir -r requirements.txt"
+    startCommand: "python -m bot.main"
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: CHAT_ID
+        sync: false
+      - key: POST_HEARTBEAT
+        value: "true"
+      - key: HEARTBEAT_MINUTES
+        value: "60"
+      - key: TZ_LABEL
+        value: "UTC"
