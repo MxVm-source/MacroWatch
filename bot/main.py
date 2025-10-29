@@ -36,6 +36,8 @@ def command_loop():
                 swingwatch.show_latest()
             elif text.startswith("/trumpwatch"):
                 trumpwatch.post_mock(force=True)
+            elif text.startswith("/liqping"):
+                swingwatch.liq_ping()
             elif text.startswith("/tw_recent"):
                 trumpwatch.show_recent()
             elif text.startswith("/fedwatch"):
