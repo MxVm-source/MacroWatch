@@ -6,12 +6,31 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from bot.utils import send_text, send_photo
+from bot.modules.liquidation import get_clusters
 
 STATE = {
     "BTCUSDT": {"price": float(os.getenv("SW_BTC_CENTER","113000"))},
     "ETHUSDT": {"price": float(os.getenv("SW_ETH_CENTER","3984"))},
     "last_confluence": {}
 }
+
+def liq_ping():
+    # try BTCUSDT against current price sample
+    sym = "BTCUSDT_UMCBL"
+    base = "BTCUSDT"
+    from bot.datafeed_bitget import get_ticker
+    price = get_ticker(sym) or 0
+    clusters = get_clusters(base, price, use_mock=False)
+    lines = [f"🔎 Liquidity provider: {os.getenv('LIQ_PROVIDER','mock')}"]
+    lines.append(f"Spot ~ {price:,.0f}")
+    if not clusters:
+        lines.append("No clusters returned (check API URL/key/mapping).")
+    else:
+        lines.append("Top clusters:")
+        for c in clusters[:5]:
+            lines.append(f"• {c['price']:,.0f} — ${c['usd']:,}")
+    from bot.utils import send_text
+    send_text("\n".join(lines))
 
 def _gen_confluence(symbol: str):
     center = STATE[symbol]["price"]
