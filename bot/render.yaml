@@ -1,0 +1,33 @@
+services:
+  - type: worker
+    name: macrowatch
+    env: python
+    plan: starter
+    rootDir: MacroWatch
+    buildCommand: "pip install --no-cache-dir -r bot/requirements.txt"
+    startCommand: "python -m bot.main"
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: CHAT_ID
+        sync: false
+      - key: ENABLE_SWINGWATCH
+        value: "true"
+      - key: ENABLE_TRUMPWATCH
+        value: "true"
+      - key: ENABLE_FEDWATCH
+        value: "true"
+      - key: SWINGWATCH_DRIFT_MIN
+        value: "3"
+      - key: SWINGWATCH_DRIFT_MAX
+        value: "8"
+      - key: SW_BTC_CENTER
+        value: "113000"
+      - key: SW_ETH_CENTER
+        value: "3984"
+      - key: TW_INTERVAL_MIN
+        value: "15"
+      - key: FW_MOCK_MODE
+        value: "true"
+      - key: FW_TZ_LABEL
+        value: "CET"
