@@ -1,0 +1,7 @@
+requests==2.32.3
+python-dotenv==1.0.1
+apscheduler==3.10.4
+pandas==2.2.2
+numpy==1.26.4
+matplotlib==3.9.2
+websocket-client==1.8.0
