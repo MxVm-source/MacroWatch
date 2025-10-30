@@ -34,3 +34,15 @@ def command_loop():
 if __name__=='__main__':
     print('🚀 MacroWatch starting...',flush=True); boot_banner(); schedule_jobs(); threading.Thread(target=command_loop,daemon=True).start()
     while True: time.sleep(3600)
+# 🍊 Start TrumpWatch Live (dual-source)
+try:
+    import threading
+    from bot.modules import trumpwatch_live
+    import os
+    if os.getenv("ENABLE_TRUMPWATCH_LIVE","true").lower() in ("1","true","yes","on"):
+        threading.Thread(target=trumpwatch_live.run_loop, daemon=True).start()
+        print("🍊 TrumpWatch Live started ✅")
+    else:
+        print("🍊 TrumpWatch Live disabled")
+except Exception as e:
+    print("⚠️ Error starting TrumpWatch Live:", e)
