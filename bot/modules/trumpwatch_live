@@ -1,0 +1,124 @@
+import os, time, requests, html, re
+from datetime import datetime, timedelta
+from xml.etree import ElementTree as ET
+from bot.utils import send_text
+
+# Primary (fast): X mirror RSS (e.g., Nitter)
+SRC_X_RSS      = os.getenv('TW_SOURCE_URL_X', 'https://nitter.net/realDonaldTrump/rss')
+SRC_X_NAME     = os.getenv('TW_SOURCE_NAME_X', 'X (Mirror)')
+
+# Backup (authentic): Truth Social JSON mirror
+SRC_TS_JSON    = os.getenv('TW_SOURCE_URL_TS', 'https://trumpstruth.org/api/latest?limit=10')
+SRC_TS_NAME    = os.getenv('TW_SOURCE_NAME_TS', 'Truth Social')
+
+POLL_SEC       = int(os.getenv('TW_POLL_SEC', '20'))
+IMPACT_MIN     = float(os.getenv('TW_IMPACT_MIN', '0.70'))
+DEDUP_HOURS    = int(os.getenv('TW_DEDUP_HOURS', '6'))
+VERIFY_WINDOW  = int(os.getenv('TW_VERIFY_WINDOW_MIN', '2'))  # minutes
+
+STATE = {'seen': {}, 'cache_ts': []}  # id->iso, and recent TS items
+
+def _score_impact(text: str) -> float:
+    t=text.lower()
+    bull=sum(w in t for w in ['growth','lower','boost','expand','jobs','rally','deal','win','cut taxes','stock market'])
+    bear=sum(w in t for w in ['tariff','sanction','war','shutdown','crash','raid','indict','conflict','ban'])
+    base=0.55+0.08*(bull+bear)
+    return max(0.5, min(0.95, base))
+
+def _sentiment(text: str):
+    t=text.lower()
+    bull=sum(w in t for w in ['growth','lower','boost','expand','jobs','deal','win','rally','surge'])
+    bear=sum(w in t for w in ['tariff','sanction','war','shutdown','raid','crash','fall','drop','ban'])
+    if bull>bear: return 'bullish','🟢📈'
+    if bear>bull: return 'bearish','🔴📉'
+    return 'neutral','🔵⚖️'
+
+def _dedup_ok(pid: str) -> bool:
+    if pid not in STATE['seen']: return True
+    t=datetime.fromisoformat(STATE['seen'][pid])
+    return datetime.utcnow()-t>timedelta(hours=DEDUP_HOURS)
+
+def _norm_text(s: str) -> str:
+    s=html.unescape(s or '').strip().lower()
+    s=re.sub(r'https?://\\S+','',s)
+    s=re.sub(r'[^a-z0-9\\s]',' ',s)
+    s=re.sub(r'\\s+',' ',s).strip()
+    return s
+
+def _parse_rss_items(xml_text: str):
+    items=[]
+    root=ET.fromstring(xml_text)
+    for item in root.findall('.//item'):
+        title=item.findtext('title') or ''
+        link=item.findtext('link') or ''
+        pub=item.findtext('{http://purl.org/dc/elements/1.1/}date') or item.findtext('pubDate') or ''
+        pid=link or (title[:40] if title else str(len(items)))
+        items.append({'id':pid,'text':title,'url':link,'ts':pub,'source':SRC_X_NAME})
+    return items
+
+def _fetch_x_items():
+    try:
+        r=requests.get(SRC_X_RSS,timeout=10); r.raise_for_status()
+        return _parse_rss_items(r.text)
+    except Exception:
+        return []
+
+def _fetch_ts_items():
+    try:
+        r=requests.get(SRC_TS_JSON,timeout=10); j=r.json()
+    except Exception:
+        return []
+    items=[]
+    data=j.get('data') if isinstance(j,dict) else j
+    if not isinstance(data,list): return items
+    for it in data:
+        pid=str(it.get('id') or it.get('post_id') or it.get('slug') or '')
+        text=it.get('text') or it.get('content') or ''
+        url=it.get('url') or it.get('link') or ''
+        ts=it.get('created_at') or it.get('time') or datetime.utcnow().isoformat()
+        if pid and text:
+            items.append({'id':pid,'text':html.unescape(text),'url':url,'ts':ts,'source':SRC_TS_NAME})
+    return items
+
+def _within_minutes(ts_a: datetime, ts_b: datetime, minutes: int) -> bool:
+    return abs((ts_a-ts_b).total_seconds())<=minutes*60
+
+def _try_verify_with_ts(x_item, ts_items):
+    xt=_norm_text(x_item['text'])
+    now=datetime.utcnow()
+    for t in ts_items:
+        tt=_norm_text(t['text'])
+        if xt and tt and xt[:80]==tt[:80]:
+            try:
+                tdt=datetime.fromisoformat(t['ts'].replace('Z','+00:00')) if 'T' in t['ts'] else now
+            except Exception:
+                tdt=now
+            if _within_minutes(now, tdt, VERIFY_WINDOW):
+                return True, t.get('url') or None
+    return False, None
+
+def poll_once():
+    ts_items=_fetch_ts_items()
+    STATE['cache_ts']=ts_items[:10]
+    x_items=_fetch_x_items()
+    for it in x_items[:10]:
+        pid,txt,url,src=it['id'],it['text'],it['url'],it['source']
+        if not _dedup_ok(pid): continue
+        impact=_score_impact(txt)
+        if impact<IMPACT_MIN:
+            STATE['seen'][pid]=datetime.utcnow().isoformat(timespec='minutes'); continue
+        sent,emo=_sentiment(txt)
+        verified,ts_url=_try_verify_with_ts(it,STATE['cache_ts'])
+        ver_str=' — Verified ✅ Truth Social' if verified else ''
+        link_line=f'🔗 Link: {url}' if url else (f'🔗 Truth: {ts_url}' if ts_url else '')
+        msg=(f"🍊 [TrumpWatch] ⚠️ Market Impact: HIGH ({impact:.2f}) | Sentiment: {emo} {sent.title()}{ver_str}\\n"
+             f"🗞️ {txt.strip()[:1000]}\\n"
+             f"📡 Source: {src}\\n"
+             f"{link_line}").strip()
+        send_text(msg)
+        STATE['seen'][pid]=datetime.utcnow().isoformat(timespec='minutes')
+
+def run_loop():
+    while True:
+        poll_once()
+        time.sleep(POLL_SEC)
