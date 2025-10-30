@@ -1,7 +1,7 @@
 import os, threading, time
 from apscheduler.schedulers.background import BackgroundScheduler
 from bot.utils import send_text, get_updates
-from bot.modules import swingwatch, trumpwatch, fedwatch
+from bot.modules import swingwatch, trumpwatch_live, fedwatch
 def boot_banner(): send_text('✅ MacroWatch online — 🎯 SwingWatch (Bitget+Binance) | 🍊 High-Impact TrumpWatch | 🏦 FedWatch')
 def schedule_jobs():
     sched=BackgroundScheduler(timezone='UTC')
