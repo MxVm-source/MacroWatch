@@ -8,7 +8,7 @@ def schedule_jobs():
     if os.getenv('ENABLE_SWINGWATCH','true').lower() in ('1','true','yes','on'):
         sched.add_job(swingwatch.run_scan_post,'cron',hour='0,4,8,12,16,20')
     if os.getenv("ENABLE_TRUMPWATCH_LIVE","true").lower() in ("1","true","yes","on"):
-    threading.Thread(target=trumpwatch_live.run_loop, daemon=True).start()
+threading.Thread(target=trumpwatch_live.run_loop, daemon=True).start()
     if os.getenv('ENABLE_FEDWATCH','true').lower() in ('1','true','yes','on'):
         threading.Thread(target=fedwatch.schedule_loop,daemon=True).start()
     sched.start()
