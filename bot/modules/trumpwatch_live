@@ -4,7 +4,7 @@ from xml.etree import ElementTree as ET
 from bot.utils import send_text
 
 # Primary (fast): X mirror RSS (e.g., Nitter)
-SRC_X_RSS      = os.getenv('TW_SOURCE_URL_X', 'https://nitter.net/realDonaldTrump/rss')
+SRC_X_RSS      = os.getenv('TW_SOURCE_URL_X', 'https://nitter.net/TrumpTruthOnX/rss')
 SRC_X_NAME     = os.getenv('TW_SOURCE_NAME_X', 'X (Mirror)')
 
 # Backup (authentic): Truth Social JSON mirror
