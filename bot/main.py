@@ -4,13 +4,20 @@ from bot.utils import send_text, get_updates
 from bot.modules import swingwatch, trumpwatch_live, fedwatch
 def boot_banner(): send_text('✅ MacroWatch online — 🎯 SwingWatch (Bitget+Binance) | 🍊 High-Impact TrumpWatch | 🏦 FedWatch')
 def schedule_jobs():
-    sched=BackgroundScheduler(timezone='UTC')
-    if os.getenv('ENABLE_SWINGWATCH','true').lower() in ('1','true','yes','on'):
-        sched.add_job(swingwatch.run_scan_post,'cron',hour='0,4,8,12,16,20')
+    sched = BackgroundScheduler(timezone='UTC')
+
+    # 🔹 SwingWatch 4H job
+    if os.getenv('ENABLE_SWINGWATCH', 'true').lower() in ('1','true','yes','on'):
+        sched.add_job(swingwatch.run_scan_post, 'cron', hour='0,4,8,12,16,20')
+
+    # 🔹 TrumpWatch LIVE (dual-source)
     if os.getenv("ENABLE_TRUMPWATCH_LIVE","true").lower() in ("1","true","yes","on"):
-    threading.Thread(target=trumpwatch_live.run_loop, daemon=True).start()
+        threading.Thread(target=trumpwatch_live.run_loop, daemon=True).start()
+
+    # 🔹 FedWatch
     if os.getenv('ENABLE_FEDWATCH','true').lower() in ('1','true','yes','on'):
-        threading.Thread(target=fedwatch.schedule_loop,daemon=True).start()
+        threading.Thread(target=fedwatch.schedule_loop, daemon=True).start()
+
     sched.start()
 def command_loop():
     offset=None
