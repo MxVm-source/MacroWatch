@@ -60,6 +60,10 @@ def command_loop():
             elif text.startswith("/fedwatch"):
                 fedwatch.show_next_event()
 
+            elif text.startswith("/fed_diag"):
+                fedwatch.show_diag()
+
+
         time.sleep(1)
 
 
