@@ -1,5 +1,9 @@
-import os, time, requests, html, re
-from datetime import datetime, timedelta
+import os
+import time
+import requests
+import html
+import re
+from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 from bot.utils import send_text
 
@@ -16,116 +20,227 @@ IMPACT_MIN     = float(os.getenv('TW_IMPACT_MIN', '0.70'))
 DEDUP_HOURS    = int(os.getenv('TW_DEDUP_HOURS', '6'))
 VERIFY_WINDOW  = int(os.getenv('TW_VERIFY_WINDOW_MIN', '2'))
 
-STATE = {'seen': {}, 'cache_ts': []}
+# Toggle market-only filter
+MARKET_FILTER  = os.getenv('TW_MARKET_FILTER', 'true').lower() in ('1', 'true', 'yes', 'on')
+
+STATE = {
+    'seen': {},      # id/text_sig -> iso time
+    'cache_ts': []   # recent Truth Social items for verification
+}
+
+# --- Market relevance keywords --- #
+
+MACRO_WORDS = [
+    "market", "markets", "stock market", "stocks", "dow", "nasdaq", "s&p", "wall street",
+    "economy", "economic", "recession", "depression", "growth", "gdp",
+    "jobs", "unemployment",
+    "inflation", "deflation", "interest rate", "interest rates", "rates", "fed", "federal reserve", "powell"
+]
+
+FISCAL_WORDS = [
+    "tax", "taxes", "tariff", "tariffs", "trade deal", "sanctions",
+    "regulation", "regulations", "deregulation",
+    "spending", "deficit", "debt", "budget", "stimulus", "bailout"
+]
+
+GEO_WORDS = [
+    "china", "russia", "iran", "ukraine", "taiwan", "europe", "european union",
+    "war", "conflict", "invasion", "nuclear", "nuke",
+    "opec", "oil", "gas", "energy"
+]
+
+CRYPTO_WORDS = [
+    "bitcoin", "btc", "crypto", "cryptocurrency", "eth", "ethereum",
+    "blockchain", "digital currency", "cbdc", "central bank digital currency"
+]
+
+ALL_MARKET_WORDS = [w.lower() for w in (
+    MACRO_WORDS + FISCAL_WORDS + GEO_WORDS + CRYPTO_WORDS
+)]
+
 
 def _score_impact(text: str) -> float:
-    t=text.lower()
-    bull=sum(w in t for w in ['growth','lower','boost','expand','jobs','rally','deal','win','cut taxes','stock market'])
-    bear=sum(w in t for w in ['tariff','sanction','war','shutdown','crash','raid','indict','conflict','ban'])
-    base=0.55+0.08*(bull+bear)
+    t = text.lower()
+    bull = sum(w in t for w in [
+        "growth", "lower", "boost", "expand", "jobs", "rally", "deal", "win",
+        "cut taxes", "stock market", "boom"
+    ])
+    bear = sum(w in t for w in [
+        "tariff", "sanction", "war", "shutdown", "crash", "raid", "indict",
+        "conflict", "ban", "recession", "inflation", "depression"
+    ])
+    base = 0.55 + 0.08 * (bull + bear)  # 0.55..~0.95
     return max(0.5, min(0.95, base))
 
-def _sentiment(text: str):
-    t=text.lower()
-    bull=sum(w in t for w in ['growth','lower','boost','expand','jobs','deal','win','rally','surge'])
-    bear=sum(w in t for w in ['tariff','sanction','war','shutdown','raid','crash','fall','drop','ban'])
-    if bull>bear:
-        return 'bullish','🟢📈'
-    elif bear>bull:
-        return 'bearish','🔴📉'
-    else:
-        return 'neutral','🔵⚖️'
 
-def _dedup_ok(pid: str) -> bool:
-    if pid not in STATE['seen']:
+def _sentiment(text: str):
+    t = text.lower()
+    bull = sum(w in t for w in [
+        "growth", "lower", "boost", "expand", "jobs", "deal", "win", "rally", "surge", "boom"
+    ])
+    bear = sum(w in t for w in [
+        "tariff", "sanction", "war", "shutdown", "raid", "crash", "fall", "drop",
+        "ban", "recession", "inflation", "depression"
+    ])
+    if bull > bear:
+        return "bullish", "🟢📈"
+    elif bear > bull:
+        return "bearish", "🔴📉"
+    else:
+        return "neutral", "🔵⚖️"
+
+
+def _dedup_ok(key: str) -> bool:
+    if key not in STATE["seen"]:
         return True
-    t=datetime.fromisoformat(STATE['seen'][pid])
-    return datetime.utcnow()-t>timedelta(hours=DEDUP_HOURS)
+    t = datetime.fromisoformat(STATE["seen"][key])
+    return datetime.now(timezone.utc) - t > timedelta(hours=DEDUP_HOURS)
+
 
 def _norm_text(s: str) -> str:
-    s=html.unescape(s or '').strip().lower()
-    s=re.sub(r'https?://\\S+','',s)
-    s=re.sub(r'[^a-z0-9\\s]',' ',s)
-    s=re.sub(r'\\s+',' ',s).strip()
+    s = html.unescape(s or "").strip().lower()
+    s = re.sub(r"https?://\S+", "", s)
+    s = re.sub(r"[^a-z0-9\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
+def _is_market_relevant(text: str) -> bool:
+    """Return True if the post should be considered market/macro/crypto relevant."""
+    if not MARKET_FILTER:
+        return True
+    t = _norm_text(text)
+    if not t:
+        return False
+    return any(w in t for w in ALL_MARKET_WORDS)
+
+
+# --- RSS / Truth Social fetching --- #
+
 def _parse_rss_items(xml_text: str):
-    items=[]
-    root=ET.fromstring(xml_text)
-    for item in root.findall('.//item'):
-        title=item.findtext('title') or ''
-        link=item.findtext('link') or ''
-        pub=item.findtext('{http://purl.org/dc/elements/1.1/}date') or item.findtext('pubDate') or ''
-        pid=link or (title[:40] if title else str(len(items)))
-        items.append({'id':pid,'text':title,'url':link,'ts':pub,'source':SRC_X_NAME})
+    items = []
+    root = ET.fromstring(xml_text)
+    for item in root.findall(".//item"):
+        title = item.findtext("title") or ""
+        link = item.findtext("link") or ""
+        pub  = item.findtext("{http://purl.org/dc/elements/1.1/}date") or item.findtext("pubDate") or ""
+        pid  = link or (title[:40] if title else str(len(items)))
+        items.append({
+            "id": pid,
+            "text": title,
+            "url": link,
+            "ts": pub,
+            "source": SRC_X_NAME
+        })
     return items
+
 
 def _fetch_x_items():
     try:
-        r=requests.get(SRC_X_RSS,timeout=10)
+        r = requests.get(SRC_X_RSS, timeout=10)
         r.raise_for_status()
         return _parse_rss_items(r.text)
     except Exception:
         return []
 
+
 def _fetch_ts_items():
     try:
-        r=requests.get(SRC_TS_JSON,timeout=10)
-        j=r.json()
+        r = requests.get(SRC_TS_JSON, timeout=10)
+        j = r.json()
     except Exception:
         return []
-    items=[]
-    data=j.get('data') if isinstance(j,dict) else j
-    if not isinstance(data,list):
+    items = []
+    data = j.get("data") if isinstance(j, dict) else j
+    if not isinstance(data, list):
         return items
     for it in data:
-        pid=str(it.get('id') or it.get('post_id') or it.get('slug') or '')
-        text=it.get('text') or it.get('content') or ''
-        url=it.get('url') or it.get('link') or ''
-        ts=it.get('created_at') or it.get('time') or datetime.utcnow().isoformat()
+        pid = str(it.get("id") or it.get("post_id") or it.get("slug") or "")
+        text = it.get("text") or it.get("content") or ""
+        url  = it.get("url") or it.get("link") or ""
+        ts   = it.get("created_at") or it.get("time") or datetime.utcnow().isoformat()
         if pid and text:
-            items.append({'id':pid,'text':html.unescape(text),'url':url,'ts':ts,'source':SRC_TS_NAME})
+            items.append({
+                "id": pid,
+                "text": html.unescape(text),
+                "url": url,
+                "ts": ts,
+                "source": SRC_TS_NAME
+            })
     return items
 
+
 def _within_minutes(ts_a: datetime, ts_b: datetime, minutes: int) -> bool:
-    return abs((ts_a-ts_b).total_seconds())<=minutes*60
+    return abs((ts_a - ts_b).total_seconds()) <= minutes * 60
+
 
 def _try_verify_with_ts(x_item, ts_items):
-    xt=_norm_text(x_item['text'])
-    now=datetime.utcnow()
+    xt = _norm_text(x_item["text"])
+    now = datetime.utcnow()
     for t in ts_items:
-        tt=_norm_text(t['text'])
-        if xt and tt and xt[:80]==tt[:80]:
+        tt = _norm_text(t["text"])
+        if xt and tt and xt[:80] == tt[:80]:
             try:
-                tdt=datetime.fromisoformat(t['ts'].replace('Z','+00:00')) if 'T' in t['ts'] else now
+                ts_str = t["ts"]
+                if "T" in ts_str:
+                    tdt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                else:
+                    tdt = now
             except Exception:
-                tdt=now
+                tdt = now
             if _within_minutes(now, tdt, VERIFY_WINDOW):
-                return True, t.get('url') or None
+                return True, t.get("url") or None
     return False, None
 
+
+# --- MAIN POLL LOGIC --- #
+
 def poll_once():
-    ts_items=_fetch_ts_items()
-    STATE['cache_ts']=ts_items[:10]
-    x_items=_fetch_x_items()
+    # refresh TS cache
+    ts_items = _fetch_ts_items()
+    STATE["cache_ts"] = ts_items[:10]
+
+    # fetch X items
+    x_items = _fetch_x_items()
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="minutes")
+
     for it in x_items[:10]:
-        pid,txt,url,src=it['id'],it['text'],it['url'],it['source']
-        if not _dedup_ok(pid):
+        pid, txt, url, src = it["id"], it["text"], it["url"], it["source"]
+
+        # dedupe by id + text signature
+        key = pid + "|" + _norm_text(txt)[:80]
+        if not _dedup_ok(key):
             continue
-        impact=_score_impact(txt)
-        if impact<IMPACT_MIN:
-            STATE['seen'][pid]=datetime.utcnow().isoformat(timespec='minutes')
+
+        # Market relevance filter
+        if not _is_market_relevant(txt):
+            STATE["seen"][key] = now_iso
             continue
-        sent,emo=_sentiment(txt)
-        verified,ts_url=_try_verify_with_ts(it,STATE['cache_ts'])
-        ver_str=' — Verified ✅ Truth Social' if verified else ''
-        link_line=f'🔗 Link: {url}' if url else (f'🔗 Truth: {ts_url}' if ts_url else '')
-        msg=(f'🍊 [TrumpWatch] ⚠️ Market Impact: HIGH ({impact:.2f}) | Sentiment: {emo} {sent.title()}{ver_str}\\n'
-             f'🗞️ {txt.strip()[:1000]}\\n'
-             f'📡 Source: {src}\\n'
-             f'{link_line}').strip()
+
+        impact = _score_impact(txt)
+        if impact < IMPACT_MIN:
+            STATE["seen"][key] = now_iso
+            continue
+
+        sent, emo = _sentiment(txt)
+        verified, ts_url = _try_verify_with_ts(it, STATE["cache_ts"])
+        ver_str = " — Verified ✅ Truth Social" if verified else ""
+        link_line = ""
+        if url:
+            link_line = f"🔗 Link: {url}"
+        elif ts_url:
+            link_line = f"🔗 Truth: {ts_url}"
+
+        msg = (
+            f"🍊 [TrumpWatch] ⚠️ Market Impact: HIGH ({impact:.2f}) | Sentiment: {emo} {sent.title()}{ver_str}\n"
+            f"🗞️ {txt.strip()[:1000]}\n"
+            f"📡 Source: {src}\n"
+            f"{link_line}"
+        ).strip()
+
         send_text(msg)
-        STATE['seen'][pid]=datetime.utcnow().isoformat(timespec='minutes')
+        STATE["seen"][key] = now_iso
+
 
 def run_loop():
     while True:
