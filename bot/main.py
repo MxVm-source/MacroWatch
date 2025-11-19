@@ -1,4 +1,3 @@
-# bot/main.py
 import os
 import threading
 import time
@@ -6,7 +5,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from bot.utils import send_text, get_updates
 from bot.modules import trumpwatch, fedwatch
-# NOTE: we import trumpwatch_live only inside __main__ so missing file won't break imports
+# NOTE: trumpwatch_live is imported later inside __main__ so that missing file won't break imports
 
 
 def boot_banner():
@@ -14,17 +13,16 @@ def boot_banner():
 
 
 def start_scheduler():
-    """Start cron/interval jobs (15m Trump mock, FedWatch loop)."""
+    """Start jobs for TrumpWatch (mock, optional) and FedWatch loop."""
     sched = BackgroundScheduler(timezone="UTC")
 
-
-
     # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
+    # Set ENABLE_TRUMPWATCH=true if you want periodic fake headlines for testing.
     if os.getenv("ENABLE_TRUMPWATCH", "false").lower() in ("1", "true", "yes", "on"):
         minutes = int(os.getenv("TW_INTERVAL_MIN", "15"))
         sched.add_job(trumpwatch.post_mock, "interval", minutes=minutes)
 
-    # 🏦 FedWatch alerts
+    # 🏦 FedWatch alerts (ICS + BTC/ETH reaction)
     if os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
         threading.Thread(target=fedwatch.schedule_loop, daemon=True).start()
 
@@ -33,7 +31,13 @@ def start_scheduler():
 
 
 def command_loop():
-    """Telegram commands: /next /trumpwatch [/force] /tw_recent /fedwatch"""
+    """
+    Telegram commands:
+      /trumpwatch  -> force one mock Trump headline (if you still use the mock module)
+      /tw_recent   -> show recent mock headlines
+      /fedwatch    -> show next Fed event (Brussels time)
+      /fed_diag    -> FedWatch diagnostics (ICS + next events)
+    """
     offset = None
     while True:
         data = get_updates(offset=offset, timeout=20)
@@ -45,10 +49,8 @@ def command_loop():
             if not text or chat != str(os.getenv("CHAT_ID")):
                 continue
 
-            if text.startswith("/next"):
-                swingwatch.run_scan_post()
-
-            elif text.startswith("/trumpwatch"):
+            if text.startswith("/trumpwatch"):
+                # Optional mock-only command
                 force = "force" in text
                 trumpwatch.post_mock(force=force)
 
@@ -61,7 +63,6 @@ def command_loop():
             elif text.startswith("/fed_diag"):
                 fedwatch.show_diag()
 
-
         time.sleep(1)
 
 
@@ -70,7 +71,7 @@ if __name__ == "__main__":
     boot_banner()
     start_scheduler()
 
-    # 🍊 Start TrumpWatch Live (dual-source) — safe block
+    # 🍊 Start TrumpWatch Live (dual-source, market-only filter) — safe block
     # Runs in the SAME service without touching scheduler indentation
     try:
         if os.getenv("ENABLE_TRUMPWATCH_LIVE", "true").lower() in ("1", "true", "yes", "on"):
