@@ -3,7 +3,7 @@ import time
 import requests
 import html
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from xml.etree import ElementTree as ET
 from bot.utils import send_text
 
@@ -69,7 +69,7 @@ def _score_impact(text: str) -> float:
         "tariff", "sanction", "war", "shutdown", "crash", "raid", "indict",
         "conflict", "ban", "recession", "inflation", "depression"
     ])
-    base = 0.55 + 0.08 * (bull + bear)  # 0.55..~0.95
+    base = 0.55 + 0.08 * (bull + bear)
     return max(0.5, min(0.95, base))
 
 
@@ -94,7 +94,7 @@ def _dedup_ok(key: str) -> bool:
     if key not in STATE["seen"]:
         return True
     t = datetime.fromisoformat(STATE["seen"][key])
-    return datetime.now(timezone.utc) - t > timedelta(hours=DEDUP_HOURS)
+    return datetime.utcnow() - t > timedelta(hours=DEDUP_HOURS)
 
 
 def _norm_text(s: str) -> str:
@@ -106,7 +106,6 @@ def _norm_text(s: str) -> str:
 
 
 def _is_market_relevant(text: str) -> bool:
-    """Return True if the post should be considered market/macro/crypto relevant."""
     if not MARKET_FILTER:
         return True
     t = _norm_text(text)
@@ -114,8 +113,6 @@ def _is_market_relevant(text: str) -> bool:
         return False
     return any(w in t for w in ALL_MARKET_WORDS)
 
-
-# --- RSS / Truth Social fetching --- #
 
 def _parse_rss_items(xml_text: str):
     items = []
@@ -183,7 +180,8 @@ def _try_verify_with_ts(x_item, ts_items):
             try:
                 ts_str = t["ts"]
                 if "T" in ts_str:
-                    tdt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    from datetime import datetime as _dt
+                    tdt = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
                 else:
                     tdt = now
             except Exception:
@@ -193,8 +191,6 @@ def _try_verify_with_ts(x_item, ts_items):
     return False, None
 
 
-# --- MAIN POLL LOGIC --- #
-
 def poll_once():
     # refresh TS cache
     ts_items = _fetch_ts_items()
@@ -202,17 +198,15 @@ def poll_once():
 
     # fetch X items
     x_items = _fetch_x_items()
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="minutes")
+    now_iso = datetime.utcnow().isoformat(timespec="minutes")
 
     for it in x_items[:10]:
         pid, txt, url, src = it["id"], it["text"], it["url"], it["source"]
 
-        # dedupe by id + text signature
         key = pid + "|" + _norm_text(txt)[:80]
         if not _dedup_ok(key):
             continue
 
-        # Market relevance filter
         if not _is_market_relevant(txt):
             STATE["seen"][key] = now_iso
             continue
