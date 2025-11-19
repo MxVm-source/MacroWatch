@@ -81,7 +81,7 @@ if __name__ == "__main__":
 
 
 def boot_banner():
-    send_text("✅ MacroWatch online — 🍊 TrumpWatch | 🏦 FedWatch")
+    send_text("✅ MacroWatch online — 🧠 CryptoWatch | 🍊 TrumpWatch | 🏦 FedWatch")
 
 
 
