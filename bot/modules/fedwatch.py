@@ -52,17 +52,22 @@ def _parse_dt(val: str) -> datetime:
     return datetime.strptime(val, "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
 
 
-def _fetch_ics():
+def _fetch_ics() -> str:
     if not FED_ICS_URL:
+        print("FEDWATCH: FED_ICS_URL is empty")
         return ""
     try:
         r = requests.get(FED_ICS_URL, timeout=10)
-        if r.ok and "BEGIN:VCALENDAR" in r.text:
-            return r.text
-    except Exception:
-        pass
-    return ""
-
+        print("FEDWATCH: HTTP", r.status_code, "for", FED_ICS_URL)
+        if r.ok:
+            if "BEGIN:VCALENDAR" in r.text:
+                return r.text
+            else:
+                print("FEDWATCH: ICS text missing BEGIN:VCALENDAR")
+        return ""
+    except Exception as e:
+        print("FEDWATCH: exception fetching ICS:", e)
+        return ""
 
 def _parse_ics(text: str):
     events = []
