@@ -10,7 +10,7 @@ from bot.settings import (
     TIMEZONE,
     CRYPTOWATCH_ENABLED,
 )
-from .template import CRYPTO_WATCH_TEMPLATE
+from bot.template import CRYPTO_WATCH_TEMPLATE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger("cryptowatch")
