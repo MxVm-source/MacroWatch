@@ -5,7 +5,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from bot.utils import send_text, get_updates
 from bot.modules import trumpwatch, fedwatch
-# NOTE: trumpwatch_live is imported later inside __main__ so that missing file won't break imports
+# trumpwatch_live imported in __main__
 
 
 def boot_banner():
@@ -13,11 +13,10 @@ def boot_banner():
 
 
 def start_scheduler():
-    """Start jobs for TrumpWatch (mock, optional) and FedWatch loop."""
+    """Start jobs for optional TrumpWatch mock + FedWatch loop."""
     sched = BackgroundScheduler(timezone="UTC")
 
     # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
-    # Set ENABLE_TRUMPWATCH=true if you want periodic fake headlines for testing.
     if os.getenv("ENABLE_TRUMPWATCH", "false").lower() in ("1", "true", "yes", "on"):
         minutes = int(os.getenv("TW_INTERVAL_MIN", "15"))
         sched.add_job(trumpwatch.post_mock, "interval", minutes=minutes)
@@ -31,13 +30,7 @@ def start_scheduler():
 
 
 def command_loop():
-    """
-    Telegram commands:
-      /trumpwatch  -> force one mock Trump headline (if you still use the mock module)
-      /tw_recent   -> show recent mock headlines
-      /fedwatch    -> show next Fed event (Brussels time)
-      /fed_diag    -> FedWatch diagnostics (ICS + next events)
-    """
+    """Telegram commands for MacroWatch."""
     offset = None
     while True:
         data = get_updates(offset=offset, timeout=20)
@@ -50,7 +43,6 @@ def command_loop():
                 continue
 
             if text.startswith("/trumpwatch"):
-                # Optional mock-only command
                 force = "force" in text
                 trumpwatch.post_mock(force=force)
 
@@ -71,8 +63,7 @@ if __name__ == "__main__":
     boot_banner()
     start_scheduler()
 
-    # 🍊 Start TrumpWatch Live (dual-source, market-only filter) — safe block
-    # Runs in the SAME service without touching scheduler indentation
+    # 🍊 Start TrumpWatch Live (dual-source, market-only filter)
     try:
         if os.getenv("ENABLE_TRUMPWATCH_LIVE", "true").lower() in ("1", "true", "yes", "on"):
             from bot.modules import trumpwatch_live
@@ -83,9 +74,9 @@ if __name__ == "__main__":
     except Exception as e:
         print("⚠️ Error starting TrumpWatch Live:", e, flush=True)
 
-    # Commands listener
+    # Telegram command listener
     threading.Thread(target=command_loop, daemon=True).start()
 
-    # Keep the process alive
+    # Keep service alive
     while True:
         time.sleep(3600)
