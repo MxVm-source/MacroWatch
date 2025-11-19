@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from ..settings import (
+from bot.settings import (
     TELEGRAM_BOT_TOKEN,
     CRYPTOWATCH_CHAT_ID,
     TIMEZONE,
