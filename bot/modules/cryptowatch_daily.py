@@ -13,10 +13,6 @@ from bot.settings import (
     CRYPTOWATCH_ENABLED,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-log = logging.getLogger("cryptowatch_daily")
-
-
 DAILY_BRIEF_TEMPLATE = """🧠 [CryptoWatch] Daily Market Brief
 📅 {date} — Before U.S. Market Open
 
@@ -50,17 +46,16 @@ Key Level BTC: {btc_key_level}
 ⚠️ Note: Brief sentiment scan — not financial advice.
 """
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+log = logging.getLogger("cryptowatch_daily")
+
 
 def now_tz() -> datetime:
-    """Return current time in configured timezone."""
     return datetime.now(ZoneInfo(TIMEZONE))
 
 
 def fetch_daily_metrics() -> dict:
-    """
-    Placeholder metrics so the pipeline works end-to-end.
-    Later you can replace this with real API calls (prices, FG index, futures, news, etc.).
-    """
+    """Placeholder metrics so the pipeline works end-to-end."""
     return {
         "sentiment": "Bearish / Cautious",
         "fg_value": 20,
@@ -97,7 +92,6 @@ def fetch_daily_metrics() -> dict:
 def build_message() -> str:
     now = now_tz()
     metrics = fetch_daily_metrics()
-
     return DAILY_BRIEF_TEMPLATE.format(
         date=now.date().isoformat(),
         **metrics,
