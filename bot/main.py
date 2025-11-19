@@ -84,22 +84,6 @@ def boot_banner():
     send_text("✅ MacroWatch online — 🍊 TrumpWatch | 🏦 FedWatch")
 
 
-def start_scheduler():
-    """Start jobs for optional TrumpWatch mock + FedWatch loop."""
-    sched = BackgroundScheduler(timezone="UTC")
-
-    # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
-    if os.getenv("ENABLE_TRUMPWATCH", "false").lower() in ("1", "true", "yes", "on"):
-        minutes = int(os.getenv("TW_INTERVAL_MIN", "15"))
-        sched.add_job(trumpwatch.post_mock, "interval", minutes=minutes)
-
-    # 🏦 FedWatch alerts (ICS + BTC/ETH reaction)
-    if os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
-        threading.Thread(target=fedwatch.schedule_loop, daemon=True).start()
-
-    sched.start()
-    return sched
-
 
 def command_loop():
     """Telegram commands for MacroWatch."""
