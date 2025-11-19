@@ -3,15 +3,9 @@
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import os
 
-import requests
-
-from bot.settings import (
-    TELEGRAM_BOT_TOKEN,
-    CRYPTOWATCH_CHAT_ID,
-    TIMEZONE,
-    CRYPTOWATCH_ENABLED,
-)
+from bot.utils import send_text
 
 DAILY_BRIEF_TEMPLATE = """🧠 [CryptoWatch] Daily Market Brief
 📅 {date} — Before U.S. Market Open
@@ -49,9 +43,11 @@ Key Level BTC: {btc_key_level}
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger("cryptowatch_daily")
 
+TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Brussels"))
+
 
 def now_tz() -> datetime:
-    return datetime.now(ZoneInfo(TIMEZONE))
+    return datetime.now(TZ)
 
 
 def fetch_daily_metrics() -> dict:
@@ -98,34 +94,11 @@ def build_message() -> str:
     )
 
 
-def send_telegram(text: str) -> None:
-    if not TELEGRAM_BOT_TOKEN or not CRYPTOWATCH_CHAT_ID:
-        log.error("Missing TELEGRAM_BOT_TOKEN or CRYPTOWATCH_CHAT_ID")
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CRYPTOWATCH_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-
-    resp = requests.post(url, json=payload, timeout=15)
-    if resp.status_code != 200:
-        log.error("Telegram error: %s %s", resp.status_code, resp.text)
-    else:
-        log.info("CryptoWatch daily brief sent.")
-
-
 def main() -> None:
-    if not CRYPTOWATCH_ENABLED:
-        log.info("CryptoWatch disabled via CRYPTOWATCH_ENABLED.")
+    if os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() not in ("1", "true", "yes", "on"):
+        log.info("CryptoWatch daily disabled via ENABLE_CRYPTOWATCH_DAILY.")
         return
 
     msg = build_message()
-    send_telegram(msg)
-
-
-if __name__ == "__main__":
-    main()
+    send_text(msg)
+    log.info("CryptoWatch daily brief sent.")
