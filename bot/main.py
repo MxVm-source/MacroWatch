@@ -1,10 +1,82 @@
 import os
-import threading
 import time
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from bot.utils import send_text, get_updates
-from bot.modules import trumpwatch, fedwatch
+from bot.modules import (
+    fedwatch,
+    trumpwatch,
+    cryptowatch,
+    cryptowatch_daily
+)
+
+scheduler = BackgroundScheduler(timezone="Europe/Brussels")
+
+
+def start_schedulers():
+    # ---------------------------
+    # FEDWATCH (already existed)
+    # ---------------------------
+    scheduler.add_job(
+        fedwatch.main,
+        trigger="interval",
+        minutes=1,
+        id="fedwatch_task",
+        max_instances=1,
+        replace_existing=True
+    )
+
+    # ---------------------------
+    # TRUMPWATCH (already existed)
+    # ---------------------------
+    scheduler.add_job(
+        trumpwatch.main,
+        trigger="interval",
+        minutes=1,
+        id="trumpwatch_task",
+        max_instances=1,
+        replace_existing=True
+    )
+
+    # ---------------------------
+    # 🔵 CRYPTOWATCH DAILY (new)
+    # Runs once per day at 15:28 Brussels (before US open)
+    # ---------------------------
+    scheduler.add_job(
+        cryptowatch_daily.main,
+        trigger="cron",
+        hour=15,
+        minute=28,
+        id="cryptowatch_daily_task",
+        max_instances=1,
+        replace_existing=True
+    )
+
+    # ---------------------------
+    # 🔵 CRYPTOWATCH WEEKLY (new)
+    # Runs every Sunday at 18:00 Brussels
+    # ---------------------------
+    scheduler.add_job(
+        cryptowatch.main,
+        trigger="cron",
+        day_of_week="sun",
+        hour=18,
+        minute=0,
+        id="cryptowatch_weekly_task",
+        max_instances=1,
+        replace_existing=True
+    )
+
+    scheduler.start()
+
+
+if __name__ == "__main__":
+    print("🔥 MacroWatch Background Worker Starting...")
+    start_schedulers()
+
+    # Keep alive loop
+    while True:
+        time.sleep(60)
+
 # trumpwatch_live imported in __main__
 
 
