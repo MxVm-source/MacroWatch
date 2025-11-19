@@ -4,7 +4,7 @@ import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from .settings import (
+from bot.settings import (
     TELEGRAM_BOT_TOKEN,
     CRYPTOWATCH_CHAT_ID,
     TIMEZONE,
