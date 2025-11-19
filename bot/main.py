@@ -5,21 +5,19 @@ import time
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from bot.utils import send_text, get_updates
-from bot.modules import swingwatch, trumpwatch, fedwatch
+from bot.modules import trumpwatch, fedwatch
 # NOTE: we import trumpwatch_live only inside __main__ so missing file won't break imports
 
 
 def boot_banner():
-    send_text("✅ MacroWatch online — 🎯 SwingWatch (Bitget+Binance) | 🍊 TrumpWatch | 🏦 FedWatch")
+    send_text("✅ MacroWatch online — 🍊 TrumpWatch | 🏦 FedWatch")
 
 
 def start_scheduler():
-    """Start cron/interval jobs (4H SwingWatch, 15m Trump mock, FedWatch loop)."""
+    """Start cron/interval jobs (15m Trump mock, FedWatch loop)."""
     sched = BackgroundScheduler(timezone="UTC")
 
-    # 🎯 SwingWatch every 4 hours
-    if os.getenv("ENABLE_SWINGWATCH", "true").lower() in ("1", "true", "yes", "on"):
-        sched.add_job(swingwatch.run_scan_post, "cron", hour="0,4,8,12,16,20")
+
 
     # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
     if os.getenv("ENABLE_TRUMPWATCH", "false").lower() in ("1", "true", "yes", "on"):
