@@ -1,14 +1,15 @@
 # bot/modules/cryptowatch_daily.py
 
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
 import os
+from datetime import datetime
+from typing import Optional
 
+from zoneinfo import ZoneInfo
+import requests
 from openai import OpenAI
 
 from bot.utils import send_text
-from bot.datafeed_bitget import get_ticker
 
 DAILY_BRIEF_TEMPLATE = """🧠 [CryptoWatch] Daily Market Brief
 📅 {date} — Before U.S. Market Open
@@ -52,80 +53,197 @@ log = logging.getLogger("cryptowatch_daily")
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Brussels"))
 
 
+# --------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------
 def now_tz() -> datetime:
     return datetime.now(TZ)
 
 
-def _fmt_usd(val: float | None) -> str:
+def _fmt_usd(val: Optional[float]) -> str:
     if val is None:
         return "N/A"
     return f"${val:,.0f}"
 
 
+def _fmt_pct(val: Optional[float]) -> str:
+    if val is None:
+        return "N/A"
+    return f"{val:.2f}"
+
+
+# --------------------------------------------------------------------
+# Data sources
+# --------------------------------------------------------------------
+def get_fear_greed():
+    """Fear & Greed Index from alternative.me"""
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+        r.raise_for_status()
+        data = r.json()["data"][0]
+        return int(data["value"]), data["value_classification"]
+    except Exception as e:
+        log.warning("CryptoWatch: Fear & Greed fetch failed: %s", e)
+        return None, None
+
+
+def get_crypto_changes():
+    """
+    BTC / ETH price + 24h change from CoinGecko.
+    Returns (btc_price, btc_24h, eth_price, eth_24h) in USD.
+    """
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {
+            "ids": "bitcoin,ethereum",
+            "vs_currencies": "usd",
+            "include_24hr_change": "true",
+        }
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        btc = data["bitcoin"]
+        eth = data["ethereum"]
+        return (
+            float(btc["usd"]),
+            float(btc.get("usd_24h_change", 0.0)),
+            float(eth["usd"]),
+            float(eth.get("usd_24h_change", 0.0)),
+        )
+    except Exception as e:
+        log.warning("CryptoWatch: BTC/ETH data fetch failed: %s", e)
+        return None, None, None, None
+
+
+def get_total_market_cap():
+    """
+    Total crypto market cap from CoinGecko /global.
+    Returns (market_cap_usd, pct_change_24h).
+    """
+    try:
+        url = "https://api.coingecko.com/api/v3/global"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()["data"]
+        mc = float(data["total_market_cap"]["usd"])
+        pct = float(data.get("market_cap_change_percentage_24h_usd", 0.0))
+        return mc, pct
+    except Exception as e:
+        log.warning("CryptoWatch: total market cap fetch failed: %s", e)
+        return None, None
+
+
+def get_dxy():
+    """Dollar index via Yahoo Finance chart API (DXY)."""
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/DXY"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        meta = r.json()["chart"]["result"][0]["meta"]
+        price = float(meta["regularMarketPrice"])
+        change_pct = float(meta.get("regularMarketChangePercent", 0.0))
+        return price, change_pct
+    except Exception as e:
+        log.warning("CryptoWatch: DXY fetch failed: %s", e)
+        return None, None
+
+
+def get_spx_futures():
+    """S&P 500 futures via Yahoo Finance chart API (ES=F)."""
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/ES=F"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        meta = r.json()["chart"]["result"][0]["meta"]
+        price = float(meta["regularMarketPrice"])
+        change_pct = float(meta.get("regularMarketChangePercent", 0.0))
+        return price, change_pct
+    except Exception as e:
+        log.warning("CryptoWatch: SPX futures fetch failed: %s", e)
+        return None, None
+
+
+# --------------------------------------------------------------------
+# Build metrics (single place)
+# --------------------------------------------------------------------
 def fetch_daily_metrics() -> dict:
     """
-    Daily metrics for CryptoWatch.
-    - BTC / ETH prices from Bitget (same symbols as FedWatch).
-    - Other fields currently static placeholders (can be wired later).
+    Collects all data needed for the daily brief.
+    Falls back gracefully if any source fails.
     """
-    btc_raw = None
-    eth_raw = None
 
-    btc_sym = os.getenv("FED_REACT_BTC_SYMBOL", "BTCUSDT_UMCBL")
-    eth_sym = os.getenv("FED_REACT_ETH_SYMBOL", "ETHUSDT_UMCBL")
+    # Fear & Greed
+    fg_value, fg_label = get_fear_greed()
+    if fg_value is None:
+        fg_value_display = "N/A"
+        fg_label_display = "Unknown"
+    else:
+        fg_value_display = fg_value
+        fg_label_display = fg_label
 
-    try:
-        btc_raw = get_ticker(btc_sym)
-    except Exception as e:
-        log.warning("CryptoWatch: failed to fetch BTC price: %s", e)
+    # BTC / ETH
+    btc_usd, btc_24h, eth_usd, eth_24h = get_crypto_changes()
 
-    try:
-        eth_raw = get_ticker(eth_sym)
-    except Exception as e:
-        log.warning("CryptoWatch: failed to fetch ETH price: %s", e)
+    # Total Market Cap
+    total_mc, total_mc_pct = get_total_market_cap()
 
-    btc_price = _fmt_usd(float(btc_raw)) if btc_raw is not None else "N/A"
-    eth_price = _fmt_usd(float(eth_raw)) if eth_raw is not None else "N/A"
+    # DXY
+    dxy_val, dxy_pct = get_dxy()
 
-    # NOTE: 24h % changes, total MC, DXY, SPX, etc. are still placeholders for now.
-    return {
-        "sentiment": "Bearish / Cautious",
-        "fg_value": 20,
-        "fg_label": "Extreme Fear",
-        "overnight_tone": "Weak bounce attempts sold into; risk-off tone persists.",
+    # S&P futures
+    spx_val, spx_pct = get_spx_futures()
 
-        "btc_price": btc_price,
-        "btc_24h": -1.8,
-        "eth_price": eth_price,
-        "eth_24h": -2.3,
-        "total_mc": "$3.05T",
-        "total_mc_24h": -1.9,
+    # High-level sentiment heuristic
+    if isinstance(fg_value, int) and fg_value < 30:
+        sentiment = "Bearish / Cautious"
+    elif isinstance(fg_value, int) and fg_value > 60:
+        sentiment = "Bullish / Risk-on"
+    else:
+        sentiment = "Neutral / Two-sided flow"
 
+    overnight_tone = "Weak bounce attempts sold into; risk-off tone persists."
+
+    metrics = {
+        "sentiment": sentiment,
+        "fg_value": fg_value_display,
+        "fg_label": fg_label_display,
+        "overnight_tone": overnight_tone,
+        "btc_price": _fmt_usd(btc_usd),
+        "btc_24h": _fmt_pct(btc_24h),
+        "eth_price": _fmt_usd(eth_usd),
+        "eth_24h": _fmt_pct(eth_24h),
+        "total_mc": (
+            f"${total_mc/1e12:.2f}T" if isinstance(total_mc, (int, float)) else "N/A"
+        ),
+        "total_mc_24h": _fmt_pct(total_mc_pct),
+        # Still mostly static for now – you can later wire real derivatives feeds here
         "funding_rate": "Slightly negative (favoring shorts)",
         "oi_change_24h": -2.7,
         "liq_long": "$210M",
         "liq_short": "$85M",
-
         "us_macro": "Cautious ahead of U.S. data and Fed speakers.",
-        "dxy_value": "104.8",
-        "dxy_change_24h": 0.3,
-        "spx_fut": "4,950",
-        "spx_fut_pct": -0.4,
+        "dxy_value": dxy_val if dxy_val is not None else "N/A",
+        "dxy_change_24h": _fmt_pct(dxy_pct),
+        "spx_fut": f"{spx_val:,.0f}" if spx_val is not None else "N/A",
+        "spx_fut_pct": _fmt_pct(spx_pct),
         "macro_event": "Key U.S. data + Fed commentary on rates/inflation.",
-
-        "reg_or_news_1": "Market watching ongoing exchange and stablecoin oversight discussions.",
-        "reg_or_news_2": "Selective headlines around DeFi and offshore venues add to caution.",
-
+        "reg_or_news_1": "Watching exchange + stablecoin oversight developments.",
+        "reg_or_news_2": "Some pressure around DeFi and offshore venues.",
         "bias": "Bearish bias unless BTC reclaims key resistance.",
         "btc_key_level": "$90,000",
     }
 
+    return metrics
 
+
+# --------------------------------------------------------------------
+# AI analysis
+# --------------------------------------------------------------------
 def generate_ai_comment(metrics: dict) -> str:
     """
-    Use an LLM (OpenAI) to generate a short trader-focused analysis
-    based on today's metrics.
+    Use OpenAI to generate a short trader-focused daily market take.
     """
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         log.warning("CryptoWatch: OPENAI_API_KEY not set, skipping AI analysis.")
@@ -135,7 +253,6 @@ def generate_ai_comment(metrics: dict) -> str:
         client = OpenAI(api_key=api_key)
         model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
-        # Build a compact, structured summary for the model
         data_snippet = (
             f"Date: {datetime.utcnow().date().isoformat()}\n"
             f"Sentiment: {metrics['sentiment']}\n"
@@ -152,13 +269,13 @@ def generate_ai_comment(metrics: dict) -> str:
             f"Key event: {metrics['macro_event']}\n"
         )
 
-        prompt_system = (
+        system_msg = (
             "You are a professional crypto and macro trader. "
             "You write short, high-signal market briefs for other traders. "
-            "Be concise, actionable and avoid any financial advice language."
+            "Be concise, actionable, and avoid explicit financial advice."
         )
 
-        prompt_user = (
+        user_msg = (
             "Using the data below, write a 3–6 sentence market take for crypto traders "
             "before the U.S. cash session. Discuss:\n"
             "- overall risk mood (risk-on/off)\n"
@@ -172,8 +289,8 @@ def generate_ai_comment(metrics: dict) -> str:
         resp = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": prompt_system},
-                {"role": "user", "content": prompt_user},
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
             ],
             temperature=0.7,
             max_tokens=400,
@@ -186,6 +303,9 @@ def generate_ai_comment(metrics: dict) -> str:
         return "AI analysis temporarily unavailable."
 
 
+# --------------------------------------------------------------------
+# Message builder + entrypoint
+# --------------------------------------------------------------------
 def build_message() -> str:
     now = now_tz()
     metrics = fetch_daily_metrics()
@@ -205,3 +325,7 @@ def main() -> None:
     msg = build_message()
     send_text(msg)
     log.info("CryptoWatch daily brief sent.")
+
+
+if __name__ == "__main__":
+    main()
