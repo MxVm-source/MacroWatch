@@ -9,8 +9,11 @@ from bot.modules import trumpwatch, fedwatch, cryptowatch, cryptowatch_daily
 
 
 def boot_banner():
-    send_text("✅ MacroWatch online — 🍊 TrumpWatch | 🏦 FedWatch | 📊 CryptoWatch")
-
+    send_text(
+    "✅ MacroWatch rebooted\n"
+    "All systems live: 🏦 FedWatch | 🍊 TrumpWatch | 📊 CryptoWatch\n"
+    "If the market nukes, don’t blame us — blame your leverage."
+)
 
 def start_scheduler():
     """Start jobs for TrumpWatch mock, FedWatch loop, and CryptoWatch."""
