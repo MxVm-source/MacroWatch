@@ -10,6 +10,7 @@ import requests
 from openai import OpenAI
 
 from bot.utils import send_text
+from bot.datafeed_bitget import get_ticker
 
 DAILY_BRIEF_TEMPLATE = """🧠 [CryptoWatch] Daily Market Brief
 📅 {date} — Before U.S. Market Open
@@ -89,9 +90,13 @@ def get_fear_greed():
 
 def get_crypto_changes():
     """
-    BTC / ETH price + 24h change from CoinGecko.
+    BTC / ETH price + 24h change.
+
+    Primary source: CoinGecko
+    Fallback: Bitget ticker (price only, no 24h change)
     Returns (btc_price, btc_24h, eth_price, eth_24h) in USD.
     """
+    # --- Primary: CoinGecko ---
     try:
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {
@@ -111,7 +116,22 @@ def get_crypto_changes():
             float(eth.get("usd_24h_change", 0.0)),
         )
     except Exception as e:
-        log.warning("CryptoWatch: BTC/ETH data fetch failed: %s", e)
+        log.warning("CryptoWatch: CoinGecko BTC/ETH fetch failed, trying Bitget fallback: %s", e)
+
+    # --- Fallback: Bitget (price only, no % change) ---
+    try:
+        btc_sym = os.getenv("FED_REACT_BTC_SYMBOL", "BTCUSDT_UMCBL")
+        eth_sym = os.getenv("FED_REACT_ETH_SYMBOL", "ETHUSDT_UMCBL")
+
+        btc_raw = get_ticker(btc_sym)
+        eth_raw = get_ticker(eth_sym)
+
+        btc_price = float(btc_raw) if btc_raw is not None else None
+        eth_price = float(eth_raw) if eth_raw is not None else None
+
+        return btc_price, None, eth_price, None
+    except Exception as e:
+        log.warning("CryptoWatch: Bitget BTC/ETH fallback failed: %s", e)
         return None, None, None, None
 
 
@@ -133,33 +153,59 @@ def get_total_market_cap():
         return None, None
 
 
-def get_dxy():
-    """Dollar index via Yahoo Finance chart API (DXY)."""
+def _fetch_stooq_csv(symbol: str) -> Optional[str]:
+    """
+    Fetch latest quote row from Stooq CSV.
+    Example URL: https://stooq.com/q/l/?s=^dxy&i=d
+    """
     try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/DXY"
+        url = f"https://stooq.com/q/l/?s={symbol}&i=d"
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        meta = r.json()["chart"]["result"][0]["meta"]
-        price = float(meta["regularMarketPrice"])
-        change_pct = float(meta.get("regularMarketChangePercent", 0.0))
-        return price, change_pct
+        lines = r.text.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        return lines[1]  # header is line 0, data is line 1
     except Exception as e:
-        log.warning("CryptoWatch: DXY fetch failed: %s", e)
+        log.warning("CryptoWatch: Stooq fetch failed for %s: %s", symbol, e)
+        return None
+
+
+def get_dxy():
+    """
+    Dollar index via Stooq (^dxy).
+    Returns (last_price, change_pct or None).
+    We only have last close here, so change_pct = None => N/A.
+    """
+    row = _fetch_stooq_csv("^dxy")
+    if not row:
+        return None, None
+    # Format: SYMBOL,DATE,TIME,OPEN,HIGH,LOW,CLOSE,VOLUME
+    parts = row.split(",")
+    if len(parts) < 7:
+        return None, None
+    try:
+        close = float(parts[6])
+        return close, None
+    except Exception:
         return None, None
 
 
 def get_spx_futures():
-    """S&P 500 futures via Yahoo Finance chart API (ES=F)."""
+    """
+    S&P 500 futures via Stooq (es.f).
+    Returns (last_price, change_pct or None).
+    """
+    row = _fetch_stooq_csv("es.f")
+    if not row:
+        return None, None
+    parts = row.split(",")
+    if len(parts) < 7:
+        return None, None
     try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/ES=F"
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        meta = r.json()["chart"]["result"][0]["meta"]
-        price = float(meta["regularMarketPrice"])
-        change_pct = float(meta.get("regularMarketChangePercent", 0.0))
-        return price, change_pct
-    except Exception as e:
-        log.warning("CryptoWatch: SPX futures fetch failed: %s", e)
+        close = float(parts[6])
+        return close, None
+    except Exception:
         return None, None
 
 
@@ -237,102 +283,4 @@ def fetch_daily_metrics() -> dict:
 
 
 # --------------------------------------------------------------------
-# AI analysis – Level 1 Degen Style
-# --------------------------------------------------------------------
-def generate_ai_comment(metrics: dict) -> str:
-    """
-    Use OpenAI to generate a short trader-focused daily market take,
-    with Level 1 degen tone.
-    """
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        log.warning("CryptoWatch: OPENAI_API_KEY not set, skipping AI analysis.")
-        return "AI analysis disabled (no API key configured)."
-
-    try:
-        client = OpenAI(api_key=api_key)
-        model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-
-        data_snippet = (
-            f"Date: {datetime.utcnow().date().isoformat()}\n"
-            f"Sentiment: {metrics['sentiment']}\n"
-            f"Fear & Greed: {metrics['fg_value']} ({metrics['fg_label']})\n"
-            f"BTC: {metrics['btc_price']} ({metrics['btc_24h']}% / 24h)\n"
-            f"ETH: {metrics['eth_price']} ({metrics['eth_24h']}% / 24h)\n"
-            f"Total Market Cap: {metrics['total_mc']} ({metrics['total_mc_24h']}%)\n"
-            f"Funding: {metrics['funding_rate']}\n"
-            f"Open Interest 24h: {metrics['oi_change_24h']}%\n"
-            f"Liquidations 12h: Longs {metrics['liq_long']} / Shorts {metrics['liq_short']}\n"
-            f"Macro: {metrics['us_macro']}\n"
-            f"DXY: {metrics['dxy_value']} ({metrics['dxy_change_24h']}%)\n"
-            f"S&P Futures: {metrics['spx_fut']} ({metrics['spx_fut_pct']}%)\n"
-            f"Key event: {metrics['macro_event']}\n"
-        )
-
-        system_msg = (
-            "You are a professional crypto and macro trader with a light degen personality. "
-            "Your tone is sharp, humorous, slightly sarcastic, but still intelligent and high-signal. "
-            "You do NOT give financial advice. "
-            "You write concise, trader-focused market takes with subtle degen flavor, "
-            "but NOT full chaos, not memes, not unhinged degen energy. "
-            "Clear, witty, slightly cynical, but accurate."
-        )
-
-        user_msg = (
-            "Using the data below, write a 3–6 sentence daily market take "
-            "for crypto traders before the U.S. cash session. Tone: Level 1 degen "
-            "(smart, slightly sarcastic, humorous, trader-to-trader honesty). "
-            "Focus on:\n"
-            "- overall risk mood (risk-on/off)\n"
-            "- BTC/ETH posture\n"
-            "- macro influence (DXY, equities, sentiment)\n"
-            "- what type of day to expect (chop, trap moves, squeezes)\n\n"
-            "NO emojis, no memes, no unhinged degen energy. "
-            "Just clean, witty, high-signal trader commentary.\n\n"
-            f"DATA:\n{data_snippet}"
-        )
-
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.7,
-            max_tokens=400,
-        )
-
-        ai_text = resp.choices[0].message.content.strip()
-        return ai_text or "No AI analysis generated."
-    except Exception as e:
-        log.error("CryptoWatch: AI generation failed: %s", e)
-        return "AI analysis temporarily unavailable."
-
-
-# --------------------------------------------------------------------
-# Message builder + entrypoint
-# --------------------------------------------------------------------
-def build_message() -> str:
-    now = now_tz()
-    metrics = fetch_daily_metrics()
-    metrics["ai_comment"] = generate_ai_comment(metrics)
-
-    return DAILY_BRIEF_TEMPLATE.format(
-        date=now.date().isoformat(),
-        **metrics,
-    )
-
-
-def main() -> None:
-    if os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() not in ("1", "true", "yes", "on"):
-        log.info("CryptoWatch daily disabled via ENABLE_CRYPTOWATCH_DAILY.")
-        return
-
-    msg = build_message()
-    send_text(msg)
-    log.info("CryptoWatch daily brief sent.")
-
-
-if __name__ == "__main__":
-    main()
+# AI analysis –
