@@ -237,11 +237,12 @@ def fetch_daily_metrics() -> dict:
 
 
 # --------------------------------------------------------------------
-# AI analysis
+# AI analysis – Level 1 Degen Style
 # --------------------------------------------------------------------
 def generate_ai_comment(metrics: dict) -> str:
     """
-    Use OpenAI to generate a short trader-focused daily market take.
+    Use OpenAI to generate a short trader-focused daily market take,
+    with Level 1 degen tone.
     """
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -270,19 +271,25 @@ def generate_ai_comment(metrics: dict) -> str:
         )
 
         system_msg = (
-            "You are a professional crypto and macro trader. "
-            "You write short, high-signal market briefs for other traders. "
-            "Be concise, actionable, and avoid explicit financial advice."
+            "You are a professional crypto and macro trader with a light degen personality. "
+            "Your tone is sharp, humorous, slightly sarcastic, but still intelligent and high-signal. "
+            "You do NOT give financial advice. "
+            "You write concise, trader-focused market takes with subtle degen flavor, "
+            "but NOT full chaos, not memes, not unhinged degen energy. "
+            "Clear, witty, slightly cynical, but accurate."
         )
 
         user_msg = (
-            "Using the data below, write a 3–6 sentence market take for crypto traders "
-            "before the U.S. cash session. Discuss:\n"
+            "Using the data below, write a 3–6 sentence daily market take "
+            "for crypto traders before the U.S. cash session. Tone: Level 1 degen "
+            "(smart, slightly sarcastic, humorous, trader-to-trader honesty). "
+            "Focus on:\n"
             "- overall risk mood (risk-on/off)\n"
-            "- BTC/ETH context\n"
-            "- impact of macro & dollar\n"
-            "- what kind of day to expect (choppy, trending, squeeze risk, etc.)\n\n"
-            "Keep it tight, no emojis, no disclaimers.\n\n"
+            "- BTC/ETH posture\n"
+            "- macro influence (DXY, equities, sentiment)\n"
+            "- what type of day to expect (chop, trap moves, squeezes)\n\n"
+            "NO emojis, no memes, no unhinged degen energy. "
+            "Just clean, witty, high-signal trader commentary.\n\n"
             f"DATA:\n{data_snippet}"
         )
 
