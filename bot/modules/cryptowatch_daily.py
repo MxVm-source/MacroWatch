@@ -11,6 +11,7 @@ from openai import OpenAI
 
 from bot.utils import send_text
 from bot.datafeed_bitget import get_ticker
+from bot.macro_cache import get_snapshot
 
 DAILY_BRIEF_TEMPLATE = """🧠 [CryptoWatch] Daily Market Brief
 📅 {date} — Before U.S. Market Open
@@ -74,7 +75,7 @@ def _fmt_pct(val: Optional[float]) -> str:
 
 
 # --------------------------------------------------------------------
-# Data sources (only stable ones)
+# Data sources (stable only)
 # --------------------------------------------------------------------
 def get_fear_greed():
     """Fear & Greed Index from alternative.me (single lightweight call)."""
@@ -90,9 +91,8 @@ def get_fear_greed():
 
 def get_btc_eth_from_bitget():
     """
-    Use your existing Bitget datafeed for BTC/ETH prices.
-    Only last price, no 24h change available from get_ticker,
-    so we treat change as 0.0 for now.
+    Use existing Bitget datafeed for BTC/ETH prices.
+    get_ticker returns last price; no 24h % from this helper yet.
     """
     btc_price = None
     eth_price = None
@@ -114,7 +114,7 @@ def get_btc_eth_from_bitget():
     except Exception as e:
         log.warning("CryptoWatch: ETH Bitget fetch failed: %s", e)
 
-    # We don't have 24h change from this helper yet; treat as flat (0.00)
+    # 24h % change not available here yet; treat as flat 0.0 for now.
     return btc_price, 0.0, eth_price, 0.0
 
 
@@ -123,11 +123,10 @@ def get_btc_eth_from_bitget():
 # --------------------------------------------------------------------
 def fetch_daily_metrics() -> dict:
     """
-    Collects all data needed for the daily brief using only
-    stable, low-rate-limit sources:
+    Collect all data needed for the daily brief using:
     - Bitget for BTC/ETH
     - Fear & Greed from alternative.me
-    Other macro fields remain static for now to avoid API spam.
+    - Macro snapshot from macro_cache (B+1 mode = None → N/A)
     """
 
     # Fear & Greed
@@ -142,7 +141,16 @@ def fetch_daily_metrics() -> dict:
     # BTC / ETH from Bitget
     btc_usd, btc_24h, eth_usd, eth_24h = get_btc_eth_from_bitget()
 
-    # Simple sentiment heuristic based on F&G
+    # Macro snapshot (currently no external APIs, B+1 mode)
+    macro = get_snapshot(force=False)
+    total_mc = macro.get("total_mc")
+    total_mc_24h = macro.get("total_mc_24h")
+    dxy_val = macro.get("dxy")
+    dxy_pct = macro.get("dxy_24h")
+    spx_val = macro.get("spx")
+    spx_pct = macro.get("spx_24h")
+
+    # Simple sentiment heuristic based on Fear & Greed
     if isinstance(fg_value, int) and fg_value < 30:
         sentiment = "Bearish / Cautious"
     elif isinstance(fg_value, int) and fg_value > 60:
@@ -157,29 +165,29 @@ def fetch_daily_metrics() -> dict:
         "fg_value": fg_value_display,
         "fg_label": fg_label_display,
         "overnight_tone": overnight_tone,
+
         "btc_price": _fmt_usd(btc_usd),
         "btc_24h": _fmt_pct(btc_24h),
         "eth_price": _fmt_usd(eth_usd),
         "eth_24h": _fmt_pct(eth_24h),
 
-        # To avoid more APIs, keep total MC static/placeholder for now
-        "total_mc": "N/A",
-        "total_mc_24h": "N/A",
+        "total_mc": (
+            f"${total_mc/1e12:.2f}T" if isinstance(total_mc, (int, float)) else "N/A"
+        ),
+        "total_mc_24h": _fmt_pct(total_mc_24h) if isinstance(total_mc_24h, (int, float)) else "N/A",
 
-        # Futures / derivatives still placeholders
         "funding_rate": "Slightly negative (favoring shorts)",
         "oi_change_24h": -2.7,
         "liq_long": "$210M",
         "liq_short": "$85M",
 
-        # Macro snapshot mostly static for now
         "us_macro": "Cautious ahead of U.S. data and Fed speakers.",
-        "dxy_value": "N/A",
-        "dxy_change_24h": "N/A",
-        "spx_fut": "N/A",
-        "spx_fut_pct": "N/A",
-        "macro_event": "Key U.S. data + Fed commentary on rates/inflation.",
+        "dxy_value": dxy_val if dxy_val is not None else "N/A",
+        "dxy_change_24h": _fmt_pct(dxy_pct) if isinstance(dxy_pct, (int, float)) else "N/A",
+        "spx_fut": f"{spx_val:,.0f}" if isinstance(spx_val, (int, float)) else "N/A",
+        "spx_fut_pct": _fmt_pct(spx_pct) if isinstance(spx_pct, (int, float)) else "N/A",
 
+        "macro_event": "Key U.S. data + Fed commentary on rates/inflation.",
         "reg_or_news_1": "Watching exchange + stablecoin oversight developments.",
         "reg_or_news_2": "Some pressure around DeFi and offshore venues.",
 
@@ -196,7 +204,7 @@ def fetch_daily_metrics() -> dict:
 def generate_ai_comment(metrics: dict) -> str:
     """
     Use OpenAI to generate a short trader-focused daily market take.
-    Works even with partial data; unknown fields will show as N/A.
+    Works even with partial data; unknown fields show as N/A.
     """
 
     api_key = os.getenv("OPENAI_API_KEY")
