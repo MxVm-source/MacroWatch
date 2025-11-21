@@ -21,9 +21,9 @@ Fear & Greed Index: {fg_value}/100 → {fg_label}
 Overnight Tone: {overnight_tone}
 
 💰 Market Snapshot
-• BTC: {btc_price} ({btc_24h}% / 24h)
-• ETH: {eth_price} ({eth_24h}% / 24h)
-• TOTAL MC: {total_mc} ({total_mc_24h}%)
+• BTC: {btc_price}
+• ETH: {eth_price}
+• TOTAL MC: {total_mc_block}
 
 • Futures (BTC):
   - Funding: {funding_rate}
@@ -32,8 +32,7 @@ Overnight Tone: {overnight_tone}
 
 🌎 Macro Snapshot
 • U.S. mood: {us_macro}
-• Dollar Index (DXY): {dxy_value} ({dxy_change_24h}%)
-• S&P Futures: {spx_fut} ({spx_fut_pct}%)
+{macro_block}
 • Key event today: {macro_event}
 
 ⚖️ Regulation & News
@@ -114,8 +113,8 @@ def get_btc_eth_from_bitget():
     except Exception as e:
         log.warning("CryptoWatch: ETH Bitget fetch failed: %s", e)
 
-    # 24h % change not available here yet; treat as flat 0.0 for now.
-    return btc_price, 0.0, eth_price, 0.0
+    # 24h % change not available here yet; keep numeric for AI only if needed.
+    return btc_price, None, eth_price, None
 
 
 # --------------------------------------------------------------------
@@ -167,14 +166,13 @@ def fetch_daily_metrics() -> dict:
         "overnight_tone": overnight_tone,
 
         "btc_price": _fmt_usd(btc_usd),
-        "btc_24h": _fmt_pct(btc_24h),
+        "btc_24h": btc_24h,  # not shown in template for now
         "eth_price": _fmt_usd(eth_usd),
-        "eth_24h": _fmt_pct(eth_24h),
+        "eth_24h": eth_24h,  # not shown in template for now
 
-        "total_mc": (
-            f"${total_mc/1e12:.2f}T" if isinstance(total_mc, (int, float)) else "N/A"
-        ),
-        "total_mc_24h": _fmt_pct(total_mc_24h) if isinstance(total_mc_24h, (int, float)) else "N/A",
+        # Keep raw-ish total MC info; formatting happens in build_message
+        "total_mc": total_mc,
+        "total_mc_24h": total_mc_24h,
 
         "funding_rate": "Slightly negative (favoring shorts)",
         "oi_change_24h": -2.7,
@@ -182,10 +180,10 @@ def fetch_daily_metrics() -> dict:
         "liq_short": "$85M",
 
         "us_macro": "Cautious ahead of U.S. data and Fed speakers.",
-        "dxy_value": dxy_val if dxy_val is not None else "N/A",
-        "dxy_change_24h": _fmt_pct(dxy_pct) if isinstance(dxy_pct, (int, float)) else "N/A",
-        "spx_fut": f"{spx_val:,.0f}" if isinstance(spx_val, (int, float)) else "N/A",
-        "spx_fut_pct": _fmt_pct(spx_pct) if isinstance(spx_pct, (int, float)) else "N/A",
+        "dxy_value": dxy_val,
+        "dxy_change_24h": dxy_pct,
+        "spx_fut": spx_val,
+        "spx_fut_pct": spx_pct,
 
         "macro_event": "Key U.S. data + Fed commentary on rates/inflation.",
         "reg_or_news_1": "Watching exchange + stablecoin oversight developments.",
@@ -216,19 +214,42 @@ def generate_ai_comment(metrics: dict) -> str:
         client = OpenAI(api_key=api_key)
         model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
+        btc_24h_str = _fmt_pct(metrics.get("btc_24h"))
+        eth_24h_str = _fmt_pct(metrics.get("eth_24h"))
+
+        total_mc_val = metrics.get("total_mc")
+        total_mc_24h = metrics.get("total_mc_24h")
+
+        if isinstance(total_mc_val, (int, float)):
+            total_mc_str = f"${total_mc_val/1e12:.2f}T"
+        else:
+            total_mc_str = "N/A"
+
+        total_mc_24h_str = _fmt_pct(total_mc_24h) if isinstance(total_mc_24h, (int, float)) else "N/A"
+
+        dxy_val = metrics.get("dxy_value")
+        dxy_pct = metrics.get("dxy_change_24h")
+        dxy_val_str = str(dxy_val) if isinstance(dxy_val, (int, float)) else "N/A"
+        dxy_pct_str = _fmt_pct(dxy_pct) if isinstance(dxy_pct, (int, float)) else "N/A"
+
+        spx_val = metrics.get("spx_fut")
+        spx_pct = metrics.get("spx_fut_pct")
+        spx_val_str = f"{spx_val:,.0f}" if isinstance(spx_val, (int, float)) else "N/A"
+        spx_pct_str = _fmt_pct(spx_pct) if isinstance(spx_pct, (int, float)) else "N/A"
+
         data_snippet = (
             f"Date: {datetime.utcnow().date().isoformat()}\n"
             f"Sentiment: {metrics['sentiment']}\n"
             f"Fear & Greed: {metrics['fg_value']} ({metrics['fg_label']})\n"
-            f"BTC: {metrics['btc_price']} ({metrics['btc_24h']}% / 24h)\n"
-            f"ETH: {metrics['eth_price']} ({metrics['eth_24h']}% / 24h)\n"
-            f"Total Market Cap: {metrics['total_mc']} ({metrics['total_mc_24h']}%)\n"
+            f"BTC: {metrics['btc_price']} ({btc_24h_str}% / 24h)\n"
+            f"ETH: {metrics['eth_price']} ({eth_24h_str}% / 24h)\n"
+            f"Total Market Cap: {total_mc_str} ({total_mc_24h_str}%)\n"
             f"Funding: {metrics['funding_rate']}\n"
             f"Open Interest 24h: {metrics['oi_change_24h']}%\n"
             f"Liquidations 12h: Longs {metrics['liq_long']} / Shorts {metrics['liq_short']}\n"
             f"Macro: {metrics['us_macro']}\n"
-            f"DXY: {metrics['dxy_value']} ({metrics['dxy_change_24h']}%)\n"
-            f"S&P Futures: {metrics['spx_fut']} ({metrics['spx_fut_pct']}%)\n"
+            f"DXY: {dxy_val_str} ({dxy_pct_str}%)\n"
+            f"S&P Futures: {spx_val_str} ({spx_pct_str}%)\n"
             f"Key event: {metrics['macro_event']}\n"
         )
 
@@ -272,6 +293,39 @@ def generate_ai_comment(metrics: dict) -> str:
 def build_message() -> str:
     now = now_tz()
     metrics = fetch_daily_metrics()
+
+    # Build TOTAL MC display block
+    total_mc = metrics.get("total_mc")
+    total_mc_24h = metrics.get("total_mc_24h")
+    if isinstance(total_mc, (int, float)):
+        tm_str = f"${total_mc/1e12:.2f}T"
+        tm_pct = _fmt_pct(total_mc_24h) if isinstance(total_mc_24h, (int, float)) else "N/A"
+        metrics["total_mc_block"] = f"{tm_str} ({tm_pct}%)"
+    else:
+        metrics["total_mc_block"] = "Data limited today"
+
+    # Build macro block (DXY / SPX), hide N/A rows
+    macro_lines = []
+    dxy_val = metrics.get("dxy_value")
+    dxy_pct = metrics.get("dxy_change_24h")
+    if isinstance(dxy_val, (int, float)):
+        macro_lines.append(
+            f"• Dollar Index (DXY): {dxy_val} ({_fmt_pct(dxy_pct)}%)"
+        )
+
+    spx_val = metrics.get("spx_fut")
+    spx_pct = metrics.get("spx_fut_pct")
+    if isinstance(spx_val, (int, float)):
+        macro_lines.append(
+            f"• S&P Futures: {spx_val:,.0f} ({_fmt_pct(spx_pct)}%)"
+        )
+
+    if macro_lines:
+        metrics["macro_block"] = "\n".join(macro_lines)
+    else:
+        metrics["macro_block"] = "• Macro data limited today — see AI take for context."
+
+    # AI comment
     metrics["ai_comment"] = generate_ai_comment(metrics)
 
     return DAILY_BRIEF_TEMPLATE.format(
