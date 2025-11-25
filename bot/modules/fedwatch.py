@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from bot.utils import send_text
+from bot.datafeed_bitget import get_ticker
+
 
 
 # ---- HTML Source (FOMC Calendar) ----
