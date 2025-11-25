@@ -58,6 +58,15 @@ def start_scheduler():
             replace_existing=True,
         )
 
+     # 📘 Bitget Trade Watcher – detects your manual trades on Bitget
+    if os.getenv("BITGET_ENABLED", "0") == "1":
+        from bot.modules.datafeed_bitget import start_bitget_watcher
+        threading.Thread(
+            target=start_bitget_watcher,
+            args=(send_text,),   # your existing Telegram sender 
+            daemon=True
+        ).start()
+
     sched.start()
     return sched
 
