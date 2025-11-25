@@ -1,10 +1,8 @@
 import os
 import threading
-import time
-from bot.modules.datafeed_bitget import start_bitget_watcher
+import timefrom bot.modules.datafeed_bitget import start_bitget_watcher  # <-- line 4
 
 from apscheduler.schedulers.background import BackgroundScheduler
-
 from bot.utils import send_text, get_updates
 from bot.modules import trumpwatch, fedwatch, cryptowatch, cryptowatch_daily
 # trumpwatch_live imported in __main__
