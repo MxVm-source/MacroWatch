@@ -134,7 +134,6 @@ def _fetch_pending_tp_orders():
     tps: list[float] = []
 
     for o in entrusted:
-        # Bitget uses stopSurplusTriggerPrice for TP
         tp_price = o.get("stopSurplusTriggerPrice") or ""
         if not tp_price:
             continue
@@ -166,6 +165,7 @@ def build_futures_position_message() -> str:
         side = "LONG"
     elif side_raw == "short":
         side = "SHORT"
+        # 🔥 Everything below is unchanged
     else:
         side = side_raw.upper() or "N/A"
 
@@ -178,9 +178,9 @@ def build_futures_position_message() -> str:
     pos_mode = pos.get("posMode") or ""
 
     tp_prices = _fetch_pending_tp_orders()
-    # LONG: sort low → high, SHORT: high → low
     reverse = True if side == "SHORT" else False
     tp_prices_sorted = sorted(tp_prices, reverse=reverse)
+
     tp_lines = []
     for idx, p in enumerate(tp_prices_sorted[:3], start=1):
         tp_lines.append(f"TP{idx}: {p}")
@@ -200,7 +200,7 @@ def build_futures_position_message() -> str:
         lines.append(f"Position Mode: {pos_mode}")
 
     if tp_lines:
-        lines.append("")  # blank line before TP block
+        lines.append("")
         lines.extend(tp_lines)
 
     if liq and liq != "0":
@@ -215,8 +215,8 @@ def build_futures_position_message() -> str:
 
 def get_position_report_safe() -> str:
     """
-    Wrapper you call from MacroWatch.
-    Never crashes the bot – returns a friendly error instead.
+    Wrapper used by MacroWatch UI (/position command).
+    Never crashes the bot.
     """
     try:
         return build_futures_position_message()
