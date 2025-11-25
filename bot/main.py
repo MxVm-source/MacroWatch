@@ -12,8 +12,7 @@ from bot.datafeed_bitget import get_position_report_safe
 def boot_banner():
     send_text(
     "✅ MacroWatch rebooted\n"
-    "All systems live: 🏦 FedWatch | 🍊 TrumpWatch | 📊 CryptoWatch\n"
-    "If the market nukes, don’t blame us — blame your leverage."
+    "All systems live: 📈 TradeWatch | 🏦 FedWatch | 🍊 TrumpWatch | 📊 CryptoWatch\n"
 )
 
 def start_scheduler():
