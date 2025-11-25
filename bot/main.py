@@ -100,6 +100,10 @@ def command_loop():
 
             elif text.startswith("/cw_weekly"):
                 cryptowatch.main()
+                
+            elif "/position" in text:
+                pos_msg = get_current_position()
+                send_text(pos_msg)
 
 
 if __name__ == "__main__":
