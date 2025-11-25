@@ -5,7 +5,8 @@ import time
 from apscheduler.schedulers.background import BackgroundScheduler
 from bot.utils import send_text, get_updates
 from bot.modules import trumpwatch, fedwatch, cryptowatch, cryptowatch_daily
-from bot.modules.datafeed_bitget import get_position_report_safe
+from bot.datafeed_bitget import get_position_report_safe
+
 # trumpwatch_live imported in __main__
 
 def boot_banner():
