@@ -1,6 +1,8 @@
 import os
 import threading
 import time
+from bot.modules.datafeed_bitget import start_bitget_watcher
+
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from bot.utils import send_text, get_updates
