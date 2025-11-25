@@ -6,7 +6,6 @@ from bot.utils import send_text
 from bot.datafeed_bitget import get_ticker
 
 
-
 # ---- HTML Source (FOMC Calendar) ----
 FED_HTML_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 
@@ -49,7 +48,7 @@ def _event_id(ev) -> str:
 
 
 # -------------------------------------------------------------
-# HTML Parsing (FOMC Calendar)
+# HTML Fetch
 # -------------------------------------------------------------
 
 def _fetch_html() -> str:
@@ -62,9 +61,20 @@ def _fetch_html() -> str:
     return ""
 
 
+# -------------------------------------------------------------
+# HTML Parsing (FOMC + related events)
+# -------------------------------------------------------------
+
 def _parse_html_events(html: str):
     """
     Extract events from the FOMC HTML calendar.
+
+    We classify:
+    - FOMC Meeting
+    - FOMC Statement
+    - FOMC Press Conference
+    - FOMC Minutes
+    - Powell Testimony — Monetary Policy Report (if present in text)
     """
     events = []
     if not html:
@@ -82,7 +92,8 @@ def _parse_html_events(html: str):
     matches = pattern.findall(text)
 
     for date_str, description in matches:
-        description = description.strip().lower()
+        # Normalized lower text for classification
+        desc_lower = description.strip().lower()
         date_str = date_str.replace("–", "-")
 
         # multi-day meetings
@@ -101,27 +112,45 @@ def _parse_html_events(html: str):
         for dt_str in dates:
             try:
                 base_date = datetime.strptime(dt_str, "%B %d, %Y").replace(tzinfo=ET_TZ)
-            except:
+            except Exception:
                 continue
 
-            # classify
-            if "press conference" in description:
-                event_time = base_date.replace(hour=14, minute=30)
-                final_title = "FOMC Press Conference"
-            elif "statement" in description:
+            # ---- Classification ----
+            title = None
+            event_time = None
+            location = "Federal Reserve"
+
+            # Priority order matters; minutes/testimony must not be swallowed
+            if "minutes" in desc_lower:
+                # FOMC Minutes – usually 14:00 ET
                 event_time = base_date.replace(hour=14, minute=0)
-                final_title = "FOMC Statement"
-            elif "meeting" in description:
+                title = "FOMC Minutes"
+            elif "press conference" in desc_lower:
+                event_time = base_date.replace(hour=14, minute=30)
+                title = "FOMC Press Conference"
+            elif "statement" in desc_lower:
+                event_time = base_date.replace(hour=14, minute=0)
+                title = "FOMC Statement"
+            elif "meeting" in desc_lower:
                 event_time = base_date.replace(hour=8, minute=0)
-                final_title = "FOMC Meeting"
-            else:
+                title = "FOMC Meeting"
+            elif "monetary policy report" in desc_lower or "semiannual monetary policy report" in desc_lower:
+                # Powell Testimony — Monetary Policy Report (Humphrey-Hawkins)
+                # Time on site may differ, but we approximate 10:00 ET.
+                event_time = base_date.replace(hour=10, minute=0)
+                title = "Powell Testimony — Monetary Policy Report"
+                location = "U.S. Congress"
+
+            if not title or not event_time:
                 continue
 
-            events.append({
-                "title": final_title,
-                "start": event_time.astimezone(timezone.utc),
-                "location": "Federal Reserve"
-            })
+            events.append(
+                {
+                    "title": title,
+                    "start": event_time.astimezone(timezone.utc),
+                    "location": location,
+                }
+            )
 
     return events
 
@@ -141,14 +170,29 @@ def _build_queues(events):
 
         ev_id = _event_id(ev)
 
+        # Alerts (T-24h, T-1h, T-10m)
         for label, delta in ALERT_OFFSETS:
             when = ev["start"] - delta
             if when > now:
-                alerts.append({"when": when, "label": label, "event": ev, "event_id": ev_id})
+                alerts.append(
+                    {
+                        "when": when,
+                        "label": label,
+                        "event": ev,
+                        "event_id": ev_id,
+                    }
+                )
 
+        # Reaction at T+10m (for all supported events)
         react_when = ev["start"] + timedelta(minutes=REACTION_WINDOW_MIN)
         if react_when > now:
-            reactions.append({"when": react_when, "event": ev, "event_id": ev_id})
+            reactions.append(
+                {
+                    "when": react_when,
+                    "event": ev,
+                    "event_id": ev_id,
+                }
+            )
 
     alerts.sort(key=lambda a: a["when"])
     reactions.sort(key=lambda a: a["when"])
@@ -178,7 +222,7 @@ def refresh_calendar():
 
     events = _parse_html_events(html)
 
-    # unique
+    # unique (title + start)
     uniq = {(e["title"], e["start"]): e for e in events}
     events = sorted(uniq.values(), key=lambda e: e["start"])
 
@@ -194,13 +238,16 @@ def refresh_calendar():
 # -------------------------------------------------------------
 
 def _capture_pre_event_prices(ev_id: str):
+    """
+    Capture BTC/ETH prices 10 min BEFORE the event to compare later.
+    """
     try:
         btc = get_ticker(BTC_SYM)
         eth = get_ticker(ETH_SYM)
         if btc is None or eth is None:
             return
         STATE["pre_prices"][ev_id] = {"btc": float(btc), "eth": float(eth)}
-    except:
+    except Exception:
         return
 
 
@@ -212,7 +259,7 @@ def _reaction_for_event(ev, ev_id: str):
     try:
         btc_now = float(get_ticker(BTC_SYM))
         eth_now = float(get_ticker(ETH_SYM))
-    except:
+    except Exception:
         return
 
     btc_before = ref["btc"]
@@ -225,8 +272,10 @@ def _reaction_for_event(ev, ev_id: str):
     eth_pc = pct(eth_now, eth_before)
 
     def tag(pc):
-        if pc >= REACTION_THRESH_PC: return "🟢 Bullish"
-        if pc <= -REACTION_THRESH_PC: return "🔴 Bearish"
+        if pc >= REACTION_THRESH_PC:
+            return "🟢 Bullish"
+        if pc <= -REACTION_THRESH_PC:
+            return "🔴 Bearish"
         return "🔵 Neutral"
 
     msg = (
@@ -249,6 +298,7 @@ def schedule_loop():
     while True:
         now = datetime.now(timezone.utc)
 
+        # Periodic refresh every 30 minutes
         if time.time() - last_refresh > 1800:
             refresh_calendar()
             last_refresh = time.time()
@@ -258,11 +308,12 @@ def schedule_loop():
             nxt = STATE["alert_queue"][0]
             if now >= nxt["when"]:
                 ev = nxt["event"]
+                location = ev.get("location", "Federal Reserve")
                 send_text(
                     f"🏦 [FedWatch] Alert — {nxt['label']}\n"
                     f"🗓️ {ev['title']}\n"
                     f"🕒 {_fmt_brussels(ev['start'])}\n"
-                    f"📍 Federal Reserve"
+                    f"📍 {location}"
                 )
                 if nxt["label"] == "T-10m":
                     _capture_pre_event_prices(nxt["event_id"])
@@ -290,19 +341,20 @@ def show_next_event():
     up = [e for e in STATE["events"] if e["start"] > now]
 
     if not up:
-        send_text("🏦 [FedWatch] No upcoming FOMC events found.")
+        send_text("🏦 [FedWatch] No upcoming FOMC/Fed events found.")
         return
 
     ev = up[0]
     delta = ev["start"] - now
     hrs, rem = divmod(int(delta.total_seconds()), 3600)
     mins = rem // 60
+    location = ev.get("location", "Federal Reserve")
 
     send_text(
         f"🏦 [FedWatch] Next Event\n"
         f"🗓️ {ev['title']}\n"
         f"🕒 {_fmt_brussels(ev['start'])} (in {hrs}h {mins}m)\n"
-        f"📍 Federal Reserve"
+        f"📍 {location}"
     )
 
 
@@ -319,9 +371,9 @@ def show_diag(n: int = 5):
 
     lines = [
         "🏦 [FedWatch] Diagnostics",
-        "Source: FOMC HTML Calendar",
+        "Source: FOMC HTML Calendar (extended for minutes/testimony when present)",
         f"Status: {'OK ✅' if STATE['events'] else 'NO EVENTS ⚠️'}",
-        ""
+        "",
     ]
 
     if not upcoming:
