@@ -150,6 +150,41 @@ def _fetch_pending_tp_orders():
 
     return tps
 
+def get_ticker(symbol: str):
+    """
+    Public Bitget futures ticker helper.
+
+    Returns last price as float, or None on error.
+    Used by FedWatch to measure BTC/ETH reaction.
+    """
+    try:
+        url = f"{BITGET_BASE_URL}/api/v2/mix/market/ticker"
+        resp = requests.get(url, params={"symbol": symbol}, timeout=5)
+        data = resp.json()
+
+        if data.get("code") != "00000":
+            print("[Bitget] get_ticker error:", data)
+            return None
+
+        tick = data.get("data") or {}
+        # Some Bitget responses return a list under "data"
+        if isinstance(tick, list):
+            tick = tick[0] if tick else {}
+
+        price_str = (
+            tick.get("last") or
+            tick.get("close") or
+            tick.get("markPrice")
+        )
+
+        if price_str is None:
+            return None
+
+        return float(price_str)
+    except Exception as e:
+        print("[Bitget] get_ticker exception:", e)
+        return None
+
 
 def build_futures_position_message() -> str:
     """
