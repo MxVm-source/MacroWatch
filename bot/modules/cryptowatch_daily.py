@@ -97,31 +97,38 @@ def _extract_json_object(content: str) -> str:
 
 
 # --------------------------------------------------------------------
-# Data sources (stable only)
+# Data sources (BTC/ETH with fallback)
 # --------------------------------------------------------------------
-def get_fear_greed():
-    """Fear & Greed Index from alternative.me (single lightweight call)."""
-    try:
-        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
-        r.raise_for_status()
-        data = r.json()["data"][0]
-        return int(data["value"]), data["value_classification"]
-    except Exception as e:
-        log.warning("CryptoWatch: Fear & Greed fetch failed: %s", e)
-        return None, None
-
-
-def get_btc_eth_from_bitget():
+def _get_price_from_binance(symbol: str) -> Optional[float]:
     """
-    Use existing Bitget datafeed for BTC/ETH prices.
-    get_ticker returns last price; no 24h % from this helper yet.
+    Fallback: fetch price from Binance.
+    Expects symbols like 'BTCUSDT', 'ETHUSDT'.
+    """
+    try:
+        url = "https://api.binance.com/api/v3/ticker/price"
+        r = requests.get(url, params={"symbol": symbol}, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return float(data["price"])
+    except Exception as e:
+        log.warning("CryptoWatch: Binance price fetch failed for %s: %s", symbol, e)
+        return None
+
+
+def get_btc_eth_prices() -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """
+    Try Bitget first, then fallback to Binance for BTC/ETH.
+    Returns (btc_price, btc_24h, eth_price, eth_24h).
+    24h changes are None for now (not shown in the template).
     """
     btc_price = None
     eth_price = None
 
+    # Symbols for Bitget (derivatives)
     btc_sym = os.getenv("FED_REACT_BTC_SYMBOL", "BTCUSDT_UMCBL")
     eth_sym = os.getenv("FED_REACT_ETH_SYMBOL", "ETHUSDT_UMCBL")
 
+    # --- Try Bitget first ---
     try:
         btc_raw = get_ticker(btc_sym)
         if btc_raw is not None:
@@ -136,8 +143,36 @@ def get_btc_eth_from_bitget():
     except Exception as e:
         log.warning("CryptoWatch: ETH Bitget fetch failed: %s", e)
 
+    # --- Fallback to Binance if needed ---
+    if btc_price is None:
+        # Derive spot symbol from derivatives symbol (e.g. BTCUSDT_UMCBL -> BTCUSDT)
+        if btc_sym.endswith("_UMCBL"):
+            spot_sym = btc_sym.replace("_UMCBL", "")
+        else:
+            spot_sym = "BTCUSDT"
+        btc_price = _get_price_from_binance(spot_sym)
+
+    if eth_price is None:
+        if eth_sym.endswith("_UMCBL"):
+            spot_sym = eth_sym.replace("_UMCBL", "")
+        else:
+            spot_sym = "ETHUSDT"
+        eth_price = _get_price_from_binance(spot_sym)
+
     # 24h % change not available here yet; keep numeric for AI only if needed.
     return btc_price, None, eth_price, None
+
+
+def get_fear_greed():
+    """Fear & Greed Index from alternative.me (single lightweight call)."""
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+        r.raise_for_status()
+        data = r.json()["data"][0]
+        return int(data["value"]), data["value_classification"]
+    except Exception as e:
+        log.warning("CryptoWatch: Fear & Greed fetch failed: %s", e)
+        return None, None
 
 
 # --------------------------------------------------------------------
@@ -146,7 +181,7 @@ def get_btc_eth_from_bitget():
 def fetch_daily_metrics() -> dict:
     """
     Collect all data needed for the daily brief using:
-    - Bitget for BTC/ETH
+    - Bitget (+Binance fallback) for BTC/ETH
     - Fear & Greed from alternative.me
     - Macro snapshot from macro_cache (B+1 mode = None → N/A)
     """
@@ -160,8 +195,8 @@ def fetch_daily_metrics() -> dict:
         fg_value_display = fg_value
         fg_label_display = fg_label
 
-    # BTC / ETH from Bitget
-    btc_usd, btc_24h, eth_usd, eth_24h = get_btc_eth_from_bitget()
+    # BTC / ETH with fallbacks
+    btc_usd, btc_24h, eth_usd, eth_24h = get_btc_eth_prices()
 
     # Macro snapshot (currently no external APIs, B+1 mode)
     macro = get_snapshot(force=False)
