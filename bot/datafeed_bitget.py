@@ -2,6 +2,9 @@ import requests
 
 BITGET_BASE = "https://api.bitget.com/api/mix/v1/market/ticker"
 
+def get_current_position():
+    # calls Bitget API
+    # returns dict with entry, size, tps, sl, pnl...
 
 def get_ticker(symbol: str):
     """Return last price as float for a Bitget contract symbol, or None on error."""
