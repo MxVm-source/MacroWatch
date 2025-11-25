@@ -105,6 +105,12 @@ def command_loop():
             elif text.startswith("/position"):
                  msg = get_position_report_safe()
                  send_text(msg)
+            elif text.startswith("/tradewatch_status"):
+                try:
+                    from bot.modules.tradewatch import get_status
+                    send_text(get_status())
+                except Exception as e:
+                    send_text(f"📈 [TradeWatch] Status unavailable: {e}")
 
 
 if __name__ == "__main__":
