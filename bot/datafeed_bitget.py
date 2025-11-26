@@ -30,12 +30,14 @@ BITGET_SYMBOL = os.environ.get("BITGET_SYMBOL", "BTCUSDT")
 def iso_utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+
 def _pnl_color(pnl: float) -> str:
     if pnl > 0:
         return f"🟢 {pnl}"
     elif pnl < 0:
         return f"🔴 {pnl}"
     return f"⚪ {pnl}"
+
 
 def _signed_request(method: str, request_path: str,
                     params: dict | None = None,
@@ -89,6 +91,43 @@ def _signed_request(method: str, request_path: str,
 
     return data
 
+
+def get_ticker(symbol: str):
+    """
+    Public Bitget futures ticker helper.
+    Used by FedWatch to measure BTC/ETH reaction.
+
+    Returns last price as float, or None on error.
+    """
+    try:
+        url = f"{BITGET_BASE_URL}/api/v2/mix/market/ticker"
+        resp = requests.get(url, params={"symbol": symbol}, timeout=5)
+        data = resp.json()
+
+        if data.get("code") != "00000":
+            print("[Bitget] get_ticker error:", data)
+            return None
+
+        tick = data.get("data") or {}
+        # Sometimes Bitget returns a list
+        if isinstance(tick, list):
+            tick = tick[0] if tick else {}
+
+        price_str = (
+            tick.get("last")
+            or tick.get("close")
+            or tick.get("markPrice")
+        )
+
+        if not price_str:
+            return None
+
+        return float(price_str)
+    except Exception as e:
+        print("[Bitget] get_ticker exception:", e)
+        return None
+
+
 # ======================
 # Fetch Futures Data
 # ======================
@@ -107,6 +146,7 @@ def _fetch_current_futures_position():
     )
     data = res.get("data") or []
     return data[0] if data else None
+
 
 def _fetch_pending_tp_sl_orders():
     params = {
@@ -133,15 +173,20 @@ def _fetch_pending_tp_sl_orders():
 
         tp = o.get("stopSurplusTriggerPrice")
         if tp:
-            try: tps.append(float(tp))
-            except: pass
+            try:
+                tps.append(float(tp))
+            except:
+                pass
 
         sl = o.get("stopLossTriggerPrice")
         if sl:
-            try: sls.append(float(sl))
-            except: pass
+            try:
+                sls.append(float(sl))
+            except:
+                pass
 
     return {"tp": tps, "sl": sls}
+
 
 # ======================
 # Build Position Message
@@ -166,8 +211,8 @@ def build_futures_position_message() -> str:
     pos_mode = pos.get("posMode") or ""
 
     triggers = _fetch_pending_tp_sl_orders()
-    tp_sorted = sorted(triggers["tp"], reverse=(side=="SHORT"))
-    sl_sorted = sorted(triggers["sl"], reverse=(side=="SHORT"))
+    tp_sorted = sorted(triggers["tp"], reverse=(side == "SHORT"))
+    sl_sorted = sorted(triggers["sl"], reverse=(side == "SHORT"))
 
     lines = [
         "📘 Current Futures Position",
@@ -178,12 +223,14 @@ def build_futures_position_message() -> str:
         f"Leverage: {lev}x",
     ]
 
-    if margin_mode: lines.append(f"Margin Mode: {margin_mode}")
-    if pos_mode: lines.append(f"Position Mode: {pos_mode}")
+    if margin_mode:
+        lines.append(f"Margin Mode: {margin_mode}")
+    if pos_mode:
+        lines.append(f"Position Mode: {pos_mode}")
 
     if tp_sorted:
         lines.append("")
-        for i,p in enumerate(tp_sorted[:3],1):
+        for i, p in enumerate(tp_sorted[:3], 1):
             lines.append(f"TP{i}: {p}")
 
     if sl_sorted:
@@ -210,7 +257,8 @@ def build_futures_position_message() -> str:
         except:
             pass
 
-    if liq: lines.append(f"Liq Price: {liq}")
+    if liq:
+        lines.append(f"Liq Price: {liq}")
 
     try:
         pnl_f = float(pnl)
@@ -221,6 +269,7 @@ def build_futures_position_message() -> str:
     lines.append(f"Time (UTC): {iso_utc_now()}")
 
     return "\n".join(lines)
+
 
 def get_position_report_safe() -> str:
     try:
