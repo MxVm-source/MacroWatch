@@ -23,7 +23,13 @@ TRADEWATCH_ENABLED = os.environ.get("TRADEWATCH_ENABLED", os.environ.get("BITGET
 TRADEWATCH_POLL_INTERVAL_SEC = int(
     os.environ.get("TRADEWATCH_POLL_INTERVAL_SEC", os.environ.get("BITGET_POLL_INTERVAL_SEC", "15"))
 )
-TRADEWATCH_SYMBOL = os.environ.get("TRADEWATCH_SYMBOL", os.environ.get("BITGET_SYMBOL", ""))  # e.g. "BTCUSDT" or "" for all
+
+# Symbol for MIX futures, e.g. "BTCUSDT"
+TRADEWATCH_SYMBOL = os.environ.get("TRADEWATCH_SYMBOL", os.environ.get("BITGET_SYMBOL", ""))
+
+# For MIX futures
+TRADEWATCH_MARGIN_COIN = os.environ.get("TRADEWATCH_MARGIN_COIN", "USDT")
+TRADEWATCH_PRODUCT_TYPE = os.environ.get("TRADEWATCH_PRODUCT_TYPE", "USDT-FUTURES")
 
 # Simple internal state for /tradewatch_status
 STATE = {
@@ -46,14 +52,17 @@ def _iso_or_none(dt: datetime | None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _signed_request(method: str, request_path: str,
-                    params: dict | None = None,
-                    body: dict | None = None) -> dict:
+def _signed_request(
+    method: str,
+    request_path: str,
+    params: dict | None = None,
+    body: dict | None = None,
+) -> dict:
     """
     Bitget V2 authenticated request.
 
     Signature format:
-    timestamp + method.toUpperCase() + requestPath + "?" + query + body
+      timestamp + method.toUpperCase() + requestPath + "?" + query + body
     """
     if not (BITGET_API_KEY and BITGET_API_SECRET and BITGET_API_PASSPHRASE):
         raise RuntimeError("Bitget API credentials not set")
@@ -108,11 +117,174 @@ def _signed_request(method: str, request_path: str,
     return data
 
 
-def _fetch_spot_fills(limit: int = 50) -> list[dict]:
-    """
-    Uses Bitget Spot V2 'Get Fills' endpoint:
-    GET /api/v2/spot/trade/fills
+# ======================
+# Futures helpers (Bitget MIX)
+# ======================
 
+def _fetch_futures_position(symbol: str, margin_coin: str = "USDT") -> dict | None:
+    """
+    Get current MIX (perpetual futures) position for a symbol.
+    Endpoint (v1-style):
+        GET /api/mix/v1/position/singlePosition
+    """
+    params = {
+        "symbol": symbol,
+        "marginCoin": margin_coin,
+    }
+    data = _signed_request(
+        "GET",
+        "/api/mix/v1/position/singlePosition",
+        params=params,
+        body=None,
+    )
+    positions = data.get("data") or []
+    if not positions:
+        return None
+
+    # Hedge mode can have LONG + SHORT, pick the one with non-zero size
+    for p in positions:
+        hold_side = (p.get("holdSide") or "").lower()  # "long" / "short"
+        total = float(p.get("total", "0"))
+        if total != 0 and hold_side in {"long", "short"}:
+            return p
+
+    return None
+
+
+def _fetch_futures_plan_orders(symbol: str, product_type: str = "USDT-FUTURES") -> list[dict]:
+    """
+    Get current MIX plan orders (TP/SL etc.) for a symbol.
+    Endpoint:
+        GET /api/mix/v1/plan/currentPlan
+    """
+    params = {
+        "symbol": symbol,
+        "productType": product_type,
+        # "isPlan": "1",  # optional; leave out to get all
+    }
+    data = _signed_request(
+        "GET",
+        "/api/mix/v1/plan/currentPlan",
+        params=params,
+        body=None,
+    )
+    return data.get("data") or []
+
+
+def _decode_tp_sl_from_plans(
+    symbol: str,
+    side: str,             # "long" or "short"
+    entry_price: float,
+    plans: list[dict],
+) -> dict:
+    """
+    From current plan orders, infer SL and up to 3 TPs for the position.
+    Returns:
+        {"sl": float|None, "tps": [float, ...], "tp_sizes": [float, ...]}
+    """
+    tps: list[tuple[float, float]] = []          # (triggerPrice, size)
+    sl_candidates: list[tuple[float, float]] = []
+
+    for o in plans:
+        if o.get("symbol") != symbol:
+            continue
+
+        trigger_price = o.get("triggerPrice")
+        size_str = o.get("size") or o.get("quantity") or o.get("sizeDelta") or "0"
+        reduce_only = str(o.get("reduceOnly", "")).lower() == "true"
+        side_raw = (o.get("side") or "").lower()  # "buy" / "sell"
+        if not trigger_price or not reduce_only:
+            continue
+
+        tp = float(trigger_price)
+        try:
+            sz = float(size_str)
+        except ValueError:
+            sz = 0.0
+
+        # LONG: SL is a sell below entry; TP is sell above
+        # SHORT: SL is a buy above entry; TP is buy below
+        if side == "long":
+            if side_raw == "sell" and tp < entry_price:
+                sl_candidates.append((tp, sz))
+            elif side_raw == "sell" and tp > entry_price:
+                tps.append((tp, sz))
+        elif side == "short":
+            if side_raw == "buy" and tp > entry_price:
+                sl_candidates.append((tp, sz))
+            elif side_raw == "buy" and tp < entry_price:
+                tps.append((tp, sz))
+
+    sl = None
+    if sl_candidates:
+        # LONG: highest SL below entry; SHORT: lowest SL above entry
+        if side == "long":
+            sl = max(x[0] for x in sl_candidates)
+        else:
+            sl = min(x[0] for x in sl_candidates)
+
+    # sort TPs in execution order (closest first)
+    if side == "long":
+        tps_sorted = sorted(tps, key=lambda x: x[0])  # low → high
+    else:
+        # For shorts, TPs are below entry, closest first = highest price first
+        tps_sorted = sorted(tps, key=lambda x: x[0], reverse=True)
+
+    tps_prices = [x[0] for x in tps_sorted[:3]]
+    tps_sizes = [x[1] for x in tps_sorted[:3]]
+
+    return {"sl": sl, "tps": tps_prices, "tp_sizes": tps_sizes}
+
+
+def _build_futures_position_snapshot(symbol: str, margin_coin: str = "USDT", product_type: str = "USDT-FUTURES") -> dict | None:
+    """
+    High-level helper:
+      - fetch MIX position
+      - fetch plan orders
+      - decode TP/SL
+
+    Returns a dict ready to be used for /position or TradeWatch messages.
+    """
+    pos = _fetch_futures_position(symbol, margin_coin=margin_coin)
+    if not pos:
+        return None
+
+    entry = float(pos.get("averageOpenPrice") or pos.get("openPriceAvg") or "0")
+    size = float(pos.get("total", "0"))
+    side = (pos.get("holdSide") or "").lower()   # "long" / "short"
+    leverage = pos.get("leverage")
+    margin_mode = pos.get("marginMode") or "isolated"
+    liq_price = float(pos.get("liquidationPrice", "0") or "0")
+    unrealized_pnl = pos.get("unrealizedPL", None)
+
+    plans = _fetch_futures_plan_orders(symbol, product_type=product_type)
+    tp_sl = _decode_tp_sl_from_plans(symbol, side, entry, plans)
+
+    snap = {
+        "pair": symbol,
+        "side": side.upper(),  # LONG / SHORT
+        "entry": entry,
+        "size": size,
+        "leverage": leverage,
+        "margin_mode": margin_mode,
+        "position_mode": pos.get("holdMode") or "hedge_mode",
+        "tps": tp_sl["tps"],           # list of prices
+        "tp_sizes": tp_sl["tp_sizes"], # list of sizes
+        "sl": tp_sl["sl"],
+        "liq_price": liq_price,
+        "unrealized_pnl": unrealized_pnl,
+    }
+    return snap
+
+
+# ======================
+# Fills + formatting
+# ======================
+
+def _fetch_futures_fills(limit: int = 50) -> list[dict]:
+    """
+    Uses Bitget MIX 'Get Fills' endpoint:
+        GET /api/mix/v1/order/fills
     Returns list of fill dicts.
     """
     params: dict = {"limit": str(limit)}
@@ -121,7 +293,7 @@ def _fetch_spot_fills(limit: int = 50) -> list[dict]:
 
     data = _signed_request(
         "GET",
-        "/api/v2/spot/trade/fills",
+        "/api/mix/v1/order/fills",
         params=params,
         body=None,
     )
@@ -148,17 +320,9 @@ def _classify_execution(fill: dict) -> str:
     return "Position Open/Increase"
 
 
-def _format_message(fill: dict) -> str:
+def _format_fill_message(fill: dict) -> str:
     """
-    Professional message format:
-
-    📈 [TradeWatch] New Position Opened
-    Pair: BTCUSDT
-    Side: BUY
-    Entry Price: 86758
-    Size: 0.50
-    Execution: Position Open/Increase
-    Time (UTC): 2025-11-25 12:00:01
+    Fallback message format if we can't build a full position snapshot.
     """
     pair = fill.get("symbol", "N/A")
     side_raw = (fill.get("side") or "N/A").upper()
@@ -176,15 +340,76 @@ def _format_message(fill: dict) -> str:
     execution = _classify_execution(fill)
 
     return (
-        f"{side_emoji} [TradeWatch] New Position Executed\n"
+        f"{side_emoji} [TradeWatch] New Futures Fill\n"
         f"Pair: {pair}\n"
         f"Side: {side_raw}\n"
-        f"Entry Price: {entry}\n"
+        f"Price: {entry}\n"
         f"Size: {size}\n"
         f"Execution: {execution}\n"
         f"Time (UTC): {_iso_utc_now()}"
     )
 
+
+def format_futures_position_message(snap: dict) -> str:
+    """
+    Turn a futures position snapshot into a nice Telegram message.
+    """
+    pair = snap["pair"]
+    side = snap["side"]
+    entry = snap["entry"]
+    size = snap["size"]
+    lev = snap.get("leverage")
+    margin_mode = snap.get("margin_mode", "isolated")
+    pos_mode = snap.get("position_mode", "hedge_mode")
+    liq = snap.get("liq_price")
+    pnl = snap.get("unrealized_pnl")
+
+    tps = snap.get("tps") or []
+    sl = snap.get("sl")
+
+    # emoji
+    side_emoji = "📉" if side == "SHORT" else "📈"
+
+    lines = [
+        f"{side_emoji} Current Futures Position",
+        f"Pair: {pair}",
+        f"Side: {side}",
+        f"Entry Price: {entry}",
+        f"Size: {size}",
+        f"Leverage: {lev}x",
+        f"Margin Mode: {margin_mode}",
+        f"Position Mode: {pos_mode}",
+        "",
+    ]
+
+    # TP lines
+    if tps:
+        for idx, price in enumerate(tps, start=1):
+            lines.append(f"TP{idx}: {price}")
+    else:
+        lines.append("TP: —")
+
+    # SL
+    if sl:
+        lines.append(f"SL: {sl}")
+    else:
+        lines.append("SL: ❌ none")
+
+    lines.extend(
+        [
+            "",
+            f"Liq Price: {liq}",
+            f"Unrealized PnL: {pnl}",
+            f"Time (UTC): {_iso_utc_now()}",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+# ======================
+# Status + main loop
+# ======================
 
 def get_status() -> str:
     """
@@ -217,7 +442,9 @@ def start_tradewatch(send_func):
     """
     TradeWatch main loop.
 
-    Polls Bitget fills and sends new trades to Telegram using send_func(text).
+    Polls Bitget MIX futures fills and sends new trades / position snapshots
+    to Telegram using send_func(text).
+
     Use from main.py via a background thread:
 
         threading.Thread(
@@ -247,7 +474,7 @@ def start_tradewatch(send_func):
         try:
             STATE["last_poll_utc"] = datetime.now(timezone.utc)
 
-            fills = _fetch_spot_fills(limit=50)
+            fills = _fetch_futures_fills(limit=50)
 
             if first_run:
                 # On first run, just mark existing fills as seen (no spam)
@@ -271,7 +498,23 @@ def start_tradewatch(send_func):
                     STATE["last_trade_side"] = (f.get("side") or "").upper()
                     STATE["last_error"] = None
 
-                    msg = _format_message(f)
+                    symbol = f.get("symbol") or TRADEWATCH_SYMBOL
+
+                    # Build futures position snapshot (manual or API)
+                    snap = None
+                    if symbol:
+                        snap = _build_futures_position_snapshot(
+                            symbol,
+                            margin_coin=TRADEWATCH_MARGIN_COIN,
+                            product_type=TRADEWATCH_PRODUCT_TYPE,
+                        )
+
+                    if snap:
+                        msg = format_futures_position_message(snap)
+                    else:
+                        # Fallback: just send fill info
+                        msg = _format_fill_message(f)
+
                     send_func(msg)
 
                 # Avoid unbounded growth
