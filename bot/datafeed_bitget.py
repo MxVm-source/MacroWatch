@@ -19,11 +19,13 @@ BITGET_API_PASSPHRASE = os.environ.get("BITGET_API_PASSPHRASE", "")
 BITGET_BASE_URL = "https://api.bitget.com"
 
 # Futures defaults (USDT-M)
-# You can override these in Render env vars if needed
 BITGET_PRODUCT_TYPE = os.environ.get("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 BITGET_MARGIN_COIN = os.environ.get("BITGET_MARGIN_COIN", "USDT")
-BITGET_SYMBOL = os.environ.get("BITGET_SYMBOL", "BTCUSDT")  # main perp you trade
+BITGET_SYMBOL = os.environ.get("BITGET_SYMBOL", "BTCUSDT")
 
+# ======================
+# Helpers
+# ======================
 
 def iso_utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -32,10 +34,7 @@ def iso_utc_now() -> str:
 def _signed_request(method: str, request_path: str,
                     params: dict | None = None,
                     body: dict | None = None):
-    """
-    Generic Bitget private request helper (V2).
-    Signature: timestamp + method + requestPath + ?query + body
-    """
+
     if not (BITGET_API_KEY and BITGET_API_SECRET and BITGET_API_PASSPHRASE):
         raise RuntimeError("Bitget API credentials not set")
 
@@ -56,44 +55,41 @@ def _signed_request(method: str, request_path: str,
         prehash = timestamp + method + request_path + body_str
         url = f"{BITGET_BASE_URL}{request_path}"
 
-    sign_bytes = hmac.new(
-        BITGET_API_SECRET.encode("utf-8"),
-        prehash.encode("utf-8"),
+    sign = hmac.new(
+        BITGET_API_SECRET.encode(),
+        prehash.encode(),
         hashlib.sha256
     ).digest()
-    sign_b64 = base64.b64encode(sign_bytes).decode()
 
     headers = {
         "ACCESS-KEY": BITGET_API_KEY,
-        "ACCESS-SIGN": sign_b64,
+        "ACCESS-SIGN": base64.b64encode(sign).decode(),
         "ACCESS-TIMESTAMP": timestamp,
         "ACCESS-PASSPHRASE": BITGET_API_PASSPHRASE,
         "Content-Type": "application/json",
-        "locale": "en-US",
     }
 
     if method == "GET":
-        resp = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, headers=headers, timeout=10)
     else:
-        resp = requests.post(url, headers=headers, data=body_str, timeout=10)
+        r = requests.post(url, headers=headers, data=body_str, timeout=10)
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"Bitget HTTP {resp.status_code}: {resp.text}")
+    if r.status_code != 200:
+        raise RuntimeError(f"Bitget HTTP {r.status_code}: {r.text}")
 
-    data = resp.json()
+    data = r.json()
     if data.get("code") != "00000":
         raise RuntimeError(f"Bitget API error {data.get('code')}: {data.get('msg')}")
+
     return data
 
-
 # ======================
-# Futures position + TP
+# Fetch Futures Data
 # ======================
 
 def _fetch_current_futures_position():
     """
-    Futures: GET /api/v2/mix/position/single-position
-    Returns the first position dict or None if no position.
+    Returns a single futures position dict or None.
     """
     params = {
         "productType": BITGET_PRODUCT_TYPE,
@@ -110,12 +106,10 @@ def _fetch_current_futures_position():
     return data[0] if data else None
 
 
-def _fetch_pending_tp_orders():
+def _fetch_pending_tp_sl_orders():
     """
-    Futures TP/SL trigger orders:
-    GET /api/v2/mix/order/orders-plan-pending
-    planType=profit_loss → returns TP/SL orders.
-    We filter to TPs for the current symbol.
+    Fetch TP and SL trigger orders.
+    Returns {"tp": [...], "sl": [...]}
     """
     params = {
         "planType": "profit_loss",
@@ -129,69 +123,41 @@ def _fetch_pending_tp_orders():
         params=params,
         body=None,
     )
+
     data = res.get("data") or {}
     entrusted = data.get("entrustedList") or []
-    tps: list[float] = []
+
+    tps, sls = [], []
 
     for o in entrusted:
-        tp_price = o.get("stopSurplusTriggerPrice") or ""
-        if not tp_price:
-            continue
-
         if o.get("symbol", "").upper() != BITGET_SYMBOL.upper():
             continue
 
-        try:
-            price_f = float(tp_price)
-        except ValueError:
-            continue
+        # TP
+        tp = o.get("stopSurplusTriggerPrice")
+        if tp:
+            try:
+                tps.append(float(tp))
+            except:
+                pass
 
-        tps.append(price_f)
+        # SL
+        sl = o.get("stopLossTriggerPrice")
+        if sl:
+            try:
+                sls.append(float(sl))
+            except:
+                pass
 
-    return tps
+    return {"tp": tps, "sl": sls}
 
-def get_ticker(symbol: str):
-    """
-    Public Bitget futures ticker helper.
-
-    Returns last price as float, or None on error.
-    Used by FedWatch to measure BTC/ETH reaction.
-    """
-    try:
-        url = f"{BITGET_BASE_URL}/api/v2/mix/market/ticker"
-        resp = requests.get(url, params={"symbol": symbol}, timeout=5)
-        data = resp.json()
-
-        if data.get("code") != "00000":
-            print("[Bitget] get_ticker error:", data)
-            return None
-
-        tick = data.get("data") or {}
-        # Some Bitget responses return a list under "data"
-        if isinstance(tick, list):
-            tick = tick[0] if tick else {}
-
-        price_str = (
-            tick.get("last") or
-            tick.get("close") or
-            tick.get("markPrice")
-        )
-
-        if price_str is None:
-            return None
-
-        return float(price_str)
-    except Exception as e:
-        print("[Bitget] get_ticker exception:", e)
-        return None
-
+# ======================
+# Main Build Function
+# ======================
 
 def build_futures_position_message() -> str:
-    """
-    Returns a clean, professional snapshot of current futures position
-    + up to 3 TP levels (from trigger orders).
-    """
     pos = _fetch_current_futures_position()
+
     if not pos or float(pos.get("total", "0") or "0") == 0.0:
         return f"ℹ️ No open futures position for {BITGET_SYMBOL}."
 
@@ -200,9 +166,8 @@ def build_futures_position_message() -> str:
         side = "LONG"
     elif side_raw == "short":
         side = "SHORT"
-        # 🔥 Everything below is unchanged
     else:
-        side = side_raw.upper() or "N/A"
+        side = side_raw.upper()
 
     entry = pos.get("openPriceAvg") or pos.get("openPrice") or "N/A"
     size = pos.get("total") or pos.get("available") or "N/A"
@@ -212,15 +177,15 @@ def build_futures_position_message() -> str:
     margin_mode = pos.get("marginMode") or ""
     pos_mode = pos.get("posMode") or ""
 
-    tp_prices = _fetch_pending_tp_orders()
+    triggers = _fetch_pending_tp_sl_orders()
+    tp_prices = triggers["tp"]
+    sl_prices = triggers["sl"]
+
     reverse = True if side == "SHORT" else False
-    tp_prices_sorted = sorted(tp_prices, reverse=reverse)
+    tp_sorted = sorted(tp_prices, reverse=reverse)
+    sl_sorted = sorted(sl_prices, reverse=reverse)
 
-    tp_lines = []
-    for idx, p in enumerate(tp_prices_sorted[:3], start=1):
-        tp_lines.append(f"TP{idx}: {p}")
-
-    lines: list[str] = [
+    lines = [
         "📘 Current Futures Position",
         f"Pair: {BITGET_SYMBOL}",
         f"Side: {side}",
@@ -234,9 +199,16 @@ def build_futures_position_message() -> str:
     if pos_mode:
         lines.append(f"Position Mode: {pos_mode}")
 
-    if tp_lines:
+    # TP block
+    if tp_sorted:
         lines.append("")
-        lines.extend(tp_lines)
+        for idx, p in enumerate(tp_sorted[:3], start=1):
+            lines.append(f"TP{idx}: {p}")
+
+    # SL block
+    if sl_sorted:
+        lines.append("")
+        lines.append(f"SL: {sl_sorted[0]}")
 
     if liq and liq != "0":
         lines.append(f"Liq Price: {liq}")
@@ -247,14 +219,13 @@ def build_futures_position_message() -> str:
 
     return "\n".join(lines)
 
+# ======================
+# Safe Wrapper
+# ======================
 
 def get_position_report_safe() -> str:
-    """
-    Wrapper used by MacroWatch UI (/position command).
-    Never crashes the bot.
-    """
     try:
         return build_futures_position_message()
     except Exception as e:
         print("[Bitget] /position error:", e)
-        return "⚠️ Could not fetch position from Bitget. Check API keys & futures permissions."
+        return "⚠️ Could not fetch position from Bitget. Check API keys & futures permission settings."
