@@ -21,9 +21,29 @@ BRUSSELS_TZ = ZoneInfo("Europe/Brussels")
 BITGET_BASE_URL = "https://api.bitget.com"
 
 # Main perps you care about (USDT-M futures)
-BTC_PERP_SYMBOL = os.getenv("CWD_BTC_SYMBOL", "BTCUSDT_UMCBL")
-ETH_PERP_SYMBOL = os.getenv("CWD_ETH_SYMBOL", "ETHUSDT_UMCBL")
-PRODUCT_TYPE = "USDT-FUTURES"  # fixed, works with both BTC/ETH USDT perps
+# These can be with or without suffix in env, e.g. "BTCUSDT_UMCBL" or "BTCUSDT"
+BTC_PERP_SYMBOL_RAW = os.getenv("CWD_BTC_SYMBOL", "BTCUSDT_UMCBL")
+ETH_PERP_SYMBOL_RAW = os.getenv("CWD_ETH_SYMBOL", "ETHUSDT_UMCBL")
+
+PRODUCT_TYPE = "USDT-FUTURES"  # fixed, works with BTC/ETH USDT-M futures
+
+
+def _normalize_symbol(sym: str, fallback: str) -> str:
+    """
+    Bitget V2 mix endpoints expect the 'symbolName' (e.g. BTCUSDT),
+    not the old-style with suffix (BTCUSDT_UMCBL).
+    This helper trims anything after '_' if present.
+    """
+    s = (sym or "").strip().upper()
+    if not s:
+        return fallback
+    if "_" in s:
+        s = s.split("_", 1)[0]
+    return s
+
+
+BTC_PERP_SYMBOL = _normalize_symbol(BTC_PERP_SYMBOL_RAW, "BTCUSDT")
+ETH_PERP_SYMBOL = _normalize_symbol(ETH_PERP_SYMBOL_RAW, "ETHUSDT")
 
 
 # ======================
@@ -190,7 +210,8 @@ def fetch_basic_market_snapshot() -> dict:
     btc_raw = _public_get("/api/v2/mix/market/ticker", params_btc)
     btc = _parse_mix_ticker(btc_raw)
     if btc:
-        btc["symbol"] = BTC_PERP_SYMBOL
+        btc["symbol_api"] = BTC_PERP_SYMBOL
+        btc["symbol_raw"] = BTC_PERP_SYMBOL_RAW
         snapshot["btc"] = btc
 
     params_eth = {
@@ -200,7 +221,8 @@ def fetch_basic_market_snapshot() -> dict:
     eth_raw = _public_get("/api/v2/mix/market/ticker", params_eth)
     eth = _parse_mix_ticker(eth_raw)
     if eth:
-        eth["symbol"] = ETH_PERP_SYMBOL
+        eth["symbol_api"] = ETH_PERP_SYMBOL
+        eth["symbol_raw"] = ETH_PERP_SYMBOL_RAW
         snapshot["eth"] = eth
 
     snapshot["meta"]["total_market_cap"] = None  # not fetched here
