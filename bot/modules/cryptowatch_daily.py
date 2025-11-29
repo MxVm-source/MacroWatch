@@ -79,7 +79,7 @@ STRUCTURE (you MUST follow this order and include every section):
 
 7) 🎯 AI Strategy Plan (BTC)
    - This is the intraday AI strategy idea for BTC only.
-   - Use EXACTLY this structure:
+   - Use EXACTLY this structure (with real numeric levels, no "N/A"):
 
      "🎯 AI Strategy Plan (BTC)
      Bias: LONG / SHORT / FLAT
@@ -90,15 +90,22 @@ STRUCTURE (you MUST follow this order and include every section):
      Notes: ..."
 
    - Rules:
-     * If your earlier bias for today is clearly bullish → choose LONG.
-     * If clearly bearish → choose SHORT.
-     * If mixed/low conviction → choose FLAT, and explain waiting or only scalping.
-     * Entry Zone should be a small range around meaningful levels in the data (e.g. prior support/resistance, round numbers).
-     * Invalidation (SL) must be a clean level where the idea is wrong, not super tight.
-     * TP1 / TP2 should be realistic intraday/short-swing targets in USD.
-     * Notes: 1–2 short sentences about risk/rules for this plan (e.g. "Do not chase breakouts; wait for retest", "Smaller size due to event risk", etc.).
+     * If your earlier bias for today leans bullish → choose LONG.
+     * If your earlier bias for today leans bearish → choose SHORT.
+     * Only choose FLAT if:
+       - key market data is missing, OR
+       - volatility/liquidity is extremely poor AND even scalps are unattractive.
+     * When you choose LONG or SHORT, you MUST provide:
+       - a numeric Entry Zone (e.g. "$90,200–$90,600"),
+       - a numeric SL (invalidation),
+       - numeric TP1 and TP2.
+     * Entry Zone should sit around meaningful levels from the data (supports/resistances, round levels).
+     * Invalidation (SL) must be a clear level where the idea is wrong, not ultra-tight (give the trade some room).
+     * TP1 / TP2 should be realistic intraday/short-swing targets in USD based on the current range and volatility.
+     * Notes: 1–2 short sentences about risk management or execution (e.g. "Wait for retest after breakout", "Use smaller size near major news", etc.).
    - Never mention leverage or position size.
    - Only one strategy plan; do NOT give alternatives.
+
 
 General rules:
 - Keep the entire brief roughly 250–400 words.
