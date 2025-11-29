@@ -15,14 +15,15 @@ client = OpenAI()
 BRUSSELS_TZ = ZoneInfo("Europe/Brussels")
 
 # ======================
-# Bitget config (public endpoints only)
+# Bitget config (public futures endpoints)
 # ======================
 
 BITGET_BASE_URL = "https://api.bitget.com"
 
-# Spot symbols for easier pricing (close enough to perps for daily bias)
-BTC_SPOT_SYMBOL = os.getenv("CWD_BTC_SYMBOL", "BTCUSDT")
-ETH_SPOT_SYMBOL = os.getenv("CWD_ETH_SYMBOL", "ETHUSDT")
+# Main perps you care about (USDT-M futures)
+BTC_PERP_SYMBOL = os.getenv("CWD_BTC_SYMBOL", "BTCUSDT_UMCBL")
+ETH_PERP_SYMBOL = os.getenv("CWD_ETH_SYMBOL", "ETHUSDT_UMCBL")
+PRODUCT_TYPE = "USDT-FUTURES"  # fixed, works with both BTC/ETH USDT perps
 
 
 # ======================
@@ -107,7 +108,7 @@ General rules:
 
 
 # ======================
-# Bitget helpers
+# Bitget helpers (V2 futures)
 # ======================
 
 def _public_get(path: str, params: dict | None = None) -> dict | None:
@@ -128,20 +129,19 @@ def _public_get(path: str, params: dict | None = None) -> dict | None:
         return None
 
 
-def _parse_spot_ticker(data: dict) -> dict | None:
+def _parse_mix_ticker(data: dict) -> dict | None:
     """
-    Parse Bitget spot ticker payload into a friendly dict:
-    { 'last': float, 'high24h': float, 'low24h': float, 'change24h': float }
+    Parse Bitget V2 futures ticker payload into a friendly dict:
+    { 'last': float, 'high24h': float, 'low24h': float, 'change24h': float, 'fundingRate': float }
     """
     if not data:
         return None
 
-    tick = data.get("data")
-    if isinstance(tick, list):
-        tick = tick[0] if tick else None
-
-    if not isinstance(tick, dict):
+    items = data.get("data") or []
+    if not isinstance(items, list) or not items:
         return None
+
+    tick = items[0]
 
     def _f(key):
         v = tick.get(key)
@@ -152,21 +152,30 @@ def _parse_spot_ticker(data: dict) -> dict | None:
         except Exception:
             return None
 
-    last = _f("close") or _f("last")
-    high = _f("high24h")
-    low = _f("low24h")
-    change = _f("change24h") or _f("priceChangePercent24h")
+    last = _f("lastPr")
+    high24h = _f("high24h")
+    low24h = _f("low24h")
+    change24h = _f("change24h")
+    funding_rate = _f("fundingRate")
+    index_price = _f("indexPrice")
+    mark_price = _f("markPrice")
 
     return {
         "last": last,
-        "high24h": high,
-        "low24h": low,
-        "change24h": change,
+        "high24h": high24h,
+        "low24h": low24h,
+        "change24h": change24h,
+        "fundingRate": funding_rate,
+        "indexPrice": index_price,
+        "markPrice": mark_price,
     }
 
 
 def fetch_basic_market_snapshot() -> dict:
-    """Fetch BTC & ETH spot tickers from Bitget and build a simple snapshot dict."""
+    """
+    Fetch BTC & ETH futures tickers from Bitget (V2 mix market)
+    and build a compact snapshot dict for the AI brief.
+    """
     snapshot: dict = {
         "as_of_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "btc": {},
@@ -174,22 +183,30 @@ def fetch_basic_market_snapshot() -> dict:
         "meta": {},
     }
 
-    # BTC – correct V1 spot endpoint
-    btc_raw = _public_get("/api/spot/v1/market/ticker", {"symbol": BTC_SPOT_SYMBOL})
-    btc = _parse_spot_ticker(btc_raw)
+    params_btc = {
+        "productType": PRODUCT_TYPE,
+        "symbol": BTC_PERP_SYMBOL,
+    }
+    btc_raw = _public_get("/api/v2/mix/market/ticker", params_btc)
+    btc = _parse_mix_ticker(btc_raw)
     if btc:
+        btc["symbol"] = BTC_PERP_SYMBOL
         snapshot["btc"] = btc
-        snapshot["btc"]["symbol"] = BTC_SPOT_SYMBOL
 
-    # ETH – same endpoint
-    eth_raw = _public_get("/api/spot/v1/market/ticker", {"symbol": ETH_SPOT_SYMBOL})
-    eth = _parse_spot_ticker(eth_raw)
+    params_eth = {
+        "productType": PRODUCT_TYPE,
+        "symbol": ETH_PERP_SYMBOL,
+    }
+    eth_raw = _public_get("/api/v2/mix/market/ticker", params_eth)
+    eth = _parse_mix_ticker(eth_raw)
     if eth:
+        eth["symbol"] = ETH_PERP_SYMBOL
         snapshot["eth"] = eth
-        snapshot["eth"]["symbol"] = ETH_SPOT_SYMBOL
 
     snapshot["meta"]["total_market_cap"] = None  # not fetched here
-    snapshot["meta"]["notes"] = "Basic BTC/ETH spot data from Bitget; no OI/liquidations in this snapshot."
+    snapshot["meta"]["notes"] = (
+        "BTC/ETH USDT perpetual futures data from Bitget V2 (last, 24h range, change, funding rate)."
+    )
 
     return snapshot
 
@@ -224,7 +241,7 @@ def generate_daily_brief(snapshot: dict) -> str:
                 {
                     "role": "user",
                     "content": (
-                        "Here is today's raw BTC/ETH market snapshot from Bitget (JSON). "
+                        "Here is today's raw BTC/ETH perpetual futures snapshot from Bitget (JSON). "
                         "Use it to generate the daily brief and the AI strategy plan for BTC:\n\n"
                         + payload_str
                     ),
@@ -249,7 +266,7 @@ def generate_daily_brief(snapshot: dict) -> str:
 def main():
     """
     Scheduled CryptoWatch Daily task:
-    - Fetch BTC/ETH data directly from Bitget (self-contained).
+    - Fetch BTC/ETH futures data directly from Bitget (V2 mix market).
     - Call OpenAI to generate market brief + AI strategy for BTC.
     - Send to Telegram via send_text.
     """
