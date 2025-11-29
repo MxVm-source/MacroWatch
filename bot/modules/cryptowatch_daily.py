@@ -174,22 +174,20 @@ def fetch_basic_market_snapshot() -> dict:
         "meta": {},
     }
 
-    # BTC
-    btc_raw = _public_get("/api/v2/spot/market/ticker", {"symbol": BTC_SPOT_SYMBOL})
+    # BTC – correct V1 spot endpoint
+    btc_raw = _public_get("/api/spot/v1/market/ticker", {"symbol": BTC_SPOT_SYMBOL})
     btc = _parse_spot_ticker(btc_raw)
     if btc:
         snapshot["btc"] = btc
         snapshot["btc"]["symbol"] = BTC_SPOT_SYMBOL
 
-    # ETH
-    eth_raw = _public_get("/api/v2/spot/market/ticker", {"symbol": ETH_SPOT_SYMBOL})
+    # ETH – same endpoint
+    eth_raw = _public_get("/api/spot/v1/market/ticker", {"symbol": ETH_SPOT_SYMBOL})
     eth = _parse_spot_ticker(eth_raw)
     if eth:
         snapshot["eth"] = eth
         snapshot["eth"]["symbol"] = ETH_SPOT_SYMBOL
 
-    # You can extend this later with funding/OI/liqs if desired.
-    # For now we keep it simple and let the model focus on price + structure.
     snapshot["meta"]["total_market_cap"] = None  # not fetched here
     snapshot["meta"]["notes"] = "Basic BTC/ETH spot data from Bitget; no OI/liquidations in this snapshot."
 
