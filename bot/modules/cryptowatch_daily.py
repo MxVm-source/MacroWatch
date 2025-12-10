@@ -25,6 +25,14 @@ BTC_SYMBOL = "BTCUSDT"
 ETH_SYMBOL = "ETHUSDT"
 PRODUCT_TYPE = "USDT-FUTURES"  # per Bitget V2 docs
 
+# ======================
+# Optional macro / FedWatch integration
+# ======================
+
+# If set, this should be an HTTP endpoint (from your FedWatch bot)
+# that returns a short plain-text or markdown macro summary for today,
+# e.g. "Fed cut rates by 25 bps today, markets risk-on..." etc.
+FEDWATCH_DAILY_URL = os.getenv("FEDWATCH_DAILY_URL", "").strip()
 
 # ======================
 # OpenAI prompt
@@ -43,6 +51,11 @@ Style:
 - Use emojis sparingly but stylistically (no spam).
 - Never say you are an AI. Just speak as the desk analyst.
 - Assume all prices are in USD.
+
+Input JSON:
+- "snapshot" contains BTC/ETH futures info from Bitget.
+- "snapshot.meta.macro_context" MAY contain an internal macro summary text from a separate FedWatch bot (e.g. FOMC decisions, CPI releases, major macro surprises).
+- If "macro_context" is present, you MUST read it and incorporate any important events into the "Macro & Regulation" section and your overall bias (especially Fed rate decisions, rate cuts/holds, and major inflation data).
 
 STRUCTURE (you MUST follow this order and include every section):
 
@@ -68,9 +81,10 @@ STRUCTURE (you MUST follow this order and include every section):
    - If you don't have OI/liquidations, just say "OI / liquidation data limited today; focus on price structure and levels."
 
 5) Macro & Regulation
-   - One short sentence on macro tone: risk-on / risk-off / mixed / data-light.
-   - Mention a generic key macro catalyst if not provided: e.g. "Traders will watch U.S. data and Fed commentary for direction."
-   - One line on regulation: either "No major new regulatory headlines" or a generic caution about ongoing scrutiny.
+   - If "macro_context" is provided, summarize the key macro points from it in 1–3 short bullets.
+     * You MUST explicitly mention any Fed rate decision (cut/hold/hike) or major macro surprise.
+   - If no macro_context is provided, give one short sentence on macro tone: risk-on / risk-off / mixed / data-light, and mention a generic key macro catalyst (e.g. U.S. data, Fed commentary).
+   - One line on regulation: either "No major new regulatory headlines" or a generic caution about ongoing scrutiny, unless macro_context clearly mentions a big regulatory story.
 
 6) Bias for Today
    - Explicit BTC bias: Bullish / Bearish / Neutral / Choppy.
@@ -105,7 +119,6 @@ STRUCTURE (you MUST follow this order and include every section):
      * Notes: 1–2 short sentences about risk management or execution (e.g. "Wait for retest after breakout", "Use smaller size near major news", etc.).
    - Never mention leverage or position size.
    - Only one strategy plan; do NOT give alternatives.
-
 
 General rules:
 - Keep the entire brief roughly 250–400 words.
@@ -216,8 +229,43 @@ def fetch_basic_market_snapshot() -> dict:
     snapshot["meta"]["notes"] = (
         "BTC/ETH USDT perpetual futures data from Bitget V2 (last, 24h range, change, funding rate)."
     )
+    # macro_context will be injected later (in main) if available
+    snapshot["meta"]["macro_context"] = None
 
     return snapshot
+
+
+# ======================
+# Macro / FedWatch helpers
+# ======================
+
+def fetch_macro_context() -> str | None:
+    """
+    Optionally fetch macro context (e.g. Fed decisions, CPI, etc.)
+    from an internal FedWatch endpoint, if configured.
+
+    Expected usage:
+    - FEDWATCH_DAILY_URL env var points to a simple HTTP endpoint
+      that returns a short text/markdown macro summary for today.
+    """
+    if not FEDWATCH_DAILY_URL:
+        return None
+
+    try:
+        resp = requests.get(FEDWATCH_DAILY_URL, timeout=5)
+        if resp.status_code != 200:
+            log.warning("CryptoWatch Daily: FedWatch HTTP %s: %s", resp.status_code, resp.text)
+            return None
+        text = (resp.text or "").strip()
+        if not text:
+            return None
+        # Guardrail: avoid sending huge blobs; trim if needed
+        if len(text) > 4000:
+            text = text[:4000] + "\n\n[macro_context truncated]"
+        return text
+    except Exception as e:
+        log.warning("CryptoWatch Daily: FedWatch request failed: %s", e)
+        return None
 
 
 # ======================
@@ -250,7 +298,8 @@ def generate_daily_brief(snapshot: dict) -> str:
                 {
                     "role": "user",
                     "content": (
-                        "Here is today's raw BTC/ETH perpetual futures snapshot from Bitget (JSON). "
+                        "Here is today's raw BTC/ETH perpetual futures snapshot from Bitget (JSON), "
+                        "plus optional macro_context from an internal FedWatch bot if present. "
                         "Use it to generate the daily brief and the AI strategy plan for BTC:\n\n"
                         + payload_str
                     ),
@@ -276,6 +325,7 @@ def main():
     """
     Scheduled CryptoWatch Daily task:
     - Fetch BTC/ETH futures data directly from Bitget (V2 mix market).
+    - Optionally fetch macro context from FedWatch.
     - Call OpenAI to generate market brief + AI strategy for BTC.
     - Send to Telegram via send_text.
     """
@@ -288,6 +338,12 @@ def main():
             "⚠️ Could not build market snapshot from Bitget."
         )
         return
+
+    # Inject macro context if available
+    macro_text = fetch_macro_context()
+    if macro_text:
+        snapshot.setdefault("meta", {})
+        snapshot["meta"]["macro_context"] = macro_text
 
     brief = generate_daily_brief(snapshot)
     send_text(brief)
