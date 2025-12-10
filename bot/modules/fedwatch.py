@@ -2,6 +2,8 @@ import os, time, requests, re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import feedparser  # NEW: for Reuters/AP RSS parsing
+
 from bot.utils import send_text
 from bot.datafeed_bitget import get_ticker
 
@@ -34,6 +36,7 @@ STATE = {
     "last_refresh": None,
     "pre_prices": {},
 }
+
 
 # -------------------------------------------------------------
 # Time Formatting
@@ -234,6 +237,127 @@ def refresh_calendar():
 
 
 # -------------------------------------------------------------
+# Decision & Trade Bias (from news heuristics)
+# -------------------------------------------------------------
+
+def _map_move_to_label(move_bps: int) -> str:
+    if move_bps > 0:
+        return f"+{move_bps}bp"
+    if move_bps < 0:
+        return f"{move_bps}bp"
+    return "0bp (Hold)"
+
+
+def _fetch_consensus_heuristic():
+    """
+    Very lightweight consensus from Reuters/AP headlines:
+    returns {'move_bps': int, 'source': 'headlines'}
+    """
+    feeds = [
+        "https://feeds.reuters.com/reuters/businessNews",
+        "https://feeds.reuters.com/reuters/marketsNews",
+        "https://apnews.com/hub/ap-top-news?output=rss",
+    ]
+    try:
+        text = ""
+        for url in feeds:
+            f = feedparser.parse(url)
+            for e in f.entries[:15]:
+                t = (getattr(e, "title", "") or "") + " " + (getattr(e, "summary", "") or "")
+                tl = t.lower()
+                if any(k in tl for k in ["fed", "fomc", "interest rate", "rate decision", "powell"]):
+                    text += " " + tl
+
+        if any(p in text for p in ["expected to hold", "likely to hold", "seen holding"]):
+            return {"move_bps": 0, "source": "headlines"}
+        if any(p in text for p in ["expected to raise", "likely to raise", "seen raising",
+                                   "25 basis point hike", "quarter-point hike"]):
+            return {"move_bps": +25, "source": "headlines"}
+        if any(p in text for p in ["expected to cut", "likely to cut", "seen cutting",
+                                   "25 basis point cut", "quarter-point cut"]):
+            return {"move_bps": -25, "source": "headlines"}
+
+        # default: assume hold
+        return {"move_bps": 0, "source": "default-hold"}
+    except Exception:
+        return None
+
+
+def _fetch_decision_confirmation():
+    """
+    Infer actual move + tone from Reuters headlines after the decision.
+    Returns:
+      {'actual_move_bps': int, 'tone': 'hawkish|dovish|neutral', 'source': 'reuters'}
+    """
+    try:
+        f = feedparser.parse("https://feeds.reuters.com/reuters/businessNews")
+        text = ""
+        for e in f.entries[:20]:
+            t = (getattr(e, "title", "") or "") + " " + (getattr(e, "summary", "") or "")
+            tl = t.lower()
+            if any(k in tl for k in ["fed", "fomc", "federal funds rate", "powell", "interest rate"]):
+                text += " " + tl
+
+        move = 0
+        if any(k in text for k in ["raises benchmark rate", "rate hike", "raises interest rates"]):
+            move = +25
+        if any(k in text for k in ["cuts benchmark rate", "rate cut", "cuts interest rates"]):
+            move = -25
+
+        tone = "neutral"
+        if any(k in text for k in ["hawkish", "signals more hikes", "tightening"]):
+            tone = "hawkish"
+        if any(k in text for k in ["dovish", "signals pause", "easing"]):
+            tone = "dovish"
+
+        return {"actual_move_bps": move, "tone": tone, "source": "reuters"}
+    except Exception:
+        return None
+
+
+def _compute_trade_bias(est_move_bps: int, actual_move_bps: int, tone: str):
+    """
+    Returns (emoji, label, note) like ("✅", "LONG", "Surprise cut vs expectations")
+    """
+    surprise = actual_move_bps - est_move_bps
+    note_parts = []
+
+    # 1) Surprise direction dominates
+    if actual_move_bps < 0 and est_move_bps >= 0:
+        return "✅", "LONG", "Surprise cut vs expectations"
+    if actual_move_bps > 0 and est_move_bps <= 0:
+        return "❌", "SHORT", "Surprise hike vs expectations"
+
+    # 2) In-line with expectations → use tone
+    if tone == "dovish":
+        note_parts.append("Dovish communication")
+        if actual_move_bps < 0:
+            note_parts.append("Cut as expected")
+            return "✅", "LONG", ", ".join(note_parts)
+        else:
+            note_parts.append("Hold but dovish")
+            return "✅", "LONG", ", ".join(note_parts)
+
+    if tone == "hawkish":
+        note_parts.append("Hawkish communication")
+        if actual_move_bps > 0:
+            note_parts.append("Hike as expected")
+            return "❌", "SHORT", ", ".join(note_parts)
+        else:
+            note_parts.append("Hold but hawkish")
+            return "❌", "SHORT", ", ".join(note_parts)
+
+    # 3) Neutral tone → just look at direction
+    if actual_move_bps < 0:
+        return "✅", "LONG", "Cut in line with expectations"
+    if actual_move_bps > 0:
+        return "❌", "SHORT", "Hike in line with expectations"
+
+    # Hold + neutral
+    return "⚠️", "NEUTRAL", "Hold in line with expectations"
+
+
+# -------------------------------------------------------------
 # Reaction Logic
 # -------------------------------------------------------------
 
@@ -278,13 +402,39 @@ def _reaction_for_event(ev, ev_id: str):
             return "🔴 Bearish"
         return "🔵 Neutral"
 
-    msg = (
-        f"🏦 [FedWatch] Market Reaction — {ev['title']}\n"
-        f"🕒 {_fmt_brussels(ev['start'])}\n\n"
-        f"BTC: {btc_pc:+.2f}% {tag(btc_pc)}\n"
-        f"ETH: {eth_pc:+.2f}% {tag(eth_pc)}"
-    )
-    send_text(msg)
+    msg_lines = [
+        f"🏦 [FedWatch] Market Reaction — {ev['title']}",
+        f"🕒 {_fmt_brussels(ev['start'])}",
+        "",
+        f"BTC: {btc_pc:+.2f}% {tag(btc_pc)}",
+        f"ETH: {eth_pc:+.2f}% {tag(eth_pc)}",
+    ]
+
+    # ---- Add Fed decision + trade bias for key events ----
+    title_l = ev["title"].lower()
+    if any(k in title_l for k in ["statement", "press conference", "meeting"]):
+        est = _fetch_consensus_heuristic() or {"move_bps": 0, "source": "n/a"}
+        conf = _fetch_decision_confirmation()
+
+        if conf is not None:
+            est_mv = est["move_bps"]
+            act_mv = conf["actual_move_bps"]
+            tone = conf["tone"]
+
+            est_label = _map_move_to_label(est_mv)
+            act_label = _map_move_to_label(act_mv)
+
+            tb_emo, tb_label, tb_note = _compute_trade_bias(est_mv, act_mv, tone)
+
+            msg_lines.extend([
+                "",
+                f"📉 Fed decision: {act_label} (est: {est_label}, src: {est['source']})",
+                f"🗣 Tone: {tone} (src: {conf['source']})",
+                f"📊 Trade bias (next 24h): {tb_emo} {tb_label}",
+                f"📝 {tb_note}",
+            ])
+
+    send_text("\n".join(msg_lines))
 
 
 # -------------------------------------------------------------
@@ -309,11 +459,26 @@ def schedule_loop():
             if now >= nxt["when"]:
                 ev = nxt["event"]
                 location = ev.get("location", "Federal Reserve")
+
+                # OPTIONAL: pre-meeting bias for key events
+                bias_line = ""
+                title_l = ev["title"].lower()
+                if any(k in title_l for k in ["statement", "press conference", "meeting"]):
+                    est = _fetch_consensus_heuristic() or {"move_bps": 0, "source": "n/a"}
+                    est_mv = est["move_bps"]
+                    if est_mv < 0:
+                        bias_line = "\n📊 Pre-meeting bias: ✅ LONG (market expecting a cut)"
+                    elif est_mv > 0:
+                        bias_line = "\n📊 Pre-meeting bias: ❌ SHORT (market expecting a hike)"
+                    else:
+                        bias_line = "\n📊 Pre-meeting bias: ⚠️ NEUTRAL (market expecting a hold)"
+
                 send_text(
                     f"🏦 [FedWatch] Alert — {nxt['label']}\n"
                     f"🗓️ {ev['title']}\n"
                     f"🕒 {_fmt_brussels(ev['start'])}\n"
                     f"📍 {location}"
+                    f"{bias_line}"
                 )
                 if nxt["label"] == "T-10m":
                     _capture_pre_event_prices(nxt["event_id"])
