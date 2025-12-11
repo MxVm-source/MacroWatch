@@ -71,88 +71,70 @@ def _fetch_html() -> str:
 
 def _parse_html_events(html: str):
     """
-    Extract events from the FOMC HTML calendar.
+    Extract events from the FOMC HTML calendar (new layout).
 
-    We classify:
-    - FOMC Meeting
-    - FOMC Statement
-    - FOMC Press Conference
-    - FOMC Minutes
-    - Powell Testimony — Monetary Policy Report (if present in text)
+    We no longer try to parse every tiny detail of the HTML.
+    Instead we:
+    - Find each "<YEAR> FOMC Meetings" section in the text
+    - Inside that section, find patterns like "March 18-19*"
+    - For each meeting, create:
+        - FOMC Statement (decision time)
+        - FOMC Press Conference (30m later)
     """
     events = []
     if not html:
         return events
 
-    # Remove whitespace
+    # Collapse all whitespace to make regex easier
     text = re.sub(r"\s+", " ", html)
 
-    # Pattern for each FOMC block
-    pattern = re.compile(
-        r"<strong>([A-Za-z]+\s+\d{1,2}(?:–\d{1,2})?,\s+\d{4})</strong>(.*?)</p>",
-        re.IGNORECASE
-    )
+    # Find each year section: "2025 FOMC Meetings", "2024 FOMC Meetings", etc.
+    year_matches = list(re.finditer(r"(\d{4})\s+FOMC Meetings", text))
+    if not year_matches:
+        return events
 
-    matches = pattern.findall(text)
+    for idx, m in enumerate(year_matches):
+        year = int(m.group(1))
+        start = m.end()
+        end = year_matches[idx + 1].start() if idx + 1 < len(year_matches) else len(text)
+        section = text[start:end]
 
-    for date_str, description in matches:
-        # Normalized lower text for classification
-        desc_lower = description.strip().lower()
-        date_str = date_str.replace("–", "-")
+        # Inside this year's section, look for "Month DD" or "Month DD-DD*"
+        md_pattern = re.compile(
+            r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+            r"\s+(\d{1,2})(?:-(\d{1,2})\*?)?"
+        )
 
-        # multi-day meetings
-        if "-" in date_str:
-            m = re.match(r"([A-Za-z]+)\s+(\d+)-(\d+),\s*(\d{4})", date_str)
-            if not m:
-                continue
-            month, d1, d2, year = m.groups()
-            dates = [
-                f"{month} {d1}, {year}",
-                f"{month} {d2}, {year}"
-            ]
-        else:
-            dates = [date_str]
+        for md in md_pattern.finditer(section):
+            month_name = md.group(1)
+            d1 = int(md.group(2))
+            d2 = int(md.group(3) or md.group(2))  # if no range, single day
 
-        for dt_str in dates:
+            # The policy decision (statement & press conf) is on the LAST day of the meeting
+            decision_day = d2
+
             try:
-                base_date = datetime.strptime(dt_str, "%B %d, %Y").replace(tzinfo=ET_TZ)
+                month_num = datetime.strptime(month_name, "%B").month
+                base_date = datetime(year, month_num, decision_day, tzinfo=ET_TZ)
             except Exception:
                 continue
 
-            # ---- Classification ----
-            title = None
-            event_time = None
-            location = "Federal Reserve"
-
-            # Priority order matters; minutes/testimony must not be swallowed
-            if "minutes" in desc_lower:
-                # FOMC Minutes – usually 14:00 ET
-                event_time = base_date.replace(hour=14, minute=0)
-                title = "FOMC Minutes"
-            elif "press conference" in desc_lower:
-                event_time = base_date.replace(hour=14, minute=30)
-                title = "FOMC Press Conference"
-            elif "statement" in desc_lower:
-                event_time = base_date.replace(hour=14, minute=0)
-                title = "FOMC Statement"
-            elif "meeting" in desc_lower:
-                event_time = base_date.replace(hour=8, minute=0)
-                title = "FOMC Meeting"
-            elif "monetary policy report" in desc_lower or "semiannual monetary policy report" in desc_lower:
-                # Powell Testimony — Monetary Policy Report (Humphrey-Hawkins)
-                # Time on site may differ, but we approximate 10:00 ET.
-                event_time = base_date.replace(hour=10, minute=0)
-                title = "Powell Testimony — Monetary Policy Report"
-                location = "U.S. Congress"
-
-            if not title or not event_time:
-                continue
+            # Approximate times: 14:00 ET Statement, 14:30 ET Press Conference
+            statement_time = base_date.replace(hour=14, minute=0)
+            press_time = base_date.replace(hour=14, minute=30)
 
             events.append(
                 {
-                    "title": title,
-                    "start": event_time.astimezone(timezone.utc),
-                    "location": location,
+                    "title": "FOMC Statement",
+                    "start": statement_time.astimezone(timezone.utc),
+                    "location": "Federal Reserve",
+                }
+            )
+            events.append(
+                {
+                    "title": "FOMC Press Conference",
+                    "start": press_time.astimezone(timezone.utc),
+                    "location": "Federal Reserve",
                 }
             )
 
