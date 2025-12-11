@@ -7,6 +7,7 @@ import feedparser  # NEW: for Reuters/AP RSS parsing
 from bot.utils import send_text
 from bot.datafeed_bitget import get_ticker
 
+send_text("🏦 [FedWatch] module loaded")
 
 # ---- HTML Source (FOMC Calendar) ----
 FED_HTML_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
