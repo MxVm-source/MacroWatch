@@ -7,8 +7,6 @@ from bot.utils import send_text, get_updates
 from bot.modules import trumpwatch, fedwatch, cryptowatch, cryptowatch_daily
 from bot.datafeed_bitget import get_position_report_safe
 
-# trumpwatch_live imported in __main__
-
 
 def boot_banner():
     send_text(
@@ -18,7 +16,7 @@ def boot_banner():
 
 
 def start_scheduler():
-    """Start jobs for TrumpWatch mock, FedWatch loop, and CryptoWatch."""
+    """Start jobs for TrumpWatch mock, FedWatch loop, CryptoWatch, and TradeWatch."""
     sched = BackgroundScheduler(timezone=os.getenv("TIMEZONE", "Europe/Brussels"))
 
     # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
@@ -31,7 +29,6 @@ def start_scheduler():
         threading.Thread(target=fedwatch.schedule_loop, daemon=True).start()
 
     # 📉 CryptoWatch Daily – mini brief before U.S. market open
-    # Default: enabled, 15:28 Brussels
     if os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() in ("1", "true", "yes", "on"):
         sched.add_job(
             cryptowatch_daily.main,
@@ -44,7 +41,6 @@ def start_scheduler():
         )
 
     # 📊 CryptoWatch Weekly – full weekly sentiment report
-    # Default: enabled, Sunday @ 18:00 Brussels
     if os.getenv("ENABLE_CRYPTOWATCH_WEEKLY", "true").lower() in ("1", "true", "yes", "on"):
         sched.add_job(
             cryptowatch.main,
@@ -57,14 +53,14 @@ def start_scheduler():
             replace_existing=True,
         )
 
-    # 📘 TradeWatch – Futures executions (BTCUSDT / ETHUSDT) + AI checklist (optional)
+    # 📘 TradeWatch – Futures executions + optional AI setup alerts
     if os.getenv("TRADEWATCH_ENABLED", "0") == "1":
         from bot.modules.tradewatch import start_tradewatch, start_ai_setup_alerts
 
-        # Watches executions (fills)
+        # 1) Executions watcher (fills)
         threading.Thread(target=start_tradewatch, args=(send_text,), daemon=True).start()
 
-        # Optional: auto AI setup alerts (no trade needed)
+        # 2) Auto AI setup alerts (no trade needed)
         if os.getenv("TRADEWATCH_AI_ALERTS", "0") == "1":
             threading.Thread(target=start_ai_setup_alerts, args=(send_text,), daemon=True).start()
 
@@ -77,16 +73,19 @@ def command_loop():
     offset = None
     while True:
         data = get_updates(offset=offset, timeout=20)
+
         for upd in data.get("result", []):
             offset = upd["update_id"] + 1
             msg = upd.get("message") or {}
+
             text_raw = (msg.get("text") or "").strip()
             text = text_raw.lower()
-            chat = str(msg.get("chat", {}).get("id"))
 
+            chat = str(msg.get("chat", {}).get("id"))
             if not text_raw or chat != str(os.getenv("CHAT_ID")):
                 continue
 
+            # 🍊 TrumpWatch
             if text.startswith("/trumpwatch"):
                 force = "force" in text
                 trumpwatch.post_mock(force=force)
@@ -94,22 +93,26 @@ def command_loop():
             elif text.startswith("/tw_recent"):
                 trumpwatch.show_recent()
 
+            # 🏦 FedWatch
             elif text.startswith("/fedwatch"):
                 fedwatch.show_next_event()
 
             elif text.startswith("/fed_diag"):
                 fedwatch.show_diag()
 
+            # 📊 CryptoWatch
             elif text.startswith("/cw_daily"):
                 cryptowatch_daily.main()
 
             elif text.startswith("/cw_weekly"):
                 cryptowatch.main()
 
+            # 📘 Position report (Bitget)
             elif text.startswith("/position"):
-                msg_out = get_position_report_safe()
-                send_text(msg_out)
+                out = get_position_report_safe()
+                send_text(out)
 
+            # 📈 TradeWatch status
             elif text.startswith("/tradewatch_status"):
                 try:
                     from bot.modules.tradewatch import get_status
@@ -117,6 +120,7 @@ def command_loop():
                 except Exception as e:
                     send_text(f"📈 [TradeWatch] Status unavailable: {e}")
 
+            # 🧠 AI setup status (auto alerts module)
             elif text.startswith("/setup_status"):
                 try:
                     from bot.modules.tradewatch import get_setup_status_text
@@ -124,12 +128,17 @@ def command_loop():
                 except Exception as e:
                     send_text(f"🧠 [AI Setup] Status unavailable: {e}")
 
+            # 🧠 Checklist on demand
+            # Usage:
+            #   /checklist
+            #   /checklist BTCUSDT
+            #   /checklist ETHUSDT.P   (TradingView style is okay)
             elif text.startswith("/checklist"):
-                # Usage: /checklist BTCUSDT  (or /checklist ETHUSDT)
                 try:
                     parts = text_raw.split()
                     symbol = parts[1].strip().upper() if len(parts) > 1 else "BTCUSDT"
-                    symbol = symbol.replace(".P", "")  # allow TV style
+                    # allow TradingView style
+                    symbol = symbol.replace(".P", "")
                     from bot.modules.tradewatch import get_checklist_status_text
                     send_text(get_checklist_status_text(symbol, include_reasons=True))
                 except Exception as e:
@@ -139,7 +148,7 @@ def command_loop():
 if __name__ == "__main__":
     boot_banner()
 
-    # Scheduler for TrumpWatch mock, FedWatch, CryptoWatch
+    # Scheduler for TrumpWatch mock, FedWatch, CryptoWatch, TradeWatch
     start_scheduler()
 
     # Start optional TrumpWatch Live in a dedicated thread
