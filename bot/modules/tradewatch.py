@@ -1,27 +1,44 @@
 #!/usr/bin/env python3
 """
-TradeWatch (Bitget) — Futures Executions + AI Checklist
-======================================================
+TradeWatch (Bitget) — Futures Executions + AI Checklist + Auto Setup Alerts
+==========================================================================
+- Watches Bitget **Futures (MIX)** fills/executions and sends Telegram messages via send_func(text)
+- Computes an AI checklist (Structure / Liquidity / FVG) from **4H candles**
+- Optionally sends **Auto AI Setup Alerts** even when you haven't executed a trade yet
 
-This module polls Bitget futures fills (MIX) and sends Telegram messages via send_func(text).
-It also provides an AI checklist block (Structure/Liquidity/FVG) computed from 4H candles.
+Bitget vs TradingView symbol note:
+- TradingView perpetuals often look like: BTCUSDT.P / ETHUSDT.P
+- Bitget REST expects: BTCUSDT / ETHUSDT (NO ".P")
+This module normalizes symbols by stripping a trailing ".P" anywhere it appears.
 
-Key endpoints (Bitget V2 Futures):
-- Fills (executions): GET /api/v2/mix/order/fills  (returns data.fillList)
-- Candles: we try /api/v2/mix/market/candles then fallback to /api/v2/spot/market/candles
+Key endpoints (Bitget V2):
+- Fills (executions): GET /api/v2/mix/order/fills  (data.fillList)
+- Candles (public):  GET /api/v2/mix/market/candles  (fallback: /api/v2/spot/market/candles)
 
-Environment variables:
-- BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSPHRASE (required)
-- TRADEWATCH_ENABLED=1 (required to run watcher)
-- TRADEWATCH_POLL_INTERVAL_SEC=10 (default 10)
-- TRADEWATCH_PRODUCT_TYPE=USDT-FUTURES (default)  # USDT-FUTURES / COIN-FUTURES / USDC-FUTURES
-- TRADEWATCH_SYMBOLS=BTCUSDT,ETHUSDT (default)    # comma-separated symbols; empty means ALL
-- TRADEWATCH_CHECKLIST_ENABLED=1 (default 1)
-- TRADEWATCH_DEGEN=1 (optional fun templates)
+Environment variables
+---------------------
+Auth (required for fills):
+- BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSPHRASE
 
-Notes:
-- Fills use the futures "productType" parameter (required by Bitget).
-- Bitget returns futures symbols lowercased in some fields; we normalize to upper.
+Core:
+- TRADEWATCH_ENABLED=1
+- TRADEWATCH_POLL_INTERVAL_SEC=10
+- TRADEWATCH_PRODUCT_TYPE=USDT-FUTURES          # USDT-FUTURES / COIN-FUTURES / USDC-FUTURES
+- TRADEWATCH_SYMBOLS=BTCUSDT,ETHUSDT            # comma-separated; empty means ALL
+
+Checklist:
+- TRADEWATCH_CHECKLIST_ENABLED=1                 # attach checklist to execution alerts
+- TRADEWATCH_CHECKLIST_GRANULARITY=4H            # default 4H (fallback tries 240)
+
+Auto AI setup alerts (no trade needed):
+- TRADEWATCH_AI_ALERTS=1                         # enable background setup alerts
+- TRADEWATCH_AI_MIN_SCORE=6                      # minimum score (out of 10) for ✅ alerts
+- TRADEWATCH_AI_INTERVAL_SEC=60                  # scan frequency
+- TRADEWATCH_AI_COOLDOWN_MIN=180                 # per-symbol cooldown for ✅ alerts
+- TRADEWATCH_AI_SEND_PARTIAL=0                   # if 1, also alert on 🟡 PARTIAL transitions
+
+Fun:
+- TRADEWATCH_DEGEN=1
 """
 
 from __future__ import annotations
@@ -34,8 +51,8 @@ import hashlib
 import base64
 import random
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Tuple, Optional
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Tuple, Optional, Callable
 
 import requests
 
@@ -54,11 +71,30 @@ TRADEWATCH_POLL_INTERVAL_SEC = int(os.environ.get("TRADEWATCH_POLL_INTERVAL_SEC"
 
 # Futures-specific
 TRADEWATCH_PRODUCT_TYPE = os.environ.get("TRADEWATCH_PRODUCT_TYPE", "USDT-FUTURES")
-# comma-separated list; default BTC+ETH; empty means no symbol filter
-TRADEWATCH_SYMBOLS = [s.strip().upper() for s in os.environ.get("TRADEWATCH_SYMBOLS", "BTCUSDT,ETHUSDT").split(",") if s.strip()]
 
-# Optional: enable checklist evaluation in alerts (default on)
+def _parse_symbols(raw: str) -> List[str]:
+    out: List[str] = []
+    for s in (raw or "").split(","):
+        s = (s or "").strip().upper()
+        if not s:
+            continue
+        if s.endswith(".P"):
+            s = s[:-2]
+        out.append(s)
+    return out
+
+TRADEWATCH_SYMBOLS = _parse_symbols(os.environ.get("TRADEWATCH_SYMBOLS", "BTCUSDT,ETHUSDT"))
+
+# Checklist
 TRADEWATCH_CHECKLIST_ENABLED = os.environ.get("TRADEWATCH_CHECKLIST_ENABLED", "1") == "1"
+TRADEWATCH_CHECKLIST_GRANULARITY = os.environ.get("TRADEWATCH_CHECKLIST_GRANULARITY", "4H")  # "4H" or "240"
+
+# Auto AI setup alerts (no trade needed)
+TRADEWATCH_AI_ALERTS = os.environ.get("TRADEWATCH_AI_ALERTS", "0") == "1"
+TRADEWATCH_AI_MIN_SCORE = int(os.environ.get("TRADEWATCH_AI_MIN_SCORE", "6"))
+TRADEWATCH_AI_INTERVAL_SEC = int(os.environ.get("TRADEWATCH_AI_INTERVAL_SEC", "60"))
+TRADEWATCH_AI_COOLDOWN_MIN = int(os.environ.get("TRADEWATCH_AI_COOLDOWN_MIN", "180"))
+TRADEWATCH_AI_SEND_PARTIAL = os.environ.get("TRADEWATCH_AI_SEND_PARTIAL", "0") == "1"
 
 # =========================
 # State (for /tradewatch_status)
@@ -74,7 +110,12 @@ STATE: Dict[str, Any] = {
     "last_checklist_utc": None,
     "last_checklist_symbol": None,
     "last_checklist_status": None,
+    "last_ai_scan_utc": None,
 }
+
+# Per-symbol state for AI alerts + /setup_status
+SETUP_STATE: Dict[str, Dict[str, Any]] = {}
+# SETUP_STATE[sym] = {"last_status": "—", "last_bias": "—", "last_score": "—", "last_alert_utc": None}
 
 # =========================
 # Degen templates (optional)
@@ -104,6 +145,12 @@ def _iso_utc_now() -> str:
 
 def _iso_or_none(dt: Optional[datetime]) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "—"
+
+def _normalize_symbol(sym: str) -> str:
+    sym = (sym or "").strip().upper()
+    if sym.endswith(".P"):
+        sym = sym[:-2]
+    return sym
 
 def _signed_request(method: str, request_path: str, params: dict | None = None, body: dict | None = None) -> dict:
     """
@@ -161,76 +208,67 @@ def _signed_request(method: str, request_path: str, params: dict | None = None, 
 
     return data
 
+def _public_get(request_path: str, params: dict) -> dict:
+    """Public GET (no auth) — used for candles."""
+    from urllib.parse import urlencode
+    url = f"{BITGET_BASE_URL}{request_path}?{urlencode(params)}"
+    r = requests.get(url, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"Bitget HTTP {r.status_code}: {r.text}")
+    data = r.json()
+    if data.get("code") != "00000":
+        raise RuntimeError(f"Bitget API error {data.get('code')}: {data.get('msg')}")
+    return data
+
 # =========================
 # Futures Fills (Executions)
 # =========================
 
-def _fetch_futures_fills(limit: int = 100, id_less_than: str | None = None) -> List[dict]:
+def _fetch_futures_fills(limit: int = 100, symbol: str | None = None) -> List[dict]:
     """
     Bitget Futures V2: Get Order Fill Details
       GET /api/v2/mix/order/fills?productType=USDT-FUTURES&symbol=BTCUSDT
-
     Returns: list of fill dicts from data.fillList
-    Docs: https://www.bitget.com/api-doc/contract/trade/Get-Order-Fills
     """
     params: Dict[str, str] = {
         "productType": TRADEWATCH_PRODUCT_TYPE,
         "limit": str(min(max(limit, 1), 100)),
     }
-    if id_less_than:
-        params["idLessThan"] = str(id_less_than)
-
-    # If symbols list is empty: no filter (Bitget allows symbol optional)
-    # If symbols list has 1 item: request that symbol
-    # If multiple: we fetch per symbol to avoid missing data
-    # (Bitget endpoint supports symbol optional but can return all symbols; depends on account load)
-    if len(TRADEWATCH_SYMBOLS) == 1:
-        params["symbol"] = TRADEWATCH_SYMBOLS[0]
+    if symbol:
+        params["symbol"] = _normalize_symbol(symbol)
 
     data = _signed_request("GET", "/api/v2/mix/order/fills", params=params, body=None)
-    fill_list = (data.get("data") or {}).get("fillList") or []
-    return fill_list
+    return ((data.get("data") or {}).get("fillList") or [])
 
 def _fetch_futures_fills_multi(limit_each: int = 60) -> List[dict]:
-    """
-    If tracking multiple symbols, query each symbol and merge results.
-    """
+    """If tracking multiple symbols, query each symbol and merge results."""
     if not TRADEWATCH_SYMBOLS:
-        return _fetch_futures_fills(limit=100)
+        return _fetch_futures_fills(limit=100, symbol=None)
 
     out: List[dict] = []
     for sym in TRADEWATCH_SYMBOLS:
-        params: Dict[str, str] = {
-            "productType": TRADEWATCH_PRODUCT_TYPE,
-            "symbol": sym,
-            "limit": str(min(max(limit_each, 1), 100)),
-        }
-        data = _signed_request("GET", "/api/v2/mix/order/fills", params=params, body=None)
-        out.extend(((data.get("data") or {}).get("fillList") or []))
+        out.extend(_fetch_futures_fills(limit=limit_each, symbol=sym))
     return out
 
 def _classify_execution(fill: dict) -> str:
-    """
-    Futures fill fields (per docs):
-      tradeSide: open / close / reduce_close_long / ...
-      tradeScope: maker / taker
-      side: buy / sell
-    """
     trade_side = (fill.get("tradeSide") or "").lower()
-    if trade_side == "open" or "open" in trade_side:
+    scope = (fill.get("orderType") or fill.get("tradeScope") or "").lower()
+
+    if "take" in scope or "tp" in scope:
+        return "Take Profit"
+    if "stop" in scope or "sl" in scope:
+        return "Stop Loss"
+
+    if "open" in trade_side:
         return "Position Open/Increase"
-    if trade_side == "close" or "close" in trade_side:
+    if "close" in trade_side or "reduce" in trade_side:
         return "Position Close/Reduce"
     return "Execution"
 
 def _format_message(fill: dict, checklist_block: str | None = None) -> str:
-    """
-    Telegram message format for futures fills.
-    """
-    pair = (fill.get("symbol") or "N/A").upper()
+    pair = _normalize_symbol(fill.get("symbol") or "N/A")
     side_raw = (fill.get("side") or "N/A").upper()
     price = fill.get("price") or fill.get("priceAvg") or "N/A"
-    # futures: baseVolume is size in base coin units
     size = fill.get("baseVolume") or fill.get("size") or fill.get("amount") or "N/A"
     trade_id = fill.get("tradeId") or fill.get("id") or ""
     trade_scope = (fill.get("tradeScope") or "").lower()
@@ -241,12 +279,7 @@ def _format_message(fill: dict, checklist_block: str | None = None) -> str:
     else:
         header = "📈 [TradeWatch] Futures Execution"
 
-    if side_raw == "BUY":
-        side_emoji = "🟢"
-    elif side_raw == "SELL":
-        side_emoji = "🔴"
-    else:
-        side_emoji = "📘"
+    side_emoji = "🟢" if side_raw == "BUY" else ("🔴" if side_raw == "SELL" else "📘")
 
     execution = _classify_execution(fill)
     maker_taker = f"{trade_scope}".upper() if trade_scope else "—"
@@ -275,9 +308,12 @@ def get_status() -> str:
         f"Enabled: {'Yes ✅' if TRADEWATCH_ENABLED else 'No ❌'}",
         f"ProductType: {TRADEWATCH_PRODUCT_TYPE}",
         f"Symbols: {symbols}",
+        f"Polling: {TRADEWATCH_POLL_INTERVAL_SEC}s",
+        f"AI alerts: {'Yes ✅' if TRADEWATCH_AI_ALERTS else 'No ❌'} (every {TRADEWATCH_AI_INTERVAL_SEC}s, min {TRADEWATCH_AI_MIN_SCORE}/10)",
         f"Running loop: {'Yes ✅' if STATE['running'] else 'No ❌'}",
         f"Last poll (UTC): {_iso_or_none(STATE['last_poll_utc'])}",
         f"Last trade (UTC): {_iso_or_none(STATE['last_trade_utc'])}",
+        f"Last AI scan (UTC): {_iso_or_none(STATE.get('last_ai_scan_utc'))}",
     ]
     if STATE.get("last_trade_pair"):
         lines.append(f"Last trade: {STATE['last_trade_pair']} {STATE.get('last_trade_side','')}".strip())
@@ -288,84 +324,6 @@ def get_status() -> str:
     if STATE.get("last_error"):
         lines.append(f"Last error: {STATE['last_error']}")
     return "\n".join(lines)
-
-def start_tradewatch(send_func):
-    """
-    Main polling loop. Provide a send_func(text:str) that sends to Telegram.
-    """
-    if not TRADEWATCH_ENABLED:
-        print("[TradeWatch] Disabled (TRADEWATCH_ENABLED != 1)")
-        STATE["running"] = False
-        return
-
-    if not (BITGET_API_KEY and BITGET_API_SECRET and BITGET_API_PASSPHRASE):
-        print("[TradeWatch] Missing Bitget API credentials.")
-        STATE["running"] = False
-        return
-
-    print("[TradeWatch] Watcher started (FUTURES fills)...")
-    STATE["running"] = True
-
-    seen: set[str] = set()
-    first_run = True
-
-    while True:
-        try:
-            STATE["last_poll_utc"] = datetime.now(timezone.utc)
-
-            fills = _fetch_futures_fills_multi(limit_each=60)
-
-            if first_run:
-                for f in fills:
-                    tid = f.get("tradeId") or f.get("id")
-                    if tid:
-                        seen.add(str(tid))
-                first_run = False
-            else:
-                # Send oldest unseen first (sort by cTime)
-                def _ctime(x: dict) -> int:
-                    try:
-                        return int(x.get("cTime") or 0)
-                    except Exception:
-                        return 0
-
-                fills_sorted = sorted(fills, key=_ctime)
-                for f in fills_sorted:
-                    tid = f.get("tradeId") or f.get("id")
-                    if not tid:
-                        continue
-                    tid = str(tid)
-                    if tid in seen:
-                        continue
-                    seen.add(tid)
-
-                    # Normalize symbol filter if TRADEWATCH_SYMBOLS set
-                    sym = (f.get("symbol") or "").upper()
-                    if TRADEWATCH_SYMBOLS and sym and sym not in TRADEWATCH_SYMBOLS:
-                        continue
-
-                    STATE["last_trade_utc"] = datetime.now(timezone.utc)
-                    STATE["last_trade_pair"] = sym or f.get("symbol")
-                    STATE["last_trade_side"] = (f.get("side") or "").upper()
-                    STATE["last_error"] = None
-
-                    checklist_block = None
-                    if TRADEWATCH_CHECKLIST_ENABLED and sym:
-                        try:
-                            checklist_block = get_checklist_status_text(sym, include_reasons=False)
-                        except Exception as ce:
-                            checklist_block = f"🧠 Checklist: unavailable ({ce})"
-
-                    send_func(_format_message(f, checklist_block=checklist_block))
-
-                if len(seen) > 4000:
-                    seen = set(list(seen)[-2500:])
-
-        except Exception as e:
-            STATE["last_error"] = str(e)
-            print("[TradeWatch] Error:", e)
-
-        time.sleep(TRADEWATCH_POLL_INTERVAL_SEC)
 
 # ============================================================
 # AI Checklist (Structure / Liquidity / FVG) — 4H candles
@@ -410,30 +368,16 @@ def bitget_klines_to_candles(raw: Any) -> List[Candle]:
                 "close": float(row[4]),
                 "volume": float(row[5]),
             })
-        elif isinstance(row, dict):
-            ts = row.get("ts") or row.get("candleTime") or row.get("timestamp") or row.get("time")
-            o = row.get("open") or row.get("o")
-            h = row.get("high") or row.get("h")
-            l = row.get("low") or row.get("l")
-            c = row.get("close") or row.get("c")
-            v = row.get("volume") or row.get("v") or row.get("baseVol") or row.get("quoteVol") or 0.0
-            if ts is None or o is None or h is None or l is None or c is None:
-                continue
-            ts = float(ts)
-            if ts > 1e12:
-                ts /= 1000.0
-            out.append({"ts": ts, "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": float(v)})
     out.sort(key=lambda x: x["ts"])
     return out
 
-def fetch_candles_4h(symbol: str, limit: int = 320) -> List[Candle]:
-    # MIX candles
+def fetch_candles(symbol: str, granularity: str, limit: int = 320) -> List[Candle]:
+    symbol = _normalize_symbol(symbol)
+    # MIX candles (public)
     try:
-        raw = _signed_request(
-            "GET",
+        raw = _public_get(
             "/api/v2/mix/market/candles",
-            params={"symbol": symbol, "granularity": "4H", "limit": str(limit), "productType": TRADEWATCH_PRODUCT_TYPE},
-            body=None,
+            params={"symbol": symbol, "granularity": granularity, "limit": str(limit), "productType": TRADEWATCH_PRODUCT_TYPE},
         )
         candles = bitget_klines_to_candles(raw)
         if candles:
@@ -441,14 +385,25 @@ def fetch_candles_4h(symbol: str, limit: int = 320) -> List[Candle]:
     except Exception:
         pass
 
-    # SPOT fallback (should still work for BTCUSDT/ETHUSDT if needed)
-    raw = _signed_request(
-        "GET",
+    # SPOT fallback (public)
+    raw = _public_get(
         "/api/v2/spot/market/candles",
-        params={"symbol": symbol, "granularity": "4H", "limit": str(limit)},
-        body=None,
+        params={"symbol": symbol, "granularity": granularity, "limit": str(limit)},
     )
     return bitget_klines_to_candles(raw)
+
+def fetch_candles_4h(symbol: str, limit: int = 320) -> List[Candle]:
+    for g in [TRADEWATCH_CHECKLIST_GRANULARITY, "4H", "240"]:
+        g = str(g).strip()
+        if not g:
+            continue
+        try:
+            c = fetch_candles(symbol, g, limit=limit)
+            if c:
+                return c
+        except Exception:
+            continue
+    return []
 
 def _ema(values: List[float], period: int) -> List[float]:
     if not values:
@@ -659,6 +614,7 @@ def check_fvg(candles: List[Candle], max_lookback: int = 80) -> CheckResult:
     return CheckResult(score >= 2, score, 3, bias, reasons, {"zone": (kind, z_low, z_high), "mid": mid})
 
 def evaluate_checklist(symbol: str) -> ChecklistResult:
+    symbol = _normalize_symbol(symbol)
     candles = fetch_candles_4h(symbol)
     if not candles:
         s = CheckResult(False, 0, 4, "NEUTRAL", ["No candles returned from Bitget."], {})
@@ -693,6 +649,7 @@ def evaluate_checklist(symbol: str) -> ChecklistResult:
     return ChecklistResult(status, bias, score, max_score, s, l, f)
 
 def get_checklist_status_text(symbol: str, include_reasons: bool = True) -> str:
+    symbol = _normalize_symbol(symbol)
     res = evaluate_checklist(symbol)
     lines = [
         "🧠 [AI Checklist]",
@@ -713,3 +670,204 @@ def get_checklist_status_text(symbol: str, include_reasons: bool = True) -> str:
         for r in res.fvg.reasons[:5]:
             lines.append(f"• {r}")
     return "\n".join(lines)
+
+# =========================
+# Auto AI Setup Alerts + /setup_status
+# =========================
+
+def _bias_emoji(bias: str) -> str:
+    b = (bias or "").upper()
+    if b == "LONG":
+        return "🟢"
+    if b == "SHORT":
+        return "🔴"
+    return "⚪️"
+
+def _status_emoji(status: str) -> str:
+    if "SETUP VALID" in status:
+        return "✅"
+    if "PARTIAL" in status:
+        return "🟡"
+    if "NO TRADE" in status or "NO DATA" in status:
+        return "🔴"
+    return "⚪️"
+
+def _should_alert(sym: str, res: ChecklistResult) -> bool:
+    sym = _normalize_symbol(sym)
+    is_valid = "SETUP VALID" in res.status
+    is_partial = "PARTIAL" in res.status
+
+    if is_valid:
+        if res.score < TRADEWATCH_AI_MIN_SCORE:
+            return False
+    elif is_partial:
+        if not TRADEWATCH_AI_SEND_PARTIAL:
+            return False
+    else:
+        return False
+
+    now = datetime.now(timezone.utc)
+
+    if is_valid:
+        last_alert = SETUP_STATE.get(sym, {}).get("last_alert_utc")
+        if last_alert and (now - last_alert) < timedelta(minutes=TRADEWATCH_AI_COOLDOWN_MIN):
+            return False
+
+    prev = SETUP_STATE.get(sym, {})
+    if prev.get("last_status") == res.status and prev.get("last_bias") == res.bias:
+        return False
+
+    prev_status = prev.get("last_status", "—")
+    if is_valid and ("SETUP VALID" not in prev_status):
+        return True
+    if is_partial and ("PARTIAL" not in prev_status):
+        return True
+
+    return False
+
+def _format_ai_alert(sym: str, res: ChecklistResult) -> str:
+    sym = _normalize_symbol(sym)
+    se = _status_emoji(res.status)
+    be = _bias_emoji(res.bias)
+    return (
+        f"{se} [AI SETUP ALERT]\n"
+        f"Pair: {sym}\n"
+        f"Bias: {be} {res.bias}\n"
+        f"Score: {res.score}/{res.max_score}\n"
+        f"Status: {res.status}\n\n"
+        f"Fast checks:\n"
+        f"• Structure: {res.structure.bias} ({res.structure.score}/{res.structure.max_score})\n"
+        f"• Liquidity: {res.liquidity.bias} ({res.liquidity.score}/{res.liquidity.max_score})\n"
+        f"• FVG: {res.fvg.bias} ({res.fvg.score}/{res.fvg.max_score})\n"
+        f"Time (UTC): {_iso_utc_now()}"
+    )
+
+def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
+    if not TRADEWATCH_AI_ALERTS:
+        print("[TradeWatch] AI setup alerts disabled (TRADEWATCH_AI_ALERTS != 1)")
+        return
+
+    symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
+
+    for s in symbols:
+        sym = _normalize_symbol(s)
+        SETUP_STATE.setdefault(sym, {"last_status": "—", "last_bias": "—", "last_score": "—", "last_alert_utc": None})
+        try:
+            r0 = evaluate_checklist(sym)
+            SETUP_STATE[sym]["last_status"] = r0.status
+            SETUP_STATE[sym]["last_bias"] = r0.bias
+            SETUP_STATE[sym]["last_score"] = f"{r0.score}/{r0.max_score}"
+        except Exception as e:
+            STATE["last_error"] = f"AI init error {sym}: {e}"
+
+    print("[TradeWatch] AI setup alerts started ✅")
+
+    while True:
+        try:
+            STATE["last_ai_scan_utc"] = datetime.now(timezone.utc)
+            for s in symbols:
+                sym = _normalize_symbol(s)
+                res = evaluate_checklist(sym)
+
+                if _should_alert(sym, res):
+                    send_func(_format_ai_alert(sym, res))
+                    SETUP_STATE[sym]["last_alert_utc"] = datetime.now(timezone.utc)
+
+                SETUP_STATE[sym]["last_status"] = res.status
+                SETUP_STATE[sym]["last_bias"] = res.bias
+                SETUP_STATE[sym]["last_score"] = f"{res.score}/{res.max_score}"
+
+        except Exception as e:
+            STATE["last_error"] = f"AI alerts error: {e}"
+            print("[TradeWatch] AI alerts error:", e)
+
+        time.sleep(TRADEWATCH_AI_INTERVAL_SEC)
+
+def get_setup_status_text() -> str:
+    symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
+    lines = ["🧠 [AI Setup Status]"]
+    for s in symbols:
+        sym = _normalize_symbol(s)
+        st = SETUP_STATE.get(sym, {})
+        last_status = st.get("last_status", "—")
+        last_bias = st.get("last_bias", "—")
+        last_score = st.get("last_score", "—")
+        last_alert = st.get("last_alert_utc")
+        last_alert_str = _iso_or_none(last_alert) if last_alert else "—"
+        lines.append(f"{sym} — {_status_emoji(last_status)} {last_status} | {_bias_emoji(last_bias)} {last_bias} | {last_score} | last alert: {last_alert_str}")
+    return "\n".join(lines)
+
+# =========================
+# Main: Trade execution watcher
+# =========================
+
+def start_tradewatch(send_func: Callable[[str], None]) -> None:
+    if not TRADEWATCH_ENABLED:
+        print("[TradeWatch] Disabled (TRADEWATCH_ENABLED != 1)")
+        STATE["running"] = False
+        return
+
+    if not (BITGET_API_KEY and BITGET_API_SECRET and BITGET_API_PASSPHRASE):
+        print("[TradeWatch] Missing Bitget API credentials.")
+        STATE["running"] = False
+        return
+
+    print("[TradeWatch] Watcher started (FUTURES fills)...")
+    STATE["running"] = True
+
+    seen: set[str] = set()
+    first_run = True
+
+    while True:
+        try:
+            STATE["last_poll_utc"] = datetime.now(timezone.utc)
+            fills = _fetch_futures_fills_multi(limit_each=60)
+
+            if first_run:
+                for f in fills:
+                    tid = f.get("tradeId") or f.get("id")
+                    if tid:
+                        seen.add(str(tid))
+                first_run = False
+            else:
+                def _ctime(x: dict) -> int:
+                    try:
+                        return int(x.get("cTime") or 0)
+                    except Exception:
+                        return 0
+
+                for f in sorted(fills, key=_ctime):
+                    tid = f.get("tradeId") or f.get("id")
+                    if not tid:
+                        continue
+                    tid = str(tid)
+                    if tid in seen:
+                        continue
+                    seen.add(tid)
+
+                    sym = _normalize_symbol(f.get("symbol") or "")
+                    if TRADEWATCH_SYMBOLS and sym and sym not in TRADEWATCH_SYMBOLS:
+                        continue
+
+                    STATE["last_trade_utc"] = datetime.now(timezone.utc)
+                    STATE["last_trade_pair"] = sym or f.get("symbol")
+                    STATE["last_trade_side"] = (f.get("side") or "").upper()
+                    STATE["last_error"] = None
+
+                    checklist_block = None
+                    if TRADEWATCH_CHECKLIST_ENABLED and sym:
+                        try:
+                            checklist_block = get_checklist_status_text(sym, include_reasons=False)
+                        except Exception as ce:
+                            checklist_block = f"🧠 Checklist: unavailable ({ce})"
+
+                    send_func(_format_message(f, checklist_block=checklist_block))
+
+                if len(seen) > 4000:
+                    seen = set(list(seen)[-2500:])
+
+        except Exception as e:
+            STATE["last_error"] = str(e)
+            print("[TradeWatch] Error:", e)
+
+        time.sleep(TRADEWATCH_POLL_INTERVAL_SEC)
