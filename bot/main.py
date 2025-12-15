@@ -163,7 +163,7 @@ def start_scheduler():
             replace_existing=True,
         )
 
-    # 📘 TradeWatch – Futures executions + optional AI setup alerts
+    # 📘 TradeWatch – Futures executions + AI setup alerts + TP hit updates
     if os.getenv("TRADEWATCH_ENABLED", "0") == "1":
         from bot.modules.tradewatch import start_tradewatch, start_ai_setup_alerts
 
@@ -171,6 +171,11 @@ def start_scheduler():
 
         if os.getenv("TRADEWATCH_AI_ALERTS", "0") == "1":
             threading.Thread(target=start_ai_setup_alerts, args=(send_text,), daemon=True).start()
+
+        # ✅ NEW: TP hit watcher (TP1/TP2/TP3 updates)
+        if os.getenv("TRADEWATCH_TP_ALERTS", "0") == "1":
+            from bot.modules.tradewatch import start_tp_hit_watcher
+            threading.Thread(target=start_tp_hit_watcher, args=(send_text,), daemon=True).start()
 
     sched.start()
     return sched
@@ -200,7 +205,8 @@ def command_loop():
                     "📈 *TradeWatch*\n"
                     "/tradewatch_status – TradeWatch system status\n"
                     "/setup_status – AI setup status (BTC & ETH)\n"
-                    "/checklist [SYMBOL] – AI checklist (ex: /checklist BTCUSDT)\n\n"
+                    "/checklist [SYMBOL] – AI checklist (ex: /checklist BTCUSDT)\n"
+                    "/tp_status – TP progress for latest AI plan\n\n"
                     "🧠 *AI Strategy*\n"
                     "/ai – Strategy rules (quick)\n"
                     "/levels – Key BTC/ETH support & resistance\n"
@@ -285,6 +291,14 @@ def command_loop():
                         )
                 except Exception as e:
                     send_text(f"🧠 [Plan] Error: {e}")
+
+            # 🎯 TP STATUS (latest plan progress)
+            elif text.startswith("/tp_status"):
+                try:
+                    from bot.modules.tradewatch import get_tp_status_text
+                    send_text(get_tp_status_text())
+                except Exception as e:
+                    send_text(f"🎯 [TP Status] Error: {e}")
 
             # 🩺 HEALTH
             elif text.startswith("/health"):
