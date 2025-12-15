@@ -1016,6 +1016,25 @@ def get_setup_status_text() -> str:
         )
     return "\n".join(lines)
 
+def classify_trade_style(res: ChecklistResult, atr: float, sl_distance: float) -> str:
+    """
+    Returns: SCALP | INTRADAY | SWING
+    """
+    score = res.score
+    confirmations = sum([
+        res.structure.ok,
+        res.liquidity.ok,
+        res.fvg.ok
+    ])
+
+    if score <= 6 or confirmations <= 1 or sl_distance <= atr * 0.6:
+        return "SCALP"
+
+    if score <= 7 or confirmations == 2:
+        return "INTRADAY"
+
+    return "SWING"
+
 # =========================
 # Main: Trade execution watcher
 # =========================
