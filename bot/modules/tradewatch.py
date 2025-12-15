@@ -1,44 +1,19 @@
 #!/usr/bin/env python3
 """
-TradeWatch (Bitget) — Futures Executions + AI Checklist + Auto Setup Alerts
-==========================================================================
-- Watches Bitget **Futures (MIX)** fills/executions and sends Telegram messages via send_func(text)
-- Computes an AI checklist (Structure / Liquidity / FVG) from **4H candles**
-- Optionally sends **Auto AI Setup Alerts** even when you haven't executed a trade yet
+TradeWatch (Bitget) — Futures Executions + AI Checklist + Auto Setup Alerts + TP Hit Updates
+==========================================================================================
+- Watches Bitget Futures (MIX) fills/executions and sends Telegram messages via send_func(text)
+- Computes an AI checklist (Structure / Liquidity / FVG) from 4H candles
+- Optionally sends Auto AI Setup Alerts even when you haven't executed a trade yet
+- ✅ NEW: builds a clean plan (Entry/SL/TP1/TP2/TP3) and sends it with the AI alert
+- ✅ NEW: TP hit watcher sends TP1 / TP2 / TP3 hit updates automatically
 
-Bitget vs TradingView symbol note:
-- TradingView perpetuals often look like: BTCUSDT.P / ETHUSDT.P
-- Bitget REST expects: BTCUSDT / ETHUSDT (NO ".P")
-This module normalizes symbols by stripping a trailing ".P" anywhere it appears.
-
-Key endpoints (Bitget V2):
-- Fills (executions): GET /api/v2/mix/order/fills  (data.fillList)
-- Candles (public):  GET /api/v2/mix/market/candles  (fallback: /api/v2/spot/market/candles)
-
-Environment variables
----------------------
-Auth (required for fills):
-- BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSPHRASE
-
-Core:
-- TRADEWATCH_ENABLED=1
-- TRADEWATCH_POLL_INTERVAL_SEC=10
-- TRADEWATCH_PRODUCT_TYPE=USDT-FUTURES          # USDT-FUTURES / COIN-FUTURES / USDC-FUTURES
-- TRADEWATCH_SYMBOLS=BTCUSDT,ETHUSDT            # comma-separated; empty means ALL
-
-Checklist:
-- TRADEWATCH_CHECKLIST_ENABLED=1                 # attach checklist to execution alerts
-- TRADEWATCH_CHECKLIST_GRANULARITY=4H            # default 4H (fallback tries 240)
-
-Auto AI setup alerts (no trade needed):
-- TRADEWATCH_AI_ALERTS=1                         # enable background setup alerts
-- TRADEWATCH_AI_MIN_SCORE=6                      # minimum score (out of 10) for ✅ alerts
-- TRADEWATCH_AI_INTERVAL_SEC=60                  # scan frequency
-- TRADEWATCH_AI_COOLDOWN_MIN=180                 # per-symbol cooldown for ✅ alerts
-- TRADEWATCH_AI_SEND_PARTIAL=0                   # if 1, also alert on 🟡 PARTIAL transitions
-
-Fun:
-- TRADEWATCH_DEGEN=1
+Env vars (new)
+--------------
+TP tracking:
+- TRADEWATCH_TP_ALERTS=1            # enable TP hit watcher
+- TRADEWATCH_TP_POLL_SEC=15         # price polling interval
+- TRADEWATCH_TP_REQUIRE_PLAN=1      # if 1, only track TPs after a plan exists (AI alert generated)
 """
 
 from __future__ import annotations
@@ -96,8 +71,13 @@ TRADEWATCH_AI_INTERVAL_SEC = int(os.environ.get("TRADEWATCH_AI_INTERVAL_SEC", "6
 TRADEWATCH_AI_COOLDOWN_MIN = int(os.environ.get("TRADEWATCH_AI_COOLDOWN_MIN", "180"))
 TRADEWATCH_AI_SEND_PARTIAL = os.environ.get("TRADEWATCH_AI_SEND_PARTIAL", "0") == "1"
 
+# ✅ TP hit updates
+TRADEWATCH_TP_ALERTS = os.environ.get("TRADEWATCH_TP_ALERTS", "0") == "1"
+TRADEWATCH_TP_POLL_SEC = int(os.environ.get("TRADEWATCH_TP_POLL_SEC", "15"))
+TRADEWATCH_TP_REQUIRE_PLAN = os.environ.get("TRADEWATCH_TP_REQUIRE_PLAN", "1") == "1"
+
 # =========================
-# State (for /tradewatch_status)
+# State
 # =========================
 
 STATE: Dict[str, Any] = {
@@ -111,11 +91,15 @@ STATE: Dict[str, Any] = {
     "last_checklist_symbol": None,
     "last_checklist_status": None,
     "last_ai_scan_utc": None,
+    "last_tp_scan_utc": None,
 }
 
 # Per-symbol state for AI alerts + /setup_status
 SETUP_STATE: Dict[str, Dict[str, Any]] = {}
-# SETUP_STATE[sym] = {"last_status": "—", "last_bias": "—", "last_score": "—", "last_alert_utc": None}
+
+# ✅ Plan + TP progress (per symbol)
+# PLAN_STATE[sym] = {"bias","entry_zone","sl","tps":[...], "created_utc", "tp_hits":[bool,bool,bool], "last_price": float|None}
+PLAN_STATE: Dict[str, Dict[str, Any]] = {}
 
 # =========================
 # Degen templates (optional)
@@ -153,12 +137,6 @@ def _normalize_symbol(sym: str) -> str:
     return sym
 
 def _signed_request(method: str, request_path: str, params: dict | None = None, body: dict | None = None) -> dict:
-    """
-    Bitget V2 authenticated request.
-
-    Signature format (Bitget V2):
-      timestamp + method.toUpperCase() + requestPath + ("?" + query if query else "") + body
-    """
     if not (BITGET_API_KEY and BITGET_API_SECRET and BITGET_API_PASSPHRASE):
         raise RuntimeError("TradeWatch: Bitget API credentials missing")
 
@@ -209,7 +187,6 @@ def _signed_request(method: str, request_path: str, params: dict | None = None, 
     return data
 
 def _public_get(request_path: str, params: dict) -> dict:
-    """Public GET (no auth) — used for candles."""
     from urllib.parse import urlencode
     url = f"{BITGET_BASE_URL}{request_path}?{urlencode(params)}"
     r = requests.get(url, timeout=10)
@@ -221,15 +198,48 @@ def _public_get(request_path: str, params: dict) -> dict:
     return data
 
 # =========================
+# Public price (ticker)
+# =========================
+
+def fetch_last_price(symbol: str) -> Optional[float]:
+    """
+    Tries MIX ticker first, then spot.
+    Returns last price as float or None.
+    """
+    symbol = _normalize_symbol(symbol)
+    # MIX ticker
+    try:
+        raw = _public_get(
+            "/api/v2/mix/market/ticker",
+            params={"symbol": symbol, "productType": TRADEWATCH_PRODUCT_TYPE},
+        )
+        d = (raw.get("data") or {})
+        # Bitget often returns {"lastPr":"..."} or {"last":"..."} depending on market
+        for k in ("lastPr", "last", "close", "lastPrice"):
+            v = d.get(k)
+            if v is not None:
+                return float(v)
+    except Exception:
+        pass
+
+    # SPOT ticker fallback
+    try:
+        raw = _public_get("/api/v2/spot/market/ticker", params={"symbol": symbol})
+        d = (raw.get("data") or {})
+        for k in ("lastPr", "last", "close", "lastPrice"):
+            v = d.get(k)
+            if v is not None:
+                return float(v)
+    except Exception:
+        pass
+
+    return None
+
+# =========================
 # Futures Fills (Executions)
 # =========================
 
 def _fetch_futures_fills(limit: int = 100, symbol: str | None = None) -> List[dict]:
-    """
-    Bitget Futures V2: Get Order Fill Details
-      GET /api/v2/mix/order/fills?productType=USDT-FUTURES&symbol=BTCUSDT
-    Returns: list of fill dicts from data.fillList
-    """
     params: Dict[str, str] = {
         "productType": TRADEWATCH_PRODUCT_TYPE,
         "limit": str(min(max(limit, 1), 100)),
@@ -241,7 +251,6 @@ def _fetch_futures_fills(limit: int = 100, symbol: str | None = None) -> List[di
     return ((data.get("data") or {}).get("fillList") or [])
 
 def _fetch_futures_fills_multi(limit_each: int = 60) -> List[dict]:
-    """If tracking multiple symbols, query each symbol and merge results."""
     if not TRADEWATCH_SYMBOLS:
         return _fetch_futures_fills(limit=100, symbol=None)
 
@@ -258,7 +267,6 @@ def _classify_execution(fill: dict) -> str:
         return "Take Profit"
     if "stop" in scope or "sl" in scope:
         return "Stop Loss"
-
     if "open" in trade_side:
         return "Position Open/Increase"
     if "close" in trade_side or "reduce" in trade_side:
@@ -280,7 +288,6 @@ def _format_message(fill: dict, checklist_block: str | None = None) -> str:
         header = "📈 [TradeWatch] Futures Execution"
 
     side_emoji = "🟢" if side_raw == "BUY" else ("🔴" if side_raw == "SELL" else "📘")
-
     execution = _classify_execution(fill)
     maker_taker = f"{trade_scope}".upper() if trade_scope else "—"
 
@@ -310,10 +317,12 @@ def get_status() -> str:
         f"Symbols: {symbols}",
         f"Polling: {TRADEWATCH_POLL_INTERVAL_SEC}s",
         f"AI alerts: {'Yes ✅' if TRADEWATCH_AI_ALERTS else 'No ❌'} (every {TRADEWATCH_AI_INTERVAL_SEC}s, min {TRADEWATCH_AI_MIN_SCORE}/10)",
+        f"TP alerts: {'Yes ✅' if TRADEWATCH_TP_ALERTS else 'No ❌'} (every {TRADEWATCH_TP_POLL_SEC}s)",
         f"Running loop: {'Yes ✅' if STATE['running'] else 'No ❌'}",
         f"Last poll (UTC): {_iso_or_none(STATE['last_poll_utc'])}",
         f"Last trade (UTC): {_iso_or_none(STATE['last_trade_utc'])}",
         f"Last AI scan (UTC): {_iso_or_none(STATE.get('last_ai_scan_utc'))}",
+        f"Last TP scan (UTC): {_iso_or_none(STATE.get('last_tp_scan_utc'))}",
     ]
     if STATE.get("last_trade_pair"):
         lines.append(f"Last trade: {STATE['last_trade_pair']} {STATE.get('last_trade_side','')}".strip())
@@ -373,7 +382,6 @@ def bitget_klines_to_candles(raw: Any) -> List[Candle]:
 
 def fetch_candles(symbol: str, granularity: str, limit: int = 320) -> List[Candle]:
     symbol = _normalize_symbol(symbol)
-    # MIX candles (public)
     try:
         raw = _public_get(
             "/api/v2/mix/market/candles",
@@ -385,7 +393,6 @@ def fetch_candles(symbol: str, granularity: str, limit: int = 320) -> List[Candl
     except Exception:
         pass
 
-    # SPOT fallback (public)
     raw = _public_get(
         "/api/v2/spot/market/candles",
         params={"symbol": symbol, "granularity": granularity, "limit": str(limit)},
@@ -672,6 +679,210 @@ def get_checklist_status_text(symbol: str, include_reasons: bool = True) -> str:
     return "\n".join(lines)
 
 # =========================
+# Plan builder (Entry/SL/TPs) + TP tracking
+# =========================
+
+def _compute_levels_from_candles(candles: List[Candle], lookback: int = 48) -> Optional[Dict[str, float]]:
+    if not candles:
+        return None
+    lb = candles[-lookback:] if len(candles) > lookback else candles
+    support = min(c["low"] for c in lb)
+    resistance = max(c["high"] for c in lb)
+    last = candles[-1]["close"]
+    return {"support": support, "resistance": resistance, "last": last}
+
+def _atr_simple(candles: List[Candle], period: int = 14) -> float:
+    return _atr(candles, period)
+
+def build_plan(symbol: str) -> Dict[str, Any]:
+    """
+    Builds a simple plan aligned with checklist bias using 4H S/R + ATR buffer.
+    Returns dict with entry_zone, sl, tps, etc.
+    """
+    sym = _normalize_symbol(symbol)
+    candles = fetch_candles_4h(sym, limit=220)
+    if not candles:
+        return {"symbol": sym, "error": "No candles returned."}
+
+    levels = _compute_levels_from_candles(candles, lookback=48)
+    if not levels:
+        return {"symbol": sym, "error": "Not enough candle data."}
+
+    atrv = _atr_simple(candles, 14)
+    chk = evaluate_checklist(sym)
+
+    last = float(levels["last"])
+    sup = float(levels["support"])
+    res = float(levels["resistance"])
+
+    bias = chk.bias
+    atr_buf = max(atrv * 0.35, last * 0.0015)
+
+    if bias == "LONG":
+        entry_lo = sup + atr_buf * 0.2
+        entry_hi = sup + atr_buf * 1.2
+        sl = sup - atr_buf * 1.2
+        tp1 = last + (res - last) * 0.35
+        tp2 = last + (res - last) * 0.70
+        tp3 = res
+    elif bias == "SHORT":
+        entry_lo = res - atr_buf * 1.2
+        entry_hi = res - atr_buf * 0.2
+        sl = res + atr_buf * 1.2
+        tp1 = last - (last - sup) * 0.35
+        tp2 = last - (last - sup) * 0.70
+        tp3 = sup
+    else:
+        # neutral / range fallback
+        entry_lo = sup + atr_buf * 0.2
+        entry_hi = sup + atr_buf * 1.0
+        sl = sup - atr_buf * 1.2
+        tp1 = last
+        tp2 = last + (res - last) * 0.50
+        tp3 = res
+
+    plan = {
+        "symbol": sym,
+        "status": chk.status,
+        "bias": bias,
+        "score": f"{chk.score}/{chk.max_score}",
+        "last": last,
+        "support": sup,
+        "resistance": res,
+        "atr": atrv,
+        "entry_zone": (float(entry_lo), float(entry_hi)),
+        "sl": float(sl),
+        "tps": [float(tp1), float(tp2), float(tp3)],
+    }
+
+    # store plan for TP watcher
+    PLAN_STATE[sym] = {
+        "bias": bias,
+        "entry_zone": plan["entry_zone"],
+        "sl": plan["sl"],
+        "tps": plan["tps"],
+        "created_utc": datetime.now(timezone.utc),
+        "tp_hits": [False, False, False],
+        "last_price": None,
+    }
+    return plan
+
+def _tp_hit(bias: str, price: float, target: float) -> bool:
+    b = (bias or "").upper()
+    if b == "LONG":
+        return price >= target
+    if b == "SHORT":
+        return price <= target
+    return False
+
+def get_tp_status_text() -> str:
+    symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
+    lines = ["🎯 [TP Status]"]
+
+    for s in symbols:
+        sym = _normalize_symbol(s)
+        st = PLAN_STATE.get(sym)
+        if not st:
+            lines.append(f"{sym} — no active plan yet.")
+            continue
+
+        bias = st.get("bias", "—")
+        tps = st.get("tps") or []
+        hits = st.get("tp_hits") or [False, False, False]
+        last_price = st.get("last_price")
+        last_str = f"{last_price:.2f}" if isinstance(last_price, (int, float)) else "—"
+
+        def _mark(i: int) -> str:
+            return "✅" if hits[i] else "⏳"
+
+        if len(tps) >= 3:
+            lines.append(
+                f"{sym} — {bias} | last: {last_str} | "
+                f"TP1 {_mark(0)} {tps[0]:.0f} | TP2 {_mark(1)} {tps[1]:.0f} | TP3 {_mark(2)} {tps[2]:.0f}"
+            )
+        else:
+            lines.append(f"{sym} — {bias} | last: {last_str} | no TP levels stored.")
+
+    return "\n".join(lines)
+
+def _format_plan_block(plan: Dict[str, Any]) -> str:
+    if plan.get("error"):
+        return f"⚠️ Plan unavailable: {plan['error']}"
+    ez = plan["entry_zone"]
+    tps = plan["tps"]
+    return (
+        "🧾 Plan (auto)\n"
+        f"• Entry: {ez[0]:.0f} – {ez[1]:.0f}\n"
+        f"• SL: {plan['sl']:.0f}\n"
+        f"• TP1: {tps[0]:.0f}\n"
+        f"• TP2: {tps[1]:.0f}\n"
+        f"• TP3: {tps[2]:.0f}"
+    )
+
+def start_tp_hit_watcher(send_func: Callable[[str], None]) -> None:
+    if not TRADEWATCH_TP_ALERTS:
+        print("[TradeWatch] TP hit watcher disabled (TRADEWATCH_TP_ALERTS != 1)")
+        return
+
+    print("[TradeWatch] TP hit watcher started ✅")
+
+    symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
+
+    while True:
+        try:
+            STATE["last_tp_scan_utc"] = datetime.now(timezone.utc)
+
+            for s in symbols:
+                sym = _normalize_symbol(s)
+
+                if TRADEWATCH_TP_REQUIRE_PLAN and sym not in PLAN_STATE:
+                    continue
+
+                st = PLAN_STATE.get(sym)
+                if not st:
+                    continue
+
+                price = fetch_last_price(sym)
+                if price is None:
+                    continue
+
+                st["last_price"] = price
+
+                bias = (st.get("bias") or "NEUTRAL").upper()
+                tps = st.get("tps") or []
+                hits = st.get("tp_hits") or [False, False, False]
+
+                if len(tps) < 3:
+                    continue
+
+                # sequential updates (TP1 then TP2 then TP3)
+                for i in range(3):
+                    if hits[i]:
+                        continue
+                    if _tp_hit(bias, price, float(tps[i])):
+                        hits[i] = True
+                        st["tp_hits"] = hits
+
+                        pct = (i + 1) * 33
+                        send_func(
+                            "🎯 [TP HIT]\n"
+                            f"Pair: {sym}\n"
+                            f"Bias: {bias}\n"
+                            f"TP{i+1} hit: {tps[i]:.0f}\n"
+                            f"Price: {price:.2f}\n"
+                            f"Progress: {pct}%\n"
+                            f"Time (UTC): {_iso_utc_now()}"
+                        )
+                        # only fire one TP per cycle to avoid spam if it gaps through multiple
+                        break
+
+        except Exception as e:
+            STATE["last_error"] = f"TP watcher error: {e}"
+            print("[TradeWatch] TP watcher error:", e)
+
+        time.sleep(TRADEWATCH_TP_POLL_SEC)
+
+# =========================
 # Auto AI Setup Alerts + /setup_status
 # =========================
 
@@ -729,12 +940,18 @@ def _format_ai_alert(sym: str, res: ChecklistResult) -> str:
     sym = _normalize_symbol(sym)
     se = _status_emoji(res.status)
     be = _bias_emoji(res.bias)
+
+    # ✅ build & attach plan so group gets entry/sl/tps immediately
+    plan = build_plan(sym)
+    plan_block = _format_plan_block(plan)
+
     return (
         f"{se} [AI SETUP ALERT]\n"
         f"Pair: {sym}\n"
         f"Bias: {be} {res.bias}\n"
         f"Score: {res.score}/{res.max_score}\n"
         f"Status: {res.status}\n\n"
+        f"{plan_block}\n\n"
         f"Fast checks:\n"
         f"• Structure: {res.structure.bias} ({res.structure.score}/{res.structure.max_score})\n"
         f"• Liquidity: {res.liquidity.bias} ({res.liquidity.score}/{res.liquidity.max_score})\n"
@@ -794,7 +1011,9 @@ def get_setup_status_text() -> str:
         last_score = st.get("last_score", "—")
         last_alert = st.get("last_alert_utc")
         last_alert_str = _iso_or_none(last_alert) if last_alert else "—"
-        lines.append(f"{sym} — {_status_emoji(last_status)} {last_status} | {_bias_emoji(last_bias)} {last_bias} | {last_score} | last alert: {last_alert_str}")
+        lines.append(
+            f"{sym} — {_status_emoji(last_status)} {last_status} | {_bias_emoji(last_bias)} {last_bias} | {last_score} | last alert: {last_alert_str}"
+        )
     return "\n".join(lines)
 
 # =========================
