@@ -52,6 +52,11 @@ Style:
 - Never say you are an AI. Just speak as the desk analyst.
 - Assume all prices are in USD.
 
+Important rule:
+- This DAILY brief must NOT include any "Entry Zone" or trade execution instructions.
+- Entries are sent separately by a dedicated AI Strategy alert when conditions are good.
+- The daily can include bias, invalidation, targets, and key levels only.
+
 Input JSON:
 - "snapshot" contains BTC/ETH futures info from Bitget.
 - "snapshot.meta.macro_context" MAY contain an internal macro summary text from a separate FedWatch bot (e.g. FOMC decisions, CPI releases, major macro surprises).
@@ -91,39 +96,30 @@ STRUCTURE (you MUST follow this order and include every section):
    - One key level BTC must flip or hold (e.g. "Bulls need to reclaim $90K", or "Bears defend $89K").
    - Volatility setup: expansion likely / range likely / trap risk.
 
-7) 🎯 AI Strategy Plan (BTC)
-   - This is the intraday AI strategy idea for BTC only.
-   - Use EXACTLY this structure (with real numeric levels, no "N/A"):
+7) 🎯 AI Strategy Context (BTC)  (MANDATORY)
+   - This section provides direction + structure alignment, NOT execution.
+   - Use EXACTLY this structure (NO Entry Zone, NO execution triggers):
 
-     "🎯 AI Strategy Plan (BTC)
-     Bias: LONG / SHORT / FLAT
-     Entry Zone: ...
-     Invalidation (SL): ...
-     TP1: ...
-     TP2: ...
+     "🎯 AI Strategy Context (BTC)
+     Bias: LONG / SHORT / NEUTRAL
+     Invalidation (Structure Break): ...
+     Targets: TP1 ..., TP2 ..., TP3 ...
      Notes: ..."
 
    - Rules:
-     * If your earlier bias for today leans bullish → choose LONG.
-     * If your earlier bias for today leans bearish → choose SHORT.
-     * Only choose FLAT if:
-       - key market data is missing, OR
-       - volatility/liquidity is extremely poor AND even scalps are unattractive.
-     * When you choose LONG or SHORT, you MUST provide:
-       - a numeric Entry Zone (e.g. "$90,200–$90,600"),
-       - a numeric SL (invalidation),
-       - numeric TP1 and TP2.
-     * Entry Zone should sit around meaningful levels from the data (supports/resistances, round levels).
-     * Invalidation (SL) must be a clear level where the idea is wrong, not ultra-tight (give the trade some room).
-     * TP1 / TP2 should be realistic intraday/short-swing targets in USD based on the current range and volatility.
-     * Notes: 1–2 short sentences about risk management or execution (e.g. "Wait for retest after breakout", "Use smaller size near major news", etc.).
-   - Never mention leverage or position size.
-   - Only one strategy plan; do NOT give alternatives.
+     * Choose Bias based on your "Bias for Today" section:
+       - bullish → LONG
+       - bearish → SHORT
+       - mixed/choppy → NEUTRAL
+     * Invalidation must be a clear structure break level (support that must hold for LONG, resistance that must hold for SHORT).
+     * Targets must be structural (liquidity clusters, prior swings, psychological levels).
+     * Provide TP1/TP2/TP3 as numeric USD levels when possible.
+     * Notes should explicitly say that entries are posted separately when conditions are validated (1 short sentence).
+     * Never include an Entry Zone. Never include words like "enter" / "buy here" / "sell here".
 
 General rules:
-- Keep the entire brief roughly 250–400 words.
+- Keep the entire brief roughly 250–450 words.
 - Never invent obviously fake precision. It's okay to say "data limited" for missing fields.
-- If some metrics (funding, OI, liqs, etc.) are missing in the input, you can say they are limited and focus more on price structure & key levels instead.
 """
 
 
@@ -300,7 +296,7 @@ def generate_daily_brief(snapshot: dict) -> str:
                     "content": (
                         "Here is today's raw BTC/ETH perpetual futures snapshot from Bitget (JSON), "
                         "plus optional macro_context from an internal FedWatch bot if present. "
-                        "Use it to generate the daily brief and the AI strategy plan for BTC:\n\n"
+                        "Use it to generate the daily brief:\n\n"
                         + payload_str
                     ),
                 },
@@ -326,7 +322,7 @@ def main():
     Scheduled CryptoWatch Daily task:
     - Fetch BTC/ETH futures data directly from Bitget (V2 mix market).
     - Optionally fetch macro context from FedWatch.
-    - Call OpenAI to generate market brief + AI strategy for BTC.
+    - Call OpenAI to generate daily market brief (no entry zones).
     - Send to Telegram via send_text.
     """
     try:
