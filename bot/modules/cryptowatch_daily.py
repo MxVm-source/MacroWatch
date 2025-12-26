@@ -30,8 +30,7 @@ PRODUCT_TYPE = "USDT-FUTURES"  # per Bitget V2 docs
 # ======================
 
 # If set, this should be an HTTP endpoint (from your FedWatch bot)
-# that returns a short plain-text or markdown macro summary for today,
-# e.g. "Fed cut rates by 25 bps today, markets risk-on..." etc.
+# that returns a short plain-text or markdown macro summary for today.
 FEDWATCH_DAILY_URL = os.getenv("FEDWATCH_DAILY_URL", "").strip()
 
 # ======================
@@ -52,10 +51,10 @@ Style:
 - Never say you are an AI. Just speak as the desk analyst.
 - Assume all prices are in USD.
 
-Important rule:
-- This DAILY brief must NOT include any "Entry Zone" or trade execution instructions.
-- Entries are sent separately by a dedicated AI Strategy alert when conditions are good.
-- The daily can include bias, invalidation, targets, and key levels only.
+Important rules (STRICT):
+- This DAILY brief must NOT include any strategy plan, entry zone, stop loss, or take-profit targets.
+- Do NOT include any section titled "AI Strategy" or "Strategy Plan".
+- The daily is context only: price, structure, levels, macro, bias.
 
 Input JSON:
 - "snapshot" contains BTC/ETH futures info from Bitget.
@@ -96,29 +95,8 @@ STRUCTURE (you MUST follow this order and include every section):
    - One key level BTC must flip or hold (e.g. "Bulls need to reclaim $90K", or "Bears defend $89K").
    - Volatility setup: expansion likely / range likely / trap risk.
 
-7) 🎯 AI Strategy Context (BTC)  (MANDATORY)
-   - This section provides direction + structure alignment, NOT execution.
-   - Use EXACTLY this structure (NO Entry Zone, NO execution triggers):
-
-     "🎯 AI Strategy Context (BTC)
-     Bias: LONG / SHORT / NEUTRAL
-     Invalidation (Structure Break): ...
-     Targets: TP1 ..., TP2 ..., TP3 ...
-     Notes: ..."
-
-   - Rules:
-     * Choose Bias based on your "Bias for Today" section:
-       - bullish → LONG
-       - bearish → SHORT
-       - mixed/choppy → NEUTRAL
-     * Invalidation must be a clear structure break level (support that must hold for LONG, resistance that must hold for SHORT).
-     * Targets must be structural (liquidity clusters, prior swings, psychological levels).
-     * Provide TP1/TP2/TP3 as numeric USD levels when possible.
-     * Notes should explicitly say that entries are posted separately when conditions are validated (1 short sentence).
-     * Never include an Entry Zone. Never include words like "enter" / "buy here" / "sell here".
-
 General rules:
-- Keep the entire brief roughly 250–450 words.
+- Keep the entire brief roughly 200–400 words.
 - Never invent obviously fake precision. It's okay to say "data limited" for missing fields.
 """
 
@@ -200,10 +178,7 @@ def fetch_basic_market_snapshot() -> dict:
     }
 
     # BTC
-    params_btc = {
-        "productType": PRODUCT_TYPE,
-        "symbol": BTC_SYMBOL,
-    }
+    params_btc = {"productType": PRODUCT_TYPE, "symbol": BTC_SYMBOL}
     btc_raw = _public_get("/api/v2/mix/market/ticker", params_btc)
     btc = _parse_mix_ticker(btc_raw)
     if btc:
@@ -211,22 +186,18 @@ def fetch_basic_market_snapshot() -> dict:
         snapshot["btc"] = btc
 
     # ETH
-    params_eth = {
-        "productType": PRODUCT_TYPE,
-        "symbol": ETH_SYMBOL,
-    }
+    params_eth = {"productType": PRODUCT_TYPE, "symbol": ETH_SYMBOL}
     eth_raw = _public_get("/api/v2/mix/market/ticker", params_eth)
     eth = _parse_mix_ticker(eth_raw)
     if eth:
         eth["symbol"] = ETH_SYMBOL
         snapshot["eth"] = eth
 
-    snapshot["meta"]["total_market_cap"] = None  # not fetched here
+    snapshot["meta"]["total_market_cap"] = None
     snapshot["meta"]["notes"] = (
         "BTC/ETH USDT perpetual futures data from Bitget V2 (last, 24h range, change, funding rate)."
     )
-    # macro_context will be injected later (in main) if available
-    snapshot["meta"]["macro_context"] = None
+    snapshot["meta"]["macro_context"] = None  # injected later if available
 
     return snapshot
 
@@ -236,14 +207,7 @@ def fetch_basic_market_snapshot() -> dict:
 # ======================
 
 def fetch_macro_context() -> str | None:
-    """
-    Optionally fetch macro context (e.g. Fed decisions, CPI, etc.)
-    from an internal FedWatch endpoint, if configured.
-
-    Expected usage:
-    - FEDWATCH_DAILY_URL env var points to a simple HTTP endpoint
-      that returns a short text/markdown macro summary for today.
-    """
+    """Optionally fetch macro context (Fed/CPI/etc.) from an internal FedWatch endpoint."""
     if not FEDWATCH_DAILY_URL:
         return None
 
@@ -255,7 +219,6 @@ def fetch_macro_context() -> str | None:
         text = (resp.text or "").strip()
         if not text:
             return None
-        # Guardrail: avoid sending huge blobs; trim if needed
         if len(text) > 4000:
             text = text[:4000] + "\n\n[macro_context truncated]"
         return text
@@ -269,18 +232,12 @@ def fetch_macro_context() -> str | None:
 # ======================
 
 def _build_user_payload(snapshot: dict) -> str:
-    """Prepare a compact JSON payload with all metrics for the model."""
     date_str = datetime.now(BRUSSELS_TZ).strftime("%Y-%m-%d")
-
-    payload = {
-        "date": date_str,
-        "snapshot": snapshot,
-    }
+    payload = {"date": date_str, "snapshot": snapshot}
     return json.dumps(payload, ensure_ascii=False)
 
 
 def generate_daily_brief(snapshot: dict) -> str:
-    """Call OpenAI to generate the full daily brief text based on current snapshot."""
     payload_str = _build_user_payload(snapshot)
     model_name = os.getenv("CRYPTOWATCH_DAILY_MODEL", "gpt-4.1-mini")
 
@@ -296,14 +253,13 @@ def generate_daily_brief(snapshot: dict) -> str:
                     "content": (
                         "Here is today's raw BTC/ETH perpetual futures snapshot from Bitget (JSON), "
                         "plus optional macro_context from an internal FedWatch bot if present. "
-                        "Use it to generate the daily brief:\n\n"
+                        "Generate the DAILY market brief ONLY (no strategy plan):\n\n"
                         + payload_str
                     ),
                 },
             ],
         )
-        text = resp.choices[0].message.content.strip()
-        return text
+        return resp.choices[0].message.content.strip()
     except Exception as e:
         log.exception("CryptoWatch Daily: OpenAI call failed: %s", e)
         return (
@@ -318,24 +274,14 @@ def generate_daily_brief(snapshot: dict) -> str:
 # ======================
 
 def main():
-    """
-    Scheduled CryptoWatch Daily task:
-    - Fetch BTC/ETH futures data directly from Bitget (V2 mix market).
-    - Optionally fetch macro context from FedWatch.
-    - Call OpenAI to generate daily market brief (no entry zones).
-    - Send to Telegram via send_text.
-    """
+    """Scheduled CryptoWatch Daily task (context only, no strategy/entries/TPs)."""
     try:
         snapshot = fetch_basic_market_snapshot()
     except Exception as e:
         log.exception("CryptoWatch Daily: error building snapshot: %s", e)
-        send_text(
-            "🧠 [CryptoWatch] AI Market Brief\n"
-            "⚠️ Could not build market snapshot from Bitget."
-        )
+        send_text("🧠 [CryptoWatch] AI Market Brief\n⚠️ Could not build market snapshot from Bitget.")
         return
 
-    # Inject macro context if available
     macro_text = fetch_macro_context()
     if macro_text:
         snapshot.setdefault("meta", {})
