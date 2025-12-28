@@ -12,6 +12,7 @@ import bot.modules.trumpwatch as trumpwatch
 import bot.modules.fedwatch as fedwatch
 import bot.modules.cryptowatch as cryptowatch
 import bot.modules.cryptowatch_daily as cryptowatch_daily
+
 from bot.datafeed_bitget import get_position_report_safe
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
@@ -122,21 +123,18 @@ def _build_plan(symbol: str):
     }
 
 
-def boot_banner():
-    send_text(
-        "✅ MacroWatch rebooted\n"
-        "All systems live: 📈 TradeWatch | 🏦 FedWatch | 🍊 TrumpWatch | 📊 CryptoWatch\n"
-    )
-
-
 def start_scheduler():
     """Start jobs for TrumpWatch, FedWatch loop, CryptoWatch, and TradeWatch."""
     sched = BackgroundScheduler(timezone=os.getenv("TIMEZONE", "Europe/Brussels"))
 
-    # Optional: assert module loaded correctly
-    assert hasattr(cryptowatch_daily, "main"), (
-        f"cryptowatch_daily has no main() — loaded from {getattr(cryptowatch_daily, '__file__', 'unknown')}"
-    )
+    # ✅ Guard CryptoWatch Daily so the whole bot never crashes if it's missing main()
+    cw_daily_fn = getattr(cryptowatch_daily, "main", None)
+    if cw_daily_fn is None:
+        print(
+            f"⚠️ CryptoWatch Daily disabled: cryptowatch_daily has no main() "
+            f"(loaded from {getattr(cryptowatch_daily, '__file__', 'unknown')})",
+            flush=True,
+        )
 
     # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
     if os.getenv("ENABLE_TRUMPWATCH", "false").lower() in ("1", "true", "yes", "on"):
@@ -148,9 +146,9 @@ def start_scheduler():
         threading.Thread(target=fedwatch.schedule_loop, daemon=True).start()
 
     # 📉 CryptoWatch Daily – mini brief before U.S. market open
-    if os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() in ("1", "true", "yes", "on"):
+    if cw_daily_fn and os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() in ("1", "true", "yes", "on"):
         sched.add_job(
-            cryptowatch_daily.main,
+            cw_daily_fn,
             "cron",
             hour=15,
             minute=28,
@@ -351,7 +349,11 @@ def command_loop():
 
             # 📊 CryptoWatch
             elif text.startswith("/cw_daily"):
-                cryptowatch_daily.main()
+                fn = getattr(cryptowatch_daily, "main", None)
+                if fn:
+                    fn()
+                else:
+                    send_text("⚠️ CryptoWatch Daily is disabled (cryptowatch_daily.main missing).")
 
             elif text.startswith("/cw_weekly"):
                 cryptowatch.main()
@@ -390,7 +392,7 @@ def command_loop():
 
 
 if __name__ == "__main__":
-    boot_banner()
+    # ✅ Removed boot_banner() to avoid startup Telegram spam
 
     start_scheduler()
 
