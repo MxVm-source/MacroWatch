@@ -1,329 +1,415 @@
 import os
+import sys
+import platform
+import threading
 import time
-import json
-import hmac
-import hashlib
-import base64
 from datetime import datetime, timezone
 
-import requests
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# ======================
-# Bitget config
-# ======================
+from bot.utils import send_text, get_updates
+import bot.modules.trumpwatch as trumpwatch
+import bot.modules.fedwatch as fedwatch
+import bot.modules.cryptowatch as cryptowatch
+import bot.modules.cryptowatch_daily as cryptowatch_daily
 
-BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "")
-BITGET_API_SECRET = os.environ.get("BITGET_API_SECRET", "")
-BITGET_API_PASSPHRASE = os.environ.get("BITGET_API_PASSPHRASE", "")
+from bot.datafeed_bitget import get_position_report_safe
 
-BITGET_BASE_URL = "https://api.bitget.com"
-
-# Futures defaults (USDT-M)
-BITGET_PRODUCT_TYPE = os.environ.get("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
-BITGET_MARGIN_COIN = os.environ.get("BITGET_MARGIN_COIN", "USDT")
-
-# Backward compatible single symbol (fallback/default)
-BITGET_SYMBOL = os.environ.get("BITGET_SYMBOL", "BTCUSDT").strip().upper()
-
-# Multi-symbol support (comma-separated). Default: BTC + ETH
-# Example: BTCUSDT,ETHUSDT
-BITGET_SYMBOLS = [
-    s.strip().upper()
-    for s in os.environ.get("BITGET_SYMBOLS", "BTCUSDT,ETHUSDT").split(",")
-    if s.strip()
-]
-if not BITGET_SYMBOLS:
-    BITGET_SYMBOLS = [BITGET_SYMBOL]
-
-# ======================
-# Helpers
-# ======================
-
-def iso_utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+STARTED_AT_UTC = datetime.now(timezone.utc)
 
 
-def _pnl_color(pnl: float) -> str:
-    if pnl > 0:
-        return f"🟢 {pnl}"
-    elif pnl < 0:
-        return f"🔴 {pnl}"
-    return f"⚪ {pnl}"
+def _fmt_uptime() -> str:
+    delta = datetime.now(timezone.utc) - STARTED_AT_UTC
+    sec = int(delta.total_seconds())
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def _signed_request(method: str, request_path: str,
-                    params: dict | None = None,
-                    body: dict | None = None):
+def _compute_levels_from_candles(candles, lookback=48):
+    """
+    Simple S/R from recent 4H candles:
+    - support = min(low)
+    - resistance = max(high)
+    - last = last close
+    """
+    if not candles:
+        return None
+    lb = candles[-lookback:] if len(candles) > lookback else candles
+    support = min(c["low"] for c in lb)
+    resistance = max(c["high"] for c in lb)
+    last = candles[-1]["close"]
+    return {"support": support, "resistance": resistance, "last": last}
 
-    if not (BITGET_API_KEY and BITGET_API_SECRET and BITGET_API_PASSPHRASE):
-        raise RuntimeError("Bitget API credentials not set")
 
-    method = method.upper()
-    timestamp = str(int(time.time() * 1000))
-    query = ""
+def _atr_simple(candles, period=14):
+    if len(candles) < period + 1:
+        return 0.0
+    trs = []
+    for i in range(-period, 0):
+        c = candles[i]
+        prev = candles[i - 1]
+        tr = max(
+            c["high"] - c["low"],
+            abs(c["high"] - prev["close"]),
+            abs(c["low"] - prev["close"]),
+        )
+        trs.append(tr)
+    return sum(trs) / len(trs) if trs else 0.0
 
-    if params:
-        from urllib.parse import urlencode
-        query = urlencode(params)
 
-    body_str = json.dumps(body, separators=(",", ":")) if body else ""
+def _build_plan(symbol: str):
+    """
+    Uses TradeWatch checklist + levels to build a clean plan.
+    Returns dict: {symbol,last,bias,entry_zone,sl,tp_list,notes}
+    """
+    from bot.modules import tradewatch as tw
 
-    if query:
-        prehash = timestamp + method + request_path + "?" + query + body_str
-        url = f"{BITGET_BASE_URL}{request_path}?{query}"
+    sym = symbol.replace(".P", "").upper()
+    candles = tw.fetch_candles_4h(sym, limit=220)
+    if not candles:
+        return {"symbol": sym, "error": "No candles returned."}
+
+    levels = _compute_levels_from_candles(candles, lookback=48)
+    atr = _atr_simple(candles, 14)
+    chk = tw.evaluate_checklist(sym)
+
+    last = levels["last"]
+    sup = levels["support"]
+    res = levels["resistance"]
+
+    bias = chk.bias
+    atr_buf = max(atr * 0.35, last * 0.0015)  # safety buffer
+
+    if bias == "LONG":
+        entry_lo = sup + atr_buf * 0.2
+        entry_hi = sup + atr_buf * 1.2
+        sl = sup - atr_buf * 1.2
+        tp1 = last + (res - last) * 0.35
+        tp2 = last + (res - last) * 0.70
+        tp3 = res
+        notes = "Prefer long only after sweep/reclaim + reaction wick on the 4H area."
+    elif bias == "SHORT":
+        entry_lo = res - atr_buf * 1.2
+        entry_hi = res - atr_buf * 0.2
+        sl = res + atr_buf * 1.2
+        tp1 = last - (last - sup) * 0.35
+        tp2 = last - (last - sup) * 0.70
+        tp3 = sup
+        notes = "Prefer short only after failure to reclaim resistance + bearish reaction at/into FVG."
     else:
-        prehash = timestamp + method + request_path + body_str
-        url = f"{BITGET_BASE_URL}{request_path}"
+        entry_lo = sup + atr_buf * 0.2
+        entry_hi = sup + atr_buf * 1.0
+        sl = sup - atr_buf * 1.2
+        tp1 = last
+        tp2 = last + (res - last) * 0.50
+        tp3 = res
+        notes = "Neutral range: take longs near support only; avoid mid-range chop."
 
-    sign = hmac.new(
-        BITGET_API_SECRET.encode(),
-        prehash.encode(),
-        hashlib.sha256
-    ).digest()
-
-    headers = {
-        "ACCESS-KEY": BITGET_API_KEY,
-        "ACCESS-SIGN": base64.b64encode(sign).decode(),
-        "ACCESS-TIMESTAMP": timestamp,
-        "ACCESS-PASSPHRASE": BITGET_API_PASSPHRASE,
-        "Content-Type": "application/json",
+    return {
+        "symbol": sym,
+        "last": last,
+        "support": sup,
+        "resistance": res,
+        "atr": atr,
+        "checklist_status": chk.status,
+        "bias": bias,
+        "score": f"{chk.score}/{chk.max_score}",
+        "entry_zone": (entry_lo, entry_hi),
+        "sl": sl,
+        "tps": [tp1, tp2, tp3],
+        "notes": notes,
     }
 
-    if method == "GET":
-        r = requests.get(url, headers=headers, timeout=10)
-    else:
-        r = requests.post(url, headers=headers, data=body_str, timeout=10)
 
-    if r.status_code != 200:
-        raise RuntimeError(f"Bitget HTTP {r.status_code}: {r.text}")
+def start_scheduler():
+    """Start jobs for TrumpWatch, FedWatch loop, CryptoWatch, and TradeWatch."""
+    sched = BackgroundScheduler(timezone=os.getenv("TIMEZONE", "Europe/Brussels"))
 
-    data = r.json()
-    if data.get("code") != "00000":
-        raise RuntimeError(f"Bitget API error {data.get('code')}: {data.get('msg')}")
-
-    return data
-
-
-def get_ticker(symbol: str):
-    """
-    Public Bitget futures ticker helper.
-    Used by FedWatch to measure BTC/ETH reaction.
-
-    Returns last price as float, or None on error.
-    """
-    try:
-        url = f"{BITGET_BASE_URL}/api/v2/mix/market/ticker"
-        resp = requests.get(url, params={"symbol": symbol}, timeout=5)
-        data = resp.json()
-
-        if data.get("code") != "00000":
-            print("[Bitget] get_ticker error:", data)
-            return None
-
-        tick = data.get("data") or {}
-        # Sometimes Bitget returns a list
-        if isinstance(tick, list):
-            tick = tick[0] if tick else {}
-
-        price_str = (
-            tick.get("last")
-            or tick.get("close")
-            or tick.get("markPrice")
+    # ✅ Guard CryptoWatch Daily so the whole bot never crashes if it's missing main()
+    cw_daily_fn = getattr(cryptowatch_daily, "main", None)
+    if cw_daily_fn is None:
+        print(
+            f"⚠️ CryptoWatch Daily disabled: cryptowatch_daily has no main() "
+            f"(loaded from {getattr(cryptowatch_daily, '__file__', 'unknown')})",
+            flush=True,
         )
 
-        if not price_str:
-            return None
+    # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
+    if os.getenv("ENABLE_TRUMPWATCH", "false").lower() in ("1", "true", "yes", "on"):
+        minutes = int(os.getenv("TW_INTERVAL_MIN", "15"))
+        sched.add_job(trumpwatch.post_mock, "interval", minutes=minutes)
 
-        return float(price_str)
+    # 🏦 FedWatch alerts (ICS + BTC/ETH reaction)
+    if os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
+        threading.Thread(target=fedwatch.schedule_loop, daemon=True).start()
+
+    # 📉 CryptoWatch Daily – mini brief before U.S. market open
+    if cw_daily_fn and os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() in ("1", "true", "yes", "on"):
+        sched.add_job(
+            cw_daily_fn,
+            "cron",
+            hour=15,
+            minute=28,
+            id="cryptowatch_daily_task",
+            max_instances=1,
+            replace_existing=True,
+        )
+
+    # 📊 CryptoWatch Weekly – full weekly sentiment report
+    if os.getenv("ENABLE_CRYPTOWATCH_WEEKLY", "true").lower() in ("1", "true", "yes", "on"):
+        sched.add_job(
+            cryptowatch.main,
+            "cron",
+            day_of_week="sun",
+            hour=18,
+            minute=0,
+            id="cryptowatch_weekly_task",
+            max_instances=1,
+            replace_existing=True,
+        )
+
+    # 📘 TradeWatch – Futures executions + AI setup alerts + TP hit updates
+    if os.getenv("TRADEWATCH_ENABLED", "0") == "1":
+        from bot.modules.tradewatch import start_tradewatch, start_ai_setup_alerts
+
+        threading.Thread(target=start_tradewatch, args=(send_text,), daemon=True).start()
+
+        if os.getenv("TRADEWATCH_AI_ALERTS", "0") == "1":
+            threading.Thread(target=start_ai_setup_alerts, args=(send_text,), daemon=True).start()
+
+        # ✅ TP hit watcher (TP1/TP2/TP3 updates)
+        if os.getenv("TRADEWATCH_TP_ALERTS", "0") == "1":
+            from bot.modules.tradewatch import start_tp_hit_watcher
+            threading.Thread(target=start_tp_hit_watcher, args=(send_text,), daemon=True).start()
+
+    sched.start()
+    return sched
+
+
+def command_loop():
+    """Telegram commands for MacroWatch."""
+    offset = None
+    while True:
+        data = get_updates(offset=offset, timeout=20)
+
+        for upd in data.get("result", []):
+            offset = upd["update_id"] + 1
+            msg = upd.get("message") or {}
+
+            text_raw = (msg.get("text") or "").strip()
+            text = text_raw.lower()
+
+            chat = str(msg.get("chat", {}).get("id"))
+            if not text_raw or chat != str(os.getenv("CHAT_ID")):
+                continue
+
+            # ✅ HELP
+            if text.startswith("/help"):
+                send_text(
+                    "🤖 *MacroWatch – Command Guide*\n\n"
+                    "📈 *TradeWatch*\n"
+                    "/tradewatch_status – TradeWatch system status\n"
+                    "/setup_status – AI setup status (BTC & ETH)\n"
+                    "/checklist [SYMBOL] – AI checklist (ex: /checklist BTCUSDT)\n"
+                    "/tp_status – TP progress for latest AI plan\n\n"
+                    "🧠 *AI Strategy*\n"
+                    "/ai – Strategy rules (quick)\n"
+                    "/levels – Key BTC/ETH support & resistance\n"
+                    "/plan – Clean AI trade plan (BTC & ETH)\n\n"
+                    "📊 *Positions*\n"
+                    "/position – Current Bitget futures positions\n\n"
+                    "🏦 *FedWatch*\n"
+                    "/fedwatch – Next Fed event\n"
+                    "/fed_diag – FedWatch diagnostics\n\n"
+                    "🍊 *TrumpWatch*\n"
+                    "/trumpwatch – Post mock update\n"
+                    "/trumpwatch force – Force mock post\n"
+                    "/tw_recent – Recent posts\n\n"
+                    "🩺 *System*\n"
+                    "/health – Bot health + uptime\n"
+                )
+
+            # 🧠 AI STRATEGY QUICK
+            elif text.startswith("/ai"):
+                send_text(
+                    "🧠 *AI Strategy (BTC/ETH)*\n"
+                    "• 📈 Structure first (HH/HL = long, LH/LL = short)\n"
+                    "• 🧲 Liquidity sweep + reclaim = best entries\n"
+                    "• 🕳️ FVG reaction = confirmation (wick + close)\n"
+                    "• 🎯 Scale out in 2–3 TPs, protect capital\n"
+                    "• 🛡️ Invalidation (SL) beyond key S/R + buffer\n"
+                    "• ⚠️ If structure is mixed → wait or scalp edges only\n"
+                )
+
+            # 📌 LEVELS (BTC/ETH)
+            elif text.startswith("/levels"):
+                try:
+                    from bot.modules import tradewatch as tw
+                    btc = tw.fetch_candles_4h("BTCUSDT", limit=220)
+                    eth = tw.fetch_candles_4h("ETHUSDT", limit=220)
+
+                    b = _compute_levels_from_candles(btc, lookback=48)
+                    e = _compute_levels_from_candles(eth, lookback=48)
+
+                    if not b or not e:
+                        send_text("📌 [Levels] Not enough candle data yet.")
+                    else:
+                        send_text(
+                            "📌 *Key Levels (4H)*\n\n"
+                            f"₿ BTCUSDT\n"
+                            f"• Last: {b['last']:.0f}\n"
+                            f"• Support: {b['support']:.0f}\n"
+                            f"• Resistance: {b['resistance']:.0f}\n\n"
+                            f"Ξ ETHUSDT\n"
+                            f"• Last: {e['last']:.0f}\n"
+                            f"• Support: {e['support']:.0f}\n"
+                            f"• Resistance: {e['resistance']:.0f}\n"
+                        )
+                except Exception as e:
+                    send_text(f"📌 [Levels] Error: {e}")
+
+            # 🧠 PLAN (BTC/ETH)
+            elif text.startswith("/plan"):
+                try:
+                    b = _build_plan("BTCUSDT")
+                    e = _build_plan("ETHUSDT")
+
+                    if b.get("error") or e.get("error"):
+                        send_text(f"🧠 [Plan] Error: {b.get('error') or e.get('error')}")
+                    else:
+                        send_text(
+                            "🧠 *AI Trade Plan (4H)*\n\n"
+                            f"₿ BTCUSDT\n"
+                            f"• Status: {b['checklist_status']} | Bias: {b['bias']} | Score: {b['score']}\n"
+                            f"• Key: S {b['support']:.0f} / R {b['resistance']:.0f} | Last {b['last']:.0f}\n"
+                            f"• Entry: {b['entry_zone'][0]:.0f} – {b['entry_zone'][1]:.0f}\n"
+                            f"• SL: {b['sl']:.0f}\n"
+                            f"• TP1: {b['tps'][0]:.0f} | TP2: {b['tps'][1]:.0f} | TP3: {b['tps'][2]:.0f}\n"
+                            f"• Notes: {b['notes']}\n\n"
+                            f"Ξ ETHUSDT\n"
+                            f"• Status: {e['checklist_status']} | Bias: {e['bias']} | Score: {e['score']}\n"
+                            f"• Key: S {e['support']:.0f} / R {e['resistance']:.0f} | Last {e['last']:.0f}\n"
+                            f"• Entry: {e['entry_zone'][0]:.0f} – {e['entry_zone'][1]:.0f}\n"
+                            f"• SL: {e['sl']:.0f}\n"
+                            f"• TP1: {e['tps'][0]:.0f} | TP2: {e['tps'][1]:.0f} | TP3: {e['tps'][2]:.0f}\n"
+                            f"• Notes: {e['notes']}"
+                        )
+                except Exception as e:
+                    send_text(f"🧠 [Plan] Error: {e}")
+
+            # 🎯 TP STATUS (latest plan progress)
+            elif text.startswith("/tp_status"):
+                try:
+                    from bot.modules.tradewatch import get_tp_status_text
+                    send_text(get_tp_status_text())
+                except Exception as e:
+                    send_text(f"🎯 [TP Status] Error: {e}")
+
+            # 🩺 HEALTH
+            elif text.startswith("/health"):
+                try:
+                    from bot.modules import tradewatch as tw
+                    st = getattr(tw, "STATE", {}) or {}
+                    last_poll = st.get("last_poll_utc")
+                    last_ai = st.get("last_ai_scan_utc")
+                    last_err = st.get("last_error")
+
+                    def _dt_str(x):
+                        return x.strftime("%Y-%m-%d %H:%M:%S") if x else "—"
+
+                    send_text(
+                        "🩺 *MacroWatch Health*\n"
+                        f"• Uptime: {_fmt_uptime()}\n"
+                        f"• Started (UTC): {STARTED_AT_UTC.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"• Python: {sys.version.split()[0]} | {platform.system()} {platform.release()}\n\n"
+                        "📈 *TradeWatch*\n"
+                        f"• Last poll (UTC): {_dt_str(last_poll)}\n"
+                        f"• Last AI scan (UTC): {_dt_str(last_ai)}\n"
+                        f"• Last error: {last_err or '—'}\n"
+                    )
+                except Exception as e:
+                    send_text(f"🩺 [Health] Error: {e}")
+
+            # 🍊 TrumpWatch
+            elif text.startswith("/trumpwatch"):
+                force = "force" in text
+                trumpwatch.post_mock(force=force)
+
+            elif text.startswith("/tw_recent"):
+                trumpwatch.show_recent()
+
+            # 🏦 FedWatch
+            elif text.startswith("/fedwatch"):
+                fedwatch.show_next_event()
+
+            elif text.startswith("/fed_diag"):
+                fedwatch.show_diag()
+
+            # 📊 CryptoWatch
+            elif text.startswith("/cw_daily"):
+                fn = getattr(cryptowatch_daily, "main", None)
+                if fn:
+                    fn()
+                else:
+                    send_text("⚠️ CryptoWatch Daily is disabled (cryptowatch_daily.main missing).")
+
+            elif text.startswith("/cw_weekly"):
+                cryptowatch.main()
+
+            # 📘 Position report (Bitget)
+            elif text.startswith("/position"):
+                out = get_position_report_safe()
+                send_text(out)
+
+            # 📈 TradeWatch status
+            elif text.startswith("/tradewatch_status"):
+                try:
+                    from bot.modules.tradewatch import get_status
+                    send_text(get_status())
+                except Exception as e:
+                    send_text(f"📈 [TradeWatch] Status unavailable: {e}")
+
+            # 🧠 AI setup status
+            elif text.startswith("/setup_status"):
+                try:
+                    from bot.modules.tradewatch import get_setup_status_text
+                    send_text(get_setup_status_text())
+                except Exception as e:
+                    send_text(f"🧠 [AI Setup] Status unavailable: {e}")
+
+            # 🧠 Checklist on demand
+            elif text.startswith("/checklist"):
+                try:
+                    parts = text_raw.split()
+                    symbol = parts[1].strip().upper() if len(parts) > 1 else "BTCUSDT"
+                    symbol = symbol.replace(".P", "")
+                    from bot.modules.tradewatch import get_checklist_status_text
+                    send_text(get_checklist_status_text(symbol, include_reasons=True))
+                except Exception as e:
+                    send_text(f"🧠 [AI Checklist] Error: {e}")
+
+
+if __name__ == "__main__":
+    # ✅ Removed boot_banner() to avoid startup Telegram spam
+
+    start_scheduler()
+
+    # Start optional TrumpWatch Live in a dedicated thread
+    try:
+        if os.getenv("ENABLE_TRUMPWATCH_LIVE", "true").lower() in ("1", "true", "yes", "on"):
+            import bot.modules.trumpwatch_live as trumpwatch_live
+            threading.Thread(target=trumpwatch_live.run_loop, daemon=True).start()
+            print("🍊 TrumpWatch Live started ✅", flush=True)
+        else:
+            print("🍊 TrumpWatch Live disabled", flush=True)
     except Exception as e:
-        print("[Bitget] get_ticker exception:", e)
-        return None
+        print("⚠️ Error starting TrumpWatch Live:", e, flush=True)
 
+    # Telegram command listener
+    threading.Thread(target=command_loop, daemon=True).start()
 
-# ======================
-# Fetch Futures Data
-# ======================
-
-def _fetch_current_futures_position(symbol: str):
-    params = {
-        "productType": BITGET_PRODUCT_TYPE,
-        "symbol": symbol,
-        "marginCoin": BITGET_MARGIN_COIN,
-    }
-    res = _signed_request(
-        "GET",
-        "/api/v2/mix/position/single-position",
-        params=params,
-        body=None,
-    )
-    data = res.get("data") or []
-    return data[0] if data else None
-
-
-def _fetch_pending_tp_sl_orders(symbol: str):
-    params = {
-        "planType": "profit_loss",
-        "productType": BITGET_PRODUCT_TYPE,
-        "symbol": symbol,
-        "limit": "100",
-    }
-    res = _signed_request(
-        "GET",
-        "/api/v2/mix/order/orders-plan-pending",
-        params=params,
-        body=None,
-    )
-
-    data = res.get("data") or {}
-    entrusted = data.get("entrustedList") or []
-
-    tps, sls = [], []
-
-    for o in entrusted:
-        if o.get("symbol", "").upper() != symbol.upper():
-            continue
-
-        tp = o.get("stopSurplusTriggerPrice")
-        if tp:
-            try:
-                tps.append(float(tp))
-            except:
-                pass
-
-        sl = o.get("stopLossTriggerPrice")
-        if sl:
-            try:
-                sls.append(float(sl))
-            except:
-                pass
-
-    return {"tp": tps, "sl": sls}
-
-
-def _position_is_open(pos: dict | None) -> bool:
-    if not pos:
-        return False
-    try:
-        return float(pos.get("total", "0") or "0") != 0.0
-    except Exception:
-        return False
-
-
-# ======================
-# Build Position Message
-# ======================
-
-def build_futures_position_message(symbol: str | None = None) -> str:
-    """
-    Single-symbol report (backward compatible).
-    If symbol is None, uses BITGET_SYMBOL.
-    """
-    symbol = (symbol or BITGET_SYMBOL).strip().upper()
-    pos = _fetch_current_futures_position(symbol)
-
-    if not _position_is_open(pos):
-        return f"ℹ️ No open futures position for {symbol}."
-
-    side_raw = (pos.get("holdSide") or "").lower()
-    side = "LONG" if side_raw == "long" else "SHORT"
-
-    entry = pos.get("openPriceAvg") or pos.get("openPrice") or "N/A"
-    size = pos.get("total") or pos.get("available") or "N/A"
-    lev = pos.get("leverage") or "N/A"
-    liq = pos.get("liquidationPrice") or pos.get("liqPx") or "N/A"
-    pnl = pos.get("unrealizedPL") or pos.get("upl") or "0"
-
-    margin_mode = pos.get("marginMode") or ""
-    pos_mode = pos.get("posMode") or ""
-
-    triggers = _fetch_pending_tp_sl_orders(symbol)
-    tp_sorted = sorted(triggers["tp"], reverse=(side == "SHORT"))
-    sl_sorted = sorted(triggers["sl"], reverse=(side == "SHORT"))
-
-    lines = [
-        "📘 Current Futures Position",
-        f"Pair: {symbol}",
-        f"Side: {side}",
-        f"Entry Price: {entry}",
-        f"Size: {size}",
-        f"Leverage: {lev}x",
-    ]
-
-    if margin_mode:
-        lines.append(f"Margin Mode: {margin_mode}")
-    if pos_mode:
-        lines.append(f"Position Mode: {pos_mode}")
-
-    if tp_sorted:
-        lines.append("")
-        for i, p in enumerate(tp_sorted[:3], 1):
-            lines.append(f"TP{i}: {p}")
-
-    if sl_sorted:
-        lines.append("")
-        lines.append(f"SL: {sl_sorted[0]}")
-
-    # RR Ratio
-    if tp_sorted and sl_sorted:
-        try:
-            entry_f = float(entry)
-            tp = tp_sorted[0]
-            sl = sl_sorted[0]
-
-            if side == "LONG":
-                risk = entry_f - sl
-                reward = tp - entry_f
-            else:
-                risk = sl - entry_f
-                reward = entry_f - tp
-
-            if risk > 0:
-                rr = reward / risk
-                lines.append(f"RR Ratio: {rr:.2f}")
-        except:
-            pass
-
-    if liq:
-        lines.append(f"Liq Price: {liq}")
-
-    try:
-        pnl_f = float(pnl)
-        lines.append(f"Unrealized PnL: {_pnl_color(pnl_f)}")
-    except:
-        lines.append(f"Unrealized PnL: {pnl}")
-
-    lines.append(f"Time (UTC): {iso_utc_now()}")
-
-    return "\n".join(lines)
-
-
-def build_multi_futures_position_message(symbols: list[str] | None = None) -> str:
-    """
-    Multi-symbol report:
-    - If no positions are open: returns ONE clean line.
-    - If at least one is open: returns ONLY the open position reports (no spam for flat symbols).
-    """
-    symbols = symbols or BITGET_SYMBOLS
-
-    open_reports: list[str] = []
-    for sym in symbols:
-        sym = (sym or "").strip().upper()
-        if not sym:
-            continue
-        pos = _fetch_current_futures_position(sym)
-        if _position_is_open(pos):
-            open_reports.append(build_futures_position_message(sym))
-
-    if not open_reports:
-        return f"ℹ️ No open futures positions for: {', '.join(symbols)}."
-
-    return "\n\n".join(open_reports)
-
-
-def get_position_report_safe() -> str:
-    try:
-        # Default to multi-symbol so BTC-only 'no position' messages don't fire when ETH is open.
-        return build_multi_futures_position_message()
-    except Exception as e:
-        print("[Bitget] /position error:", e)
-        return "⚠️ Could not fetch position from Bitget. Check API keys & futures permissions."
+    # Keep service alive
+    while True:
+        time.sleep(3600)
