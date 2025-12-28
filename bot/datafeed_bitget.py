@@ -21,7 +21,19 @@ BITGET_BASE_URL = "https://api.bitget.com"
 # Futures defaults (USDT-M)
 BITGET_PRODUCT_TYPE = os.environ.get("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 BITGET_MARGIN_COIN = os.environ.get("BITGET_MARGIN_COIN", "USDT")
-BITGET_SYMBOL = os.environ.get("BITGET_SYMBOL", "BTCUSDT")
+
+# Backward compatible single symbol (used as fallback / default)
+BITGET_SYMBOL = os.environ.get("BITGET_SYMBOL", "BTCUSDT").strip().upper()
+
+# Multi-symbol support (comma-separated). Default: BTC + ETH
+# Example: BTCUSDT,ETHUSDT
+BITGET_SYMBOLS = [
+    s.strip().upper()
+    for s in os.environ.get("BITGET_SYMBOLS", "BTCUSDT,ETHUSDT").split(",")
+    if s.strip()
+]
+if not BITGET_SYMBOLS:
+    BITGET_SYMBOLS = [BITGET_SYMBOL]
 
 # ======================
 # Helpers
@@ -132,10 +144,10 @@ def get_ticker(symbol: str):
 # Fetch Futures Data
 # ======================
 
-def _fetch_current_futures_position():
+def _fetch_current_futures_position(symbol: str):
     params = {
         "productType": BITGET_PRODUCT_TYPE,
-        "symbol": BITGET_SYMBOL,
+        "symbol": symbol,
         "marginCoin": BITGET_MARGIN_COIN,
     }
     res = _signed_request(
@@ -148,11 +160,11 @@ def _fetch_current_futures_position():
     return data[0] if data else None
 
 
-def _fetch_pending_tp_sl_orders():
+def _fetch_pending_tp_sl_orders(symbol: str):
     params = {
         "planType": "profit_loss",
         "productType": BITGET_PRODUCT_TYPE,
-        "symbol": BITGET_SYMBOL,
+        "symbol": symbol,
         "limit": "100",
     }
     res = _signed_request(
@@ -168,7 +180,7 @@ def _fetch_pending_tp_sl_orders():
     tps, sls = [], []
 
     for o in entrusted:
-        if o.get("symbol", "").upper() != BITGET_SYMBOL.upper():
+        if o.get("symbol", "").upper() != symbol.upper():
             continue
 
         tp = o.get("stopSurplusTriggerPrice")
@@ -188,15 +200,29 @@ def _fetch_pending_tp_sl_orders():
     return {"tp": tps, "sl": sls}
 
 
+def _position_is_open(pos: dict | None) -> bool:
+    if not pos:
+        return False
+    try:
+        return float(pos.get("total", "0") or "0") != 0.0
+    except:
+        return False
+
+
 # ======================
 # Build Position Message
 # ======================
 
-def build_futures_position_message() -> str:
-    pos = _fetch_current_futures_position()
+def build_futures_position_message(symbol: str | None = None) -> str:
+    """
+    Single-symbol position report (kept for backward compatibility).
+    If symbol is None, uses BITGET_SYMBOL.
+    """
+    symbol = (symbol or BITGET_SYMBOL).upper()
+    pos = _fetch_current_futures_position(symbol)
 
-    if not pos or float(pos.get("total", "0") or "0") == 0.0:
-        return f"ℹ️ No open futures position for {BITGET_SYMBOL}."
+    if not _position_is_open(pos):
+        return f"ℹ️ No open futures position for {symbol}."
 
     side_raw = (pos.get("holdSide") or "").lower()
     side = "LONG" if side_raw == "long" else "SHORT"
@@ -210,13 +236,13 @@ def build_futures_position_message() -> str:
     margin_mode = pos.get("marginMode") or ""
     pos_mode = pos.get("posMode") or ""
 
-    triggers = _fetch_pending_tp_sl_orders()
+    triggers = _fetch_pending_tp_sl_orders(symbol)
     tp_sorted = sorted(triggers["tp"], reverse=(side == "SHORT"))
     sl_sorted = sorted(triggers["sl"], reverse=(side == "SHORT"))
 
     lines = [
         "📘 Current Futures Position",
-        f"Pair: {BITGET_SYMBOL}",
+        f"Pair: {symbol}",
         f"Side: {side}",
         f"Entry Price: {entry}",
         f"Size: {size}",
@@ -271,9 +297,37 @@ def build_futures_position_message() -> str:
     return "\n".join(lines)
 
 
+def build_multi_futures_position_message(symbols: list[str] | None = None) -> str:
+    """
+    Multi-symbol position report.
+    - If no positions are open: returns ONE clean 'no open positions' line.
+    - If at least one is open: returns ONLY open position reports (no spam for flat symbols).
+    """
+    symbols = symbols or BITGET_SYMBOLS
+
+    open_reports: list[str] = []
+
+    for sym in symbols:
+        sym_u = sym.strip().upper()
+        if not sym_u:
+            continue
+        pos = _fetch_current_futures_position(sym_u)
+        if _position_is_open(pos):
+            open_reports.append(build_futures_position_message(sym_u))
+
+    if not open_reports:
+        return f"ℹ️ No open futures positions for: {', '.join(symbols)}."
+
+    return "\n\n".join(open_reports)
+
+
 def get_position_report_safe() -> str:
+    """
+    Safe wrapper used by modules.
+    Now returns multi-symbol report by default.
+    """
     try:
-        return build_futures_position_message()
+        return build_multi_futures_position_message()
     except Exception as e:
         print("[Bitget] /position error:", e)
         return "⚠️ Could not fetch position from Bitget. Check API keys & futures permissions."
