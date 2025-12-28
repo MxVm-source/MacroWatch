@@ -6,8 +6,12 @@ import time
 from datetime import datetime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
+
 from bot.utils import send_text, get_updates
-from bot.modules import trumpwatch, fedwatch, cryptowatch, cryptowatch_daily
+import bot.modules.trumpwatch as trumpwatch
+import bot.modules.fedwatch as fedwatch
+import bot.modules.cryptowatch as cryptowatch
+import bot.modules.cryptowatch_daily as cryptowatch_daily
 from bot.datafeed_bitget import get_position_report_safe
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
@@ -126,8 +130,13 @@ def boot_banner():
 
 
 def start_scheduler():
-    """Start jobs for TrumpWatch mock, FedWatch loop, CryptoWatch, and TradeWatch."""
+    """Start jobs for TrumpWatch, FedWatch loop, CryptoWatch, and TradeWatch."""
     sched = BackgroundScheduler(timezone=os.getenv("TIMEZONE", "Europe/Brussels"))
+
+    # Optional: assert module loaded correctly
+    assert hasattr(cryptowatch_daily, "main"), (
+        f"cryptowatch_daily has no main() — loaded from {getattr(cryptowatch_daily, '__file__', 'unknown')}"
+    )
 
     # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
     if os.getenv("ENABLE_TRUMPWATCH", "false").lower() in ("1", "true", "yes", "on"):
@@ -172,7 +181,7 @@ def start_scheduler():
         if os.getenv("TRADEWATCH_AI_ALERTS", "0") == "1":
             threading.Thread(target=start_ai_setup_alerts, args=(send_text,), daemon=True).start()
 
-        # ✅ NEW: TP hit watcher (TP1/TP2/TP3 updates)
+        # ✅ TP hit watcher (TP1/TP2/TP3 updates)
         if os.getenv("TRADEWATCH_TP_ALERTS", "0") == "1":
             from bot.modules.tradewatch import start_tp_hit_watcher
             threading.Thread(target=start_tp_hit_watcher, args=(send_text,), daemon=True).start()
@@ -388,7 +397,7 @@ if __name__ == "__main__":
     # Start optional TrumpWatch Live in a dedicated thread
     try:
         if os.getenv("ENABLE_TRUMPWATCH_LIVE", "true").lower() in ("1", "true", "yes", "on"):
-            from bot.modules import trumpwatch_live
+            import bot.modules.trumpwatch_live as trumpwatch_live
             threading.Thread(target=trumpwatch_live.run_loop, daemon=True).start()
             print("🍊 TrumpWatch Live started ✅", flush=True)
         else:
