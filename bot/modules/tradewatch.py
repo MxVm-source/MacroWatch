@@ -1082,7 +1082,7 @@ def _format_ai_alert(sym: str, res: ChecklistResult) -> str:
         f"Pair: {sym}\n"
         f"Bias: {be} {res.bias}\n"
         f"Score: {res.score}/{res.max_score}\n"
-        f"Status: {res.status}"
+        f"Status: {res.status}\n\n"
         f"{plan_block}\n\n"
         f"Fast checks:\n"
         f"• Structure: {res.structure.bias} ({res.structure.score}/{res.structure.max_score})\n"
@@ -1172,6 +1172,40 @@ def _check_tp_hits(sym: str, send_func: Callable[[str], None]) -> None:
     # optional: deactivate after TP3
     if st["hit"].get("tp3"):
         st["active"] = False
+
+
+def start_tp_hit_watcher(send_func: Callable[[str], None]) -> None:
+    """Backward-compatible TP watcher loop.
+
+    Note: In this file, TP polling can also run inside start_ai_setup_alerts().
+    If you start both loops, you may get duplicate TP messages.
+    """
+    if not TRADEWATCH_TP_ALERTS:
+        print("[TradeWatch] TP hit watcher disabled (TRADEWATCH_TP_ALERTS != 1)")
+        return
+
+    print("[TradeWatch] TP hit watcher started ✅")
+
+    symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
+
+    while True:
+        try:
+            STATE["last_tp_scan_utc"] = datetime.now(timezone.utc)
+
+            # Prefer active plans; else poll configured symbols (if plan requirement is disabled)
+            to_check = list(PLAN_STATE.keys()) or [_normalize_symbol(s) for s in symbols]
+
+            for sym in to_check:
+                sym = _normalize_symbol(sym)
+                if TRADEWATCH_TP_REQUIRE_PLAN and sym not in PLAN_STATE:
+                    continue
+                _check_tp_hits(sym, send_func)
+
+        except Exception as e:
+            STATE["last_error"] = f"TP watcher error: {e}"
+            print("[TradeWatch] TP watcher error:", e)
+
+        time.sleep(max(5, TRADEWATCH_TP_POLL_SEC))
 
 
 def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
