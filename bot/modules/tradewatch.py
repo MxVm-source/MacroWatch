@@ -15,54 +15,22 @@ Features
   - Fibonacci retracement entry zones (0.382/0.5/0.618/0.705)
 - Optional **TP hit updates** (TP1/TP2/TP3) after an entry is "tagged".
 
-Bitget vs TradingView symbol note:
-- TradingView perpetuals often look like: BTCUSDT.P / ETHUSDT.P
-- Bitget REST expects: BTCUSDT / ETHUSDT (NO ".P")
-This module normalizes symbols by stripping a trailing ".P".
-
-Key endpoints (Bitget V2):
-- Fills (auth):   GET /api/v2/mix/order/fills
-- Candles (pub):  GET /api/v2/mix/market/candles   (fallback: /api/v2/spot/market/candles)
-- Ticker (pub):   GET /api/v2/mix/market/ticker
-
-Environment variables
----------------------
-Auth (required for fills):
-- BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSPHRASE
-
-Core:
-- TRADEWATCH_ENABLED=1
-- TRADEWATCH_POLL_INTERVAL_SEC=10
-- TRADEWATCH_PRODUCT_TYPE=USDT-FUTURES          # USDT-FUTURES / COIN-FUTURES / USDC-FUTURES
-- TRADEWATCH_SYMBOLS=BTCUSDT,ETHUSDT            # comma-separated; empty means ALL
-
-Checklist:
-- TRADEWATCH_CHECKLIST_ENABLED=1
-- TRADEWATCH_CHECKLIST_GRANULARITY=4H           # default 4H (fallback tries 240)
-
-Auto AI setup alerts (no trade needed):
-- TRADEWATCH_AI_ALERTS=1
-- TRADEWATCH_AI_MIN_SCORE=6                     # minimum score (out of 10) for ✅ alerts
-- TRADEWATCH_AI_INTERVAL_SEC=60
-- TRADEWATCH_AI_COOLDOWN_MIN=180
-- TRADEWATCH_AI_SEND_PARTIAL=0
-
-Auto plan inside AI alerts:
-- TRADEWATCH_PLAN_IN_ALERTS=1                   # include Entry/SL/TPs in AI setup alerts
-- TRADEWATCH_PLAN_LOOKBACK=48                   # 4H candles for S/R
-
-TP hit updates (based on public ticker):
-- TRADEWATCH_TP_ALERTS=1                        # send "TP1/TP2/TP3 hit" updates
-- TRADEWATCH_ENTRY_TRIGGER_MODE=zone            # zone | touch
-- TRADEWATCH_TP_POLL_SEC=20                     # price polling frequency
-
-Fun:
-- TRADEWATCH_DEGEN=1
-
 Notes
 -----
 - TP updates are driven by *price*, not by your exchange order fills.
 - An "entry" is considered active once price reaches the entry zone.
+
+Compatibility
+-------------
+Some runners/schedulers import `start_tp_hit_watcher`.
+This module primarily performs TP polling inside `start_ai_setup_alerts`,
+but it also exports `start_tp_hit_watcher(send_func)` for backward compatibility.
+
+If you enable both TP polling inside AI loop **and** start_tp_hit_watcher,
+you may get duplicate TP alerts.
+
+Use env var to control behavior:
+- TRADEWATCH_TP_STANDALONE=1   # run TP polling in start_tp_hit_watcher
 """
 
 from __future__ import annotations
@@ -115,6 +83,13 @@ TRADEWATCH_PLAN_LOOKBACK = int(os.environ.get("TRADEWATCH_PLAN_LOOKBACK", "48"))
 TRADEWATCH_TP_ALERTS = os.environ.get("TRADEWATCH_TP_ALERTS", "1") == "1"
 TRADEWATCH_ENTRY_TRIGGER_MODE = os.environ.get("TRADEWATCH_ENTRY_TRIGGER_MODE", "zone").strip().lower()  # zone | touch
 TRADEWATCH_TP_POLL_SEC = int(os.environ.get("TRADEWATCH_TP_POLL_SEC", "20"))
+TRADEWATCH_TP_REQUIRE_PLAN = os.environ.get("TRADEWATCH_TP_REQUIRE_PLAN", "1") == "1"
+
+# Confidence tags (scalp/intraday/swing) — used in plan blocks
+TRADEWATCH_CONFIDENCE_TAGS = os.environ.get("TRADEWATCH_CONFIDENCE_TAGS", "1") == "1"
+
+# Backward-compat TP watcher behavior
+TRADEWATCH_TP_STANDALONE = os.environ.get("TRADEWATCH_TP_STANDALONE", "0") == "1"
 
 
 def _parse_symbols(raw: str) -> List[str]:
@@ -151,20 +126,9 @@ STATE: Dict[str, Any] = {
 
 # Per-symbol state for AI alerts + /setup_status
 SETUP_STATE: Dict[str, Dict[str, Any]] = {}
-# SETUP_STATE[sym] = {"last_status": str, "last_bias": str, "last_score": str, "last_alert_utc": datetime|None}
 
 # Per-symbol state for plan + TP tracking
 PLAN_STATE: Dict[str, Dict[str, Any]] = {}
-# PLAN_STATE[sym] = {
-#   "active": bool,
-#   "bias": "LONG"|"SHORT",
-#   "entry_lo": float, "entry_hi": float,
-#   "sl": float,
-#   "tps": [float,float,float],
-#   "hit": {"entry":bool,"tp1":bool,"tp2":bool,"tp3":bool},
-#   "last_price": float|None,
-#   "created_utc": datetime,
-# }
 
 # =========================
 # Degen templates (optional)
@@ -279,7 +243,6 @@ def _get_last_price(symbol: str) -> float:
         params={"symbol": symbol, "productType": TRADEWATCH_PRODUCT_TYPE},
     )
     d = raw.get("data") or {}
-    # Bitget sometimes uses "lastPr" (string). Fallbacks included.
     for k in ("lastPr", "last", "close"):
         if k in d and d[k] not in (None, ""):
             return float(d[k])
@@ -448,7 +411,6 @@ def bitget_klines_to_candles(raw: Any) -> List[Candle]:
 def fetch_candles(symbol: str, granularity: str, limit: int = 320) -> List[Candle]:
     symbol = _normalize_symbol(symbol)
 
-    # MIX candles (public)
     try:
         raw = _public_get(
             "/api/v2/mix/market/candles",
@@ -465,7 +427,6 @@ def fetch_candles(symbol: str, granularity: str, limit: int = 320) -> List[Candl
     except Exception:
         pass
 
-    # SPOT fallback (public)
     raw = _public_get(
         "/api/v2/spot/market/candles",
         params={"symbol": symbol, "granularity": granularity, "limit": str(limit)},
@@ -793,9 +754,7 @@ def _find_impulse_for_fib(candles: List[Candle], bias: str) -> Optional[Tuple[in
     if not highs or not lows:
         return None
 
-    # pick last matching impulse with correct ordering
     if bias == "LONG":
-        # find last high, then find a low before it
         ih, ph = highs[-1]
         lows_before = [x for x in lows if x[0] < ih]
         if not lows_before:
@@ -805,7 +764,6 @@ def _find_impulse_for_fib(candles: List[Candle], bias: str) -> Optional[Tuple[in
             return None
         return il, pl, ih, ph
 
-    # SHORT
     il, pl = lows[-1]
     highs_before = [x for x in highs if x[0] < il]
     if not highs_before:
@@ -817,23 +775,19 @@ def _find_impulse_for_fib(candles: List[Candle], bias: str) -> Optional[Tuple[in
 
 
 def _fib_price(p0: float, p1: float, level: float, bias: str) -> float:
-    """Fib retracement price.
-
-    LONG impulse p0(low)->p1(high): retrace = p1 - (p1-p0)*level
-    SHORT impulse p0(high)->p1(low): retrace = p1 + (p0-p1)*level
-    """
+    """Fib retracement price."""
     bias = (bias or "").upper()
     if bias == "LONG":
         return p1 - (p1 - p0) * level
-    # SHORT
     return p1 + (p0 - p1) * level
 
 
 def _confidence_tag(chk: ChecklistResult) -> str:
     """Simple tag: scalp / intraday / swing."""
+    if not TRADEWATCH_CONFIDENCE_TAGS:
+        return "—"
     if "PARTIAL" in chk.status:
         return "SCALP"
-    # valid setups
     if chk.score >= 8:
         return "SWING"
     if chk.score >= 6:
@@ -853,21 +807,20 @@ def build_auto_plan(symbol: str) -> Dict[str, Any]:
     if not sr:
         return {"symbol": sym, "error": "Not enough candles for S/R."}
 
-    last = sr["last"]
-    sup = sr["support"]
-    res = sr["resistance"]
-    atr = _atr(candles, 14)
-    atr_buf = max(atr * 0.35, last * 0.0015)  # safety buffer
+    last = float(sr["last"])
+    sup = float(sr["support"])
+    res = float(sr["resistance"])
+    atr = float(_atr(candles, 14))
+    atr_buf = max(atr * 0.35, last * 0.0015)
 
     bias = chk.bias
     tag = _confidence_tag(chk)
 
-    # default fib zone by confidence
     if tag == "SWING":
         z0, z1 = 0.618, 0.705
     elif tag == "SCALP":
         z0, z1 = 0.382, 0.5
-    else:  # INTRADAY
+    else:
         z0, z1 = 0.5, 0.618
 
     imp = _find_impulse_for_fib(candles, bias)
@@ -878,7 +831,6 @@ def build_auto_plan(symbol: str) -> Dict[str, Any]:
         entry_b = _fib_price(p0, p1, z0, bias)
         entry_lo, entry_hi = (min(entry_a, entry_b), max(entry_a, entry_b))
 
-        # SL: beyond deeper fib + buffer (or beyond impulse extreme)
         deep = 0.786
         sl_raw = _fib_price(p0, p1, deep, bias)
         if bias == "LONG":
@@ -886,7 +838,7 @@ def build_auto_plan(symbol: str) -> Dict[str, Any]:
         elif bias == "SHORT":
             sl = max(sl_raw, p0) + atr_buf * 0.35
         else:
-            sl = (sup - atr_buf)
+            sl = sup - atr_buf
 
         fib_info = {
             "impulse": (p0, p1),
@@ -894,7 +846,6 @@ def build_auto_plan(symbol: str) -> Dict[str, Any]:
             "impulse_idx": (i0, i1),
         }
     else:
-        # fallback to S/R based plan
         fib_info = None
         if bias == "LONG":
             entry_lo = sup + atr_buf * 0.2
@@ -909,7 +860,6 @@ def build_auto_plan(symbol: str) -> Dict[str, Any]:
             entry_hi = sup + atr_buf * 1.0
             sl = sup - atr_buf * 1.2
 
-    # TPs: aim back to the opposite edge of the range
     if bias == "LONG":
         tp1 = last + (res - last) * 0.35
         tp2 = last + (res - last) * 0.70
@@ -921,7 +871,6 @@ def build_auto_plan(symbol: str) -> Dict[str, Any]:
     else:
         tp1, tp2, tp3 = last, last + (res - last) * 0.5, res
 
-    # sanity ordering for SHORT (tp1>tp2>tp3) and LONG (tp1<tp2<tp3)
     tps = [float(tp1), float(tp2), float(tp3)]
     if bias == "SHORT":
         tps = sorted(tps, reverse=True)
@@ -934,10 +883,10 @@ def build_auto_plan(symbol: str) -> Dict[str, Any]:
         "tag": tag,
         "status": chk.status,
         "score": f"{chk.score}/{chk.max_score}",
-        "last": float(last),
-        "support": float(sup),
-        "resistance": float(res),
-        "atr": float(atr),
+        "last": last,
+        "support": sup,
+        "resistance": res,
+        "atr": atr,
         "entry": (float(entry_lo), float(entry_hi)),
         "sl": float(sl),
         "tps": tps,
@@ -948,9 +897,10 @@ def build_auto_plan(symbol: str) -> Dict[str, Any]:
 def _format_plan_block(plan: Dict[str, Any]) -> str:
     entry_lo, entry_hi = plan["entry"]
     tps = plan["tps"]
+    conf = plan.get("tag", "—")
     return (
         "🧾 Plan (auto)\n"
-        f"• Confidence: {plan['tag']}\n"
+        f"• Confidence: {conf}\n"
         f"• Entry: {entry_lo:.0f} – {entry_hi:.0f}\n"
         f"• SL: {plan['sl']:.0f}\n"
         f"• TP1: {tps[0]:.0f}\n"
@@ -1017,83 +967,7 @@ def _should_alert(sym: str, res: ChecklistResult) -> bool:
     return False
 
 
-def classify_trade_style(res: ChecklistResult, atr: float, sl_distance: float) -> str:
-    """
-    Returns: SCALP | INTRADAY | SWING
-    """
-    score = res.score
-    confirmations = sum([
-        bool(res.structure.ok),
-        bool(res.liquidity.ok),
-        bool(res.fvg.ok),
-    ])
-
-    if score <= 6 or confirmations <= 1 or (atr > 0 and sl_distance <= atr * 0.6):
-        return "SCALP"
-    if score <= 7 or confirmations == 2:
-        return "INTRADAY"
-    return "SWING"
-
-def _style_tag(res: ChecklistResult, plan: Dict[str, Any]) -> Optional[str]:
-    """
-    Builds a simple confidence tag: ⚡ SCALP / 🕒 INTRADAY / 🧨 SWING
-    Uses checklist strength + ATR vs stop distance.
-    """
-    if not TRADEWATCH_CONFIDENCE_TAGS:
-        return None
-    if plan.get("error"):
-        return None
-
-    atr = float(plan.get("atr") or 0.0)
-    ez_lo, ez_hi = plan["entry_zone"]
-    sl = float(plan["sl"])
-    bias = (plan.get("bias") or res.bias or "NEUTRAL").upper()
-
-    if bias == "LONG":
-        sl_distance = abs(ez_lo - sl)
-    elif bias == "SHORT":
-        sl_distance = abs(sl - ez_hi)
-    else:
-        sl_distance = abs(ez_lo - sl)
-
-    style = classify_trade_style(res, atr=atr, sl_distance=sl_distance)
-    emoji = {"SCALP": "⚡", "INTRADAY": "🕒", "SWING": "🧨"}.get(style, "🧩")
-    return f"{emoji} {style}"
-
-def _format_ai_alert(sym: str, res: ChecklistResult) -> str:
-    sym = _normalize_symbol(sym)
-    se = _status_emoji(res.status)
-    be = _bias_emoji(res.bias)
-
-    plan_block = ""
-    if TRADEWATCH_PLAN_IN_ALERTS and "SETUP VALID" in res.status:
-        try:
-            plan = build_auto_plan(sym)
-            if not plan.get("error"):
-                plan_block = "\n\n" + _format_plan_block(plan)
-                # stash for TP tracking
-                _seed_plan_state_from_plan(plan)
-        except Exception as _:
-            # keep alert clean if plan fails
-            plan_block = ""
-
-    return (
-        f"{se} [AI SETUP ALERT]\n"
-        f"Pair: {sym}\n"
-        f"Bias: {be} {res.bias}\n"
-        f"Score: {res.score}/{res.max_score}\n"
-        f"Status: {res.status}\n\n"
-        f"{plan_block}\n\n"
-        f"Fast checks:\n"
-        f"• Structure: {res.structure.bias} ({res.structure.score}/{res.structure.max_score})\n"
-        f"• Liquidity: {res.liquidity.bias} ({res.liquidity.score}/{res.liquidity.max_score})\n"
-        f"• FVG: {res.fvg.bias} ({res.fvg.score}/{res.fvg.max_score})\n"
-        f"Time (UTC): {_iso_utc_now()}"
-    )
-
-
 def _seed_plan_state_from_plan(plan: Dict[str, Any]) -> None:
-    """Store latest plan for TP monitoring (per symbol)."""
     sym = plan.get("symbol")
     if not sym:
         return
@@ -1115,14 +989,11 @@ def _seed_plan_state_from_plan(plan: Dict[str, Any]) -> None:
 def _price_in_entry_zone(price: float, entry_lo: float, entry_hi: float) -> bool:
     lo, hi = (min(entry_lo, entry_hi), max(entry_lo, entry_hi))
     if TRADEWATCH_ENTRY_TRIGGER_MODE == "touch":
-        # for touch mode, any touch of either bound counts
         return price <= hi and price >= lo
-    # zone mode: we still treat as within zone
     return lo <= price <= hi
 
 
 def _check_tp_hits(sym: str, send_func: Callable[[str], None]) -> None:
-    """Check price vs entry + tps and send one-time updates."""
     if not TRADEWATCH_TP_ALERTS:
         return
 
@@ -1142,7 +1013,6 @@ def _check_tp_hits(sym: str, send_func: Callable[[str], None]) -> None:
     entry_hi = float(st["entry_hi"])
     tps = [float(x) for x in st["tps"]]
 
-    # 1) Entry tagged
     if not st["hit"].get("entry"):
         if _price_in_entry_zone(price, entry_lo, entry_hi):
             st["hit"]["entry"] = True
@@ -1150,9 +1020,8 @@ def _check_tp_hits(sym: str, send_func: Callable[[str], None]) -> None:
                 f"🎯 [ENTRY TAGGED]\nPair: {sym}\nBias: {_bias_emoji(bias)} {bias}\nZone: {entry_lo:.0f}–{entry_hi:.0f}\nPrice: {price:.0f}\nTime (UTC): {_iso_utc_now()}"
             )
         else:
-            return  # don't check TPs until entry is tagged
+            return
 
-    # 2) TP hits
     def _hit(tp: float) -> bool:
         if bias == "LONG":
             return price >= tp
@@ -1169,43 +1038,38 @@ def _check_tp_hits(sym: str, send_func: Callable[[str], None]) -> None:
                 f"✅ [TP{i} HIT]\nPair: {sym}\nBias: {_bias_emoji(bias)} {bias}\nTP{i}: {tps[i-1]:.0f}\nPrice: {price:.0f}\nTime (UTC): {_iso_utc_now()}"
             )
 
-    # optional: deactivate after TP3
     if st["hit"].get("tp3"):
         st["active"] = False
 
 
-def start_tp_hit_watcher(send_func: Callable[[str], None]) -> None:
-    """Backward-compatible TP watcher loop.
+def _format_ai_alert(sym: str, res: ChecklistResult) -> str:
+    sym = _normalize_symbol(sym)
+    se = _status_emoji(res.status)
+    be = _bias_emoji(res.bias)
 
-    Note: In this file, TP polling can also run inside start_ai_setup_alerts().
-    If you start both loops, you may get duplicate TP messages.
-    """
-    if not TRADEWATCH_TP_ALERTS:
-        print("[TradeWatch] TP hit watcher disabled (TRADEWATCH_TP_ALERTS != 1)")
-        return
-
-    print("[TradeWatch] TP hit watcher started ✅")
-
-    symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
-
-    while True:
+    plan_block = ""
+    if TRADEWATCH_PLAN_IN_ALERTS and "SETUP VALID" in res.status:
         try:
-            STATE["last_tp_scan_utc"] = datetime.now(timezone.utc)
+            plan = build_auto_plan(sym)
+            if not plan.get("error"):
+                plan_block = "\n\n" + _format_plan_block(plan)
+                _seed_plan_state_from_plan(plan)
+        except Exception:
+            plan_block = ""
 
-            # Prefer active plans; else poll configured symbols (if plan requirement is disabled)
-            to_check = list(PLAN_STATE.keys()) or [_normalize_symbol(s) for s in symbols]
-
-            for sym in to_check:
-                sym = _normalize_symbol(sym)
-                if TRADEWATCH_TP_REQUIRE_PLAN and sym not in PLAN_STATE:
-                    continue
-                _check_tp_hits(sym, send_func)
-
-        except Exception as e:
-            STATE["last_error"] = f"TP watcher error: {e}"
-            print("[TradeWatch] TP watcher error:", e)
-
-        time.sleep(max(5, TRADEWATCH_TP_POLL_SEC))
+    return (
+        f"{se} [AI SETUP ALERT]\n"
+        f"Pair: {sym}\n"
+        f"Bias: {be} {res.bias}\n"
+        f"Score: {res.score}/{res.max_score}\n"
+        f"Status: {res.status}"
+        f"{plan_block}\n\n"
+        f"Fast checks:\n"
+        f"• Structure: {res.structure.bias} ({res.structure.score}/{res.structure.max_score})\n"
+        f"• Liquidity: {res.liquidity.bias} ({res.liquidity.score}/{res.liquidity.max_score})\n"
+        f"• FVG: {res.fvg.bias} ({res.fvg.score}/{res.fvg.max_score})\n"
+        f"Time (UTC): {_iso_utc_now()}"
+    )
 
 
 def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
@@ -1215,7 +1079,6 @@ def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
 
     symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
 
-    # init baseline states
     for s in symbols:
         sym = _normalize_symbol(s)
         SETUP_STATE.setdefault(sym, {"last_status": "—", "last_bias": "—", "last_score": "—", "last_alert_utc": None})
@@ -1236,7 +1099,6 @@ def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
             now = time.time()
             STATE["last_ai_scan_utc"] = datetime.now(timezone.utc)
 
-            # AI setup scan
             for s in symbols:
                 sym = _normalize_symbol(s)
                 res = evaluate_checklist(sym)
@@ -1249,7 +1111,6 @@ def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
                 SETUP_STATE[sym]["last_bias"] = res.bias
                 SETUP_STATE[sym]["last_score"] = f"{res.score}/{res.max_score}"
 
-            # TP polling (separate cadence)
             if TRADEWATCH_TP_ALERTS and (now - last_tp_poll) >= max(5, TRADEWATCH_TP_POLL_SEC):
                 STATE["last_tp_scan_utc"] = datetime.now(timezone.utc)
                 for sym in list(PLAN_STATE.keys()):
@@ -1261,6 +1122,39 @@ def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
             print("[TradeWatch] AI alerts error:", e)
 
         time.sleep(TRADEWATCH_AI_INTERVAL_SEC)
+
+
+def start_tp_hit_watcher(send_func: Callable[[str], None]) -> None:
+    """Backward-compatible TP watcher.
+
+    By default, this does **nothing** because TP polling is handled inside
+    `start_ai_setup_alerts()`.
+
+    If you *do* want a standalone TP poller (e.g., scheduler expects it), set:
+      TRADEWATCH_TP_STANDALONE=1
+
+    Warning: running this AND the TP polling inside AI loop can duplicate alerts.
+    """
+    if not TRADEWATCH_TP_ALERTS:
+        print("[TradeWatch] TP hit watcher disabled (TRADEWATCH_TP_ALERTS != 1)")
+        return
+
+    if not TRADEWATCH_TP_STANDALONE:
+        print("[TradeWatch] TP hit watcher not started (TP handled in AI loop). Set TRADEWATCH_TP_STANDALONE=1 to enable.")
+        return
+
+    print("[TradeWatch] TP hit watcher started ✅")
+
+    while True:
+        try:
+            STATE["last_tp_scan_utc"] = datetime.now(timezone.utc)
+            for sym in list(PLAN_STATE.keys()):
+                _check_tp_hits(sym, send_func)
+        except Exception as e:
+            STATE["last_error"] = f"TP watcher error: {e}"
+            print("[TradeWatch] TP watcher error:", e)
+
+        time.sleep(max(5, TRADEWATCH_TP_POLL_SEC))
 
 
 def get_setup_status_text() -> str:
@@ -1281,15 +1175,15 @@ def get_setup_status_text() -> str:
 
 
 def get_plan_status_text() -> str:
-    """Optional helper if you want a /plan_status later."""
     if not PLAN_STATE:
         return "🧾 [Plan Status] No active plans yet."
     lines = ["🧾 [Plan Status]"]
     for sym, st in PLAN_STATE.items():
         hit = st.get("hit", {})
-        tps = st.get("tps", [])
         lines.append(
-            f"{sym} ({st.get('tag','INTRADAY')}) {st.get('bias','—')} | entry:{'✅' if hit.get('entry') else '—'} | TP1:{'✅' if hit.get('tp1') else '—'} TP2:{'✅' if hit.get('tp2') else '—'} TP3:{'✅' if hit.get('tp3') else '—'} | last:{(st.get('last_price') or 0):.0f}"
+            f"{sym} ({st.get('tag','INTRADAY')}) {st.get('bias','—')} | entry:{'✅' if hit.get('entry') else '—'} | "
+            f"TP1:{'✅' if hit.get('tp1') else '—'} TP2:{'✅' if hit.get('tp2') else '—'} TP3:{'✅' if hit.get('tp3') else '—'} | "
+            f"last:{(st.get('last_price') or 0):.0f}"
         )
     return "\n".join(lines)
 
