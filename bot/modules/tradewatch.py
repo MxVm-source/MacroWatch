@@ -1,19 +1,68 @@
 #!/usr/bin/env python3
-"""
-TradeWatch (Bitget) — Futures Executions + AI Checklist + Auto Setup Alerts + TP Hit Updates
-==========================================================================================
-- Watches Bitget Futures (MIX) fills/executions and sends Telegram messages via send_func(text)
-- Computes an AI checklist (Structure / Liquidity / FVG) from 4H candles
-- Optionally sends Auto AI Setup Alerts even when you haven't executed a trade yet
-- ✅ NEW: builds a clean plan (Entry/SL/TP1/TP2/TP3) and sends it with the AI alert
-- ✅ NEW: TP hit watcher sends TP1 / TP2 / TP3 hit updates automatically
+"""TradeWatch (Bitget)
 
-Env vars (new)
---------------
-TP tracking:
-- TRADEWATCH_TP_ALERTS=1            # enable TP hit watcher
-- TRADEWATCH_TP_POLL_SEC=15         # price polling interval
-- TRADEWATCH_TP_REQUIRE_PLAN=1      # if 1, only track TPs after a plan exists (AI alert generated)
+Futures Executions + AI Checklist + Auto Setup Alerts + Auto Plan (Fib) + TP Hit Updates
+======================================================================================
+
+Features
+--------
+- Watches Bitget **Futures (MIX)** fills/executions and sends Telegram messages via send_func(text)
+- Computes an AI checklist (Structure / Liquidity / FVG) from **4H candles**
+- Optionally sends **Auto AI Setup Alerts** even when you haven't executed a trade yet
+- Builds an **Auto Plan** (Entry / SL / TP1-TP3) using:
+  - recent 4H support/resistance
+  - ATR buffer
+  - Fibonacci retracement entry zones (0.382/0.5/0.618/0.705)
+- Optional **TP hit updates** (TP1/TP2/TP3) after an entry is "tagged".
+
+Bitget vs TradingView symbol note:
+- TradingView perpetuals often look like: BTCUSDT.P / ETHUSDT.P
+- Bitget REST expects: BTCUSDT / ETHUSDT (NO ".P")
+This module normalizes symbols by stripping a trailing ".P".
+
+Key endpoints (Bitget V2):
+- Fills (auth):   GET /api/v2/mix/order/fills
+- Candles (pub):  GET /api/v2/mix/market/candles   (fallback: /api/v2/spot/market/candles)
+- Ticker (pub):   GET /api/v2/mix/market/ticker
+
+Environment variables
+---------------------
+Auth (required for fills):
+- BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSPHRASE
+
+Core:
+- TRADEWATCH_ENABLED=1
+- TRADEWATCH_POLL_INTERVAL_SEC=10
+- TRADEWATCH_PRODUCT_TYPE=USDT-FUTURES          # USDT-FUTURES / COIN-FUTURES / USDC-FUTURES
+- TRADEWATCH_SYMBOLS=BTCUSDT,ETHUSDT            # comma-separated; empty means ALL
+
+Checklist:
+- TRADEWATCH_CHECKLIST_ENABLED=1
+- TRADEWATCH_CHECKLIST_GRANULARITY=4H           # default 4H (fallback tries 240)
+
+Auto AI setup alerts (no trade needed):
+- TRADEWATCH_AI_ALERTS=1
+- TRADEWATCH_AI_MIN_SCORE=6                     # minimum score (out of 10) for ✅ alerts
+- TRADEWATCH_AI_INTERVAL_SEC=60
+- TRADEWATCH_AI_COOLDOWN_MIN=180
+- TRADEWATCH_AI_SEND_PARTIAL=0
+
+Auto plan inside AI alerts:
+- TRADEWATCH_PLAN_IN_ALERTS=1                   # include Entry/SL/TPs in AI setup alerts
+- TRADEWATCH_PLAN_LOOKBACK=48                   # 4H candles for S/R
+
+TP hit updates (based on public ticker):
+- TRADEWATCH_TP_ALERTS=1                        # send "TP1/TP2/TP3 hit" updates
+- TRADEWATCH_ENTRY_TRIGGER_MODE=zone            # zone | touch
+- TRADEWATCH_TP_POLL_SEC=20                     # price polling frequency
+
+Fun:
+- TRADEWATCH_DEGEN=1
+
+Notes
+-----
+- TP updates are driven by *price*, not by your exchange order fills.
+- An "entry" is considered active once price reaches the entry zone.
 """
 
 from __future__ import annotations
@@ -47,19 +96,6 @@ TRADEWATCH_POLL_INTERVAL_SEC = int(os.environ.get("TRADEWATCH_POLL_INTERVAL_SEC"
 # Futures-specific
 TRADEWATCH_PRODUCT_TYPE = os.environ.get("TRADEWATCH_PRODUCT_TYPE", "USDT-FUTURES")
 
-def _parse_symbols(raw: str) -> List[str]:
-    out: List[str] = []
-    for s in (raw or "").split(","):
-        s = (s or "").strip().upper()
-        if not s:
-            continue
-        if s.endswith(".P"):
-            s = s[:-2]
-        out.append(s)
-    return out
-
-TRADEWATCH_SYMBOLS = _parse_symbols(os.environ.get("TRADEWATCH_SYMBOLS", "BTCUSDT,ETHUSDT"))
-
 # Checklist
 TRADEWATCH_CHECKLIST_ENABLED = os.environ.get("TRADEWATCH_CHECKLIST_ENABLED", "1") == "1"
 TRADEWATCH_CHECKLIST_GRANULARITY = os.environ.get("TRADEWATCH_CHECKLIST_GRANULARITY", "4H")  # "4H" or "240"
@@ -71,13 +107,32 @@ TRADEWATCH_AI_INTERVAL_SEC = int(os.environ.get("TRADEWATCH_AI_INTERVAL_SEC", "6
 TRADEWATCH_AI_COOLDOWN_MIN = int(os.environ.get("TRADEWATCH_AI_COOLDOWN_MIN", "180"))
 TRADEWATCH_AI_SEND_PARTIAL = os.environ.get("TRADEWATCH_AI_SEND_PARTIAL", "0") == "1"
 
-# ✅ TP hit updates
-TRADEWATCH_TP_ALERTS = os.environ.get("TRADEWATCH_TP_ALERTS", "0") == "1"
-TRADEWATCH_TP_POLL_SEC = int(os.environ.get("TRADEWATCH_TP_POLL_SEC", "15"))
-TRADEWATCH_TP_REQUIRE_PLAN = os.environ.get("TRADEWATCH_TP_REQUIRE_PLAN", "1") == "1"
+# Auto plan in AI alerts
+TRADEWATCH_PLAN_IN_ALERTS = os.environ.get("TRADEWATCH_PLAN_IN_ALERTS", "1") == "1"
+TRADEWATCH_PLAN_LOOKBACK = int(os.environ.get("TRADEWATCH_PLAN_LOOKBACK", "48"))
+
+# TP hit updates
+TRADEWATCH_TP_ALERTS = os.environ.get("TRADEWATCH_TP_ALERTS", "1") == "1"
+TRADEWATCH_ENTRY_TRIGGER_MODE = os.environ.get("TRADEWATCH_ENTRY_TRIGGER_MODE", "zone").strip().lower()  # zone | touch
+TRADEWATCH_TP_POLL_SEC = int(os.environ.get("TRADEWATCH_TP_POLL_SEC", "20"))
+
+
+def _parse_symbols(raw: str) -> List[str]:
+    out: List[str] = []
+    for s in (raw or "").split(","):
+        s = (s or "").strip().upper()
+        if not s:
+            continue
+        if s.endswith(".P"):
+            s = s[:-2]
+        out.append(s)
+    return out
+
+
+TRADEWATCH_SYMBOLS = _parse_symbols(os.environ.get("TRADEWATCH_SYMBOLS", "BTCUSDT,ETHUSDT"))
 
 # =========================
-# State
+# State (for /tradewatch_status)
 # =========================
 
 STATE: Dict[str, Any] = {
@@ -96,10 +151,20 @@ STATE: Dict[str, Any] = {
 
 # Per-symbol state for AI alerts + /setup_status
 SETUP_STATE: Dict[str, Dict[str, Any]] = {}
+# SETUP_STATE[sym] = {"last_status": str, "last_bias": str, "last_score": str, "last_alert_utc": datetime|None}
 
-# ✅ Plan + TP progress (per symbol)
-# PLAN_STATE[sym] = {"bias","entry_zone","sl","tps":[...], "created_utc", "tp_hits":[bool,bool,bool], "last_price": float|None}
+# Per-symbol state for plan + TP tracking
 PLAN_STATE: Dict[str, Dict[str, Any]] = {}
+# PLAN_STATE[sym] = {
+#   "active": bool,
+#   "bias": "LONG"|"SHORT",
+#   "entry_lo": float, "entry_hi": float,
+#   "sl": float,
+#   "tps": [float,float,float],
+#   "hit": {"entry":bool,"tp1":bool,"tp2":bool,"tp3":bool},
+#   "last_price": float|None,
+#   "created_utc": datetime,
+# }
 
 # =========================
 # Degen templates (optional)
@@ -124,11 +189,14 @@ DEGEN_CLOSE = [
 # Helpers
 # =========================
 
+
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+
 def _iso_or_none(dt: Optional[datetime]) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "—"
+
 
 def _normalize_symbol(sym: str) -> str:
     sym = (sym or "").strip().upper()
@@ -136,7 +204,9 @@ def _normalize_symbol(sym: str) -> str:
         sym = sym[:-2]
     return sym
 
+
 def _signed_request(method: str, request_path: str, params: dict | None = None, body: dict | None = None) -> dict:
+    """Bitget V2 authenticated request."""
     if not (BITGET_API_KEY and BITGET_API_SECRET and BITGET_API_PASSPHRASE):
         raise RuntimeError("TradeWatch: Bitget API credentials missing")
 
@@ -146,6 +216,7 @@ def _signed_request(method: str, request_path: str, params: dict | None = None, 
     query = ""
     if params:
         from urllib.parse import urlencode
+
         query = urlencode(params)
 
     body_str = json.dumps(body, separators=(",", ":")) if body else ""
@@ -160,7 +231,7 @@ def _signed_request(method: str, request_path: str, params: dict | None = None, 
     sig = hmac.new(
         BITGET_API_SECRET.encode("utf-8"),
         prehash.encode("utf-8"),
-        hashlib.sha256
+        hashlib.sha256,
     ).digest()
 
     headers = {
@@ -186,8 +257,11 @@ def _signed_request(method: str, request_path: str, params: dict | None = None, 
 
     return data
 
+
 def _public_get(request_path: str, params: dict) -> dict:
+    """Public GET (no auth)."""
     from urllib.parse import urlencode
+
     url = f"{BITGET_BASE_URL}{request_path}?{urlencode(params)}"
     r = requests.get(url, timeout=10)
     if r.status_code != 200:
@@ -197,47 +271,25 @@ def _public_get(request_path: str, params: dict) -> dict:
         raise RuntimeError(f"Bitget API error {data.get('code')}: {data.get('msg')}")
     return data
 
-# =========================
-# Public price (ticker)
-# =========================
 
-def fetch_last_price(symbol: str) -> Optional[float]:
-    """
-    Tries MIX ticker first, then spot.
-    Returns last price as float or None.
-    """
+def _get_last_price(symbol: str) -> float:
     symbol = _normalize_symbol(symbol)
-    # MIX ticker
-    try:
-        raw = _public_get(
-            "/api/v2/mix/market/ticker",
-            params={"symbol": symbol, "productType": TRADEWATCH_PRODUCT_TYPE},
-        )
-        d = (raw.get("data") or {})
-        # Bitget often returns {"lastPr":"..."} or {"last":"..."} depending on market
-        for k in ("lastPr", "last", "close", "lastPrice"):
-            v = d.get(k)
-            if v is not None:
-                return float(v)
-    except Exception:
-        pass
+    raw = _public_get(
+        "/api/v2/mix/market/ticker",
+        params={"symbol": symbol, "productType": TRADEWATCH_PRODUCT_TYPE},
+    )
+    d = raw.get("data") or {}
+    # Bitget sometimes uses "lastPr" (string). Fallbacks included.
+    for k in ("lastPr", "last", "close"):
+        if k in d and d[k] not in (None, ""):
+            return float(d[k])
+    raise RuntimeError(f"No ticker last price for {symbol}")
 
-    # SPOT ticker fallback
-    try:
-        raw = _public_get("/api/v2/spot/market/ticker", params={"symbol": symbol})
-        d = (raw.get("data") or {})
-        for k in ("lastPr", "last", "close", "lastPrice"):
-            v = d.get(k)
-            if v is not None:
-                return float(v)
-    except Exception:
-        pass
-
-    return None
 
 # =========================
 # Futures Fills (Executions)
 # =========================
+
 
 def _fetch_futures_fills(limit: int = 100, symbol: str | None = None) -> List[dict]:
     params: Dict[str, str] = {
@@ -250,6 +302,7 @@ def _fetch_futures_fills(limit: int = 100, symbol: str | None = None) -> List[di
     data = _signed_request("GET", "/api/v2/mix/order/fills", params=params, body=None)
     return ((data.get("data") or {}).get("fillList") or [])
 
+
 def _fetch_futures_fills_multi(limit_each: int = 60) -> List[dict]:
     if not TRADEWATCH_SYMBOLS:
         return _fetch_futures_fills(limit=100, symbol=None)
@@ -259,6 +312,7 @@ def _fetch_futures_fills_multi(limit_each: int = 60) -> List[dict]:
         out.extend(_fetch_futures_fills(limit=limit_each, symbol=sym))
     return out
 
+
 def _classify_execution(fill: dict) -> str:
     trade_side = (fill.get("tradeSide") or "").lower()
     scope = (fill.get("orderType") or fill.get("tradeScope") or "").lower()
@@ -267,11 +321,13 @@ def _classify_execution(fill: dict) -> str:
         return "Take Profit"
     if "stop" in scope or "sl" in scope:
         return "Stop Loss"
+
     if "open" in trade_side:
         return "Position Open/Increase"
     if "close" in trade_side or "reduce" in trade_side:
         return "Position Close/Reduce"
     return "Execution"
+
 
 def _format_message(fill: dict, checklist_block: str | None = None) -> str:
     pair = _normalize_symbol(fill.get("symbol") or "N/A")
@@ -288,6 +344,7 @@ def _format_message(fill: dict, checklist_block: str | None = None) -> str:
         header = "📈 [TradeWatch] Futures Execution"
 
     side_emoji = "🟢" if side_raw == "BUY" else ("🔴" if side_raw == "SELL" else "📘")
+
     execution = _classify_execution(fill)
     maker_taker = f"{trade_scope}".upper() if trade_scope else "—"
 
@@ -308,6 +365,7 @@ def _format_message(fill: dict, checklist_block: str | None = None) -> str:
 
     return msg
 
+
 def get_status() -> str:
     symbols = ",".join(TRADEWATCH_SYMBOLS) if TRADEWATCH_SYMBOLS else "ALL"
     lines = [
@@ -317,7 +375,7 @@ def get_status() -> str:
         f"Symbols: {symbols}",
         f"Polling: {TRADEWATCH_POLL_INTERVAL_SEC}s",
         f"AI alerts: {'Yes ✅' if TRADEWATCH_AI_ALERTS else 'No ❌'} (every {TRADEWATCH_AI_INTERVAL_SEC}s, min {TRADEWATCH_AI_MIN_SCORE}/10)",
-        f"TP alerts: {'Yes ✅' if TRADEWATCH_TP_ALERTS else 'No ❌'} (every {TRADEWATCH_TP_POLL_SEC}s)",
+        f"Plan in alerts: {'Yes ✅' if TRADEWATCH_PLAN_IN_ALERTS else 'No ❌'} | TP updates: {'Yes ✅' if TRADEWATCH_TP_ALERTS else 'No ❌'}",
         f"Running loop: {'Yes ✅' if STATE['running'] else 'No ❌'}",
         f"Last poll (UTC): {_iso_or_none(STATE['last_poll_utc'])}",
         f"Last trade (UTC): {_iso_or_none(STATE['last_trade_utc'])}",
@@ -334,11 +392,13 @@ def get_status() -> str:
         lines.append(f"Last error: {STATE['last_error']}")
     return "\n".join(lines)
 
+
 # ============================================================
 # AI Checklist (Structure / Liquidity / FVG) — 4H candles
 # ============================================================
 
 Candle = Dict[str, float]
+
 
 @dataclass
 class ChecklistResult:
@@ -350,6 +410,7 @@ class ChecklistResult:
     liquidity: "CheckResult"
     fvg: "CheckResult"
 
+
 @dataclass
 class CheckResult:
     ok: bool
@@ -358,6 +419,7 @@ class CheckResult:
     bias: str
     reasons: List[str]
     details: Dict[str, object]
+
 
 def bitget_klines_to_candles(raw: Any) -> List[Candle]:
     data = raw.get("data") if isinstance(raw, dict) else raw
@@ -369,23 +431,33 @@ def bitget_klines_to_candles(raw: Any) -> List[Candle]:
             ts = float(row[0])
             if ts > 1e12:
                 ts /= 1000.0
-            out.append({
-                "ts": ts,
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
-                "volume": float(row[5]),
-            })
+            out.append(
+                {
+                    "ts": ts,
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                }
+            )
     out.sort(key=lambda x: x["ts"])
     return out
 
+
 def fetch_candles(symbol: str, granularity: str, limit: int = 320) -> List[Candle]:
     symbol = _normalize_symbol(symbol)
+
+    # MIX candles (public)
     try:
         raw = _public_get(
             "/api/v2/mix/market/candles",
-            params={"symbol": symbol, "granularity": granularity, "limit": str(limit), "productType": TRADEWATCH_PRODUCT_TYPE},
+            params={
+                "symbol": symbol,
+                "granularity": granularity,
+                "limit": str(limit),
+                "productType": TRADEWATCH_PRODUCT_TYPE,
+            },
         )
         candles = bitget_klines_to_candles(raw)
         if candles:
@@ -393,11 +465,13 @@ def fetch_candles(symbol: str, granularity: str, limit: int = 320) -> List[Candl
     except Exception:
         pass
 
+    # SPOT fallback (public)
     raw = _public_get(
         "/api/v2/spot/market/candles",
         params={"symbol": symbol, "granularity": granularity, "limit": str(limit)},
     )
     return bitget_klines_to_candles(raw)
+
 
 def fetch_candles_4h(symbol: str, limit: int = 320) -> List[Candle]:
     for g in [TRADEWATCH_CHECKLIST_GRANULARITY, "4H", "240"]:
@@ -412,6 +486,7 @@ def fetch_candles_4h(symbol: str, limit: int = 320) -> List[Candle]:
             continue
     return []
 
+
 def _ema(values: List[float], period: int) -> List[float]:
     if not values:
         return []
@@ -420,6 +495,7 @@ def _ema(values: List[float], period: int) -> List[float]:
     for v in values[1:]:
         out.append(v * k + out[-1] * (1 - k))
     return out
+
 
 def _atr(candles: List[Candle], period: int = 14) -> float:
     if len(candles) < period + 1:
@@ -436,6 +512,7 @@ def _atr(candles: List[Candle], period: int = 14) -> float:
         trs.append(tr)
     return sum(trs) / len(trs) if trs else 0.0
 
+
 def _pivot_high(candles: List[Candle], i: int, left: int = 2, right: int = 2) -> bool:
     if i - left < 0 or i + right >= len(candles):
         return False
@@ -445,6 +522,7 @@ def _pivot_high(candles: List[Candle], i: int, left: int = 2, right: int = 2) ->
             return False
     return True
 
+
 def _pivot_low(candles: List[Candle], i: int, left: int = 2, right: int = 2) -> bool:
     if i - left < 0 or i + right >= len(candles):
         return False
@@ -453,6 +531,7 @@ def _pivot_low(candles: List[Candle], i: int, left: int = 2, right: int = 2) -> 
         if j != i and candles[j]["low"] <= l:
             return False
     return True
+
 
 def _last_n_pivots(candles: List[Candle], kind: str, n: int = 2, left: int = 2, right: int = 2) -> List[Tuple[int, float]]:
     out: List[Tuple[int, float]] = []
@@ -464,6 +543,7 @@ def _last_n_pivots(candles: List[Candle], kind: str, n: int = 2, left: int = 2, 
         if len(out) >= n:
             break
     return list(reversed(out))
+
 
 def check_structure(candles: List[Candle], ema_period: int = 200) -> CheckResult:
     if len(candles) < max(ema_period + 20, 120):
@@ -511,7 +591,8 @@ def check_structure(candles: List[Candle], ema_period: int = 200) -> CheckResult
         reasons.append(f"EMA{ema_period}: not aligned (close {last_close:.0f} vs {last_ema:.0f}).")
 
     ok = bias in ("LONG", "SHORT") and score >= 2
-    return CheckResult(ok, score, 4, bias, reasons, {"close": last_close, "ema": last_ema})
+    return CheckResult(ok, score, 4, bias, reasons, {"close": last_close, "ema": last_ema, "pivots": {"highs": highs, "lows": lows}})
+
 
 def check_liquidity(candles: List[Candle], lookback: int = 24, reclaim_required: bool = True) -> CheckResult:
     if len(candles) < lookback + 5:
@@ -563,6 +644,7 @@ def check_liquidity(candles: List[Candle], lookback: int = 24, reclaim_required:
 
     ok = score >= (3 if reclaim_required else 2)
     return CheckResult(ok, score, 3, bias, reasons, {"recent_high": recent_high, "recent_low": recent_low, "atr": atr, "margin": margin})
+
 
 def check_fvg(candles: List[Candle], max_lookback: int = 80) -> CheckResult:
     if len(candles) < 10:
@@ -620,6 +702,7 @@ def check_fvg(candles: List[Candle], max_lookback: int = 80) -> CheckResult:
 
     return CheckResult(score >= 2, score, 3, bias, reasons, {"zone": (kind, z_low, z_high), "mid": mid})
 
+
 def evaluate_checklist(symbol: str) -> ChecklistResult:
     symbol = _normalize_symbol(symbol)
     candles = fetch_candles_4h(symbol)
@@ -655,6 +738,7 @@ def evaluate_checklist(symbol: str) -> ChecklistResult:
 
     return ChecklistResult(status, bias, score, max_score, s, l, f)
 
+
 def get_checklist_status_text(symbol: str, include_reasons: bool = True) -> str:
     symbol = _normalize_symbol(symbol)
     res = evaluate_checklist(symbol)
@@ -678,11 +762,13 @@ def get_checklist_status_text(symbol: str, include_reasons: bool = True) -> str:
             lines.append(f"• {r}")
     return "\n".join(lines)
 
-# =========================
-# Plan builder (Entry/SL/TPs) + TP tracking
-# =========================
 
-def _compute_levels_from_candles(candles: List[Candle], lookback: int = 48) -> Optional[Dict[str, float]]:
+# ============================================================
+# Auto Plan (S/R + ATR + Fibonacci) + Confidence tags
+# ============================================================
+
+
+def _compute_sr(candles: List[Candle], lookback: int) -> Optional[Dict[str, float]]:
     if not candles:
         return None
     lb = candles[-lookback:] if len(candles) > lookback else candles
@@ -691,200 +777,192 @@ def _compute_levels_from_candles(candles: List[Candle], lookback: int = 48) -> O
     last = candles[-1]["close"]
     return {"support": support, "resistance": resistance, "last": last}
 
-def _atr_simple(candles: List[Candle], period: int = 14) -> float:
-    return _atr(candles, period)
 
-def build_plan(symbol: str) -> Dict[str, Any]:
+def _find_impulse_for_fib(candles: List[Candle], bias: str) -> Optional[Tuple[int, float, int, float]]:
+    """Return (i0, p0, i1, p1) as impulse start/end for fib.
+
+    LONG: (pivot_low -> pivot_high)
+    SHORT: (pivot_high -> pivot_low)
     """
-    Builds a simple plan aligned with checklist bias using 4H S/R + ATR buffer.
-    Returns dict with entry_zone, sl, tps, etc.
+    bias = (bias or "").upper()
+    if bias not in ("LONG", "SHORT") or len(candles) < 20:
+        return None
+
+    highs = _last_n_pivots(candles, "high", n=6)
+    lows = _last_n_pivots(candles, "low", n=6)
+    if not highs or not lows:
+        return None
+
+    # pick last matching impulse with correct ordering
+    if bias == "LONG":
+        # find last high, then find a low before it
+        ih, ph = highs[-1]
+        lows_before = [x for x in lows if x[0] < ih]
+        if not lows_before:
+            return None
+        il, pl = lows_before[-1]
+        if ph <= pl:
+            return None
+        return il, pl, ih, ph
+
+    # SHORT
+    il, pl = lows[-1]
+    highs_before = [x for x in highs if x[0] < il]
+    if not highs_before:
+        return None
+    ih, ph = highs_before[-1]
+    if ph <= pl:
+        return None
+    return ih, ph, il, pl
+
+
+def _fib_price(p0: float, p1: float, level: float, bias: str) -> float:
+    """Fib retracement price.
+
+    LONG impulse p0(low)->p1(high): retrace = p1 - (p1-p0)*level
+    SHORT impulse p0(high)->p1(low): retrace = p1 + (p0-p1)*level
     """
+    bias = (bias or "").upper()
+    if bias == "LONG":
+        return p1 - (p1 - p0) * level
+    # SHORT
+    return p1 + (p0 - p1) * level
+
+
+def _confidence_tag(chk: ChecklistResult) -> str:
+    """Simple tag: scalp / intraday / swing."""
+    if "PARTIAL" in chk.status:
+        return "SCALP"
+    # valid setups
+    if chk.score >= 8:
+        return "SWING"
+    if chk.score >= 6:
+        return "INTRADAY"
+    return "SCALP"
+
+
+def build_auto_plan(symbol: str) -> Dict[str, Any]:
+    """Builds plan using checklist + SR + ATR + Fib entry zones."""
     sym = _normalize_symbol(symbol)
-    candles = fetch_candles_4h(sym, limit=220)
+    candles = fetch_candles_4h(sym, limit=260)
     if not candles:
         return {"symbol": sym, "error": "No candles returned."}
 
-    levels = _compute_levels_from_candles(candles, lookback=48)
-    if not levels:
-        return {"symbol": sym, "error": "Not enough candle data."}
-
-    atrv = _atr_simple(candles, 14)
     chk = evaluate_checklist(sym)
+    sr = _compute_sr(candles, lookback=TRADEWATCH_PLAN_LOOKBACK)
+    if not sr:
+        return {"symbol": sym, "error": "Not enough candles for S/R."}
 
-    last = float(levels["last"])
-    sup = float(levels["support"])
-    res = float(levels["resistance"])
+    last = sr["last"]
+    sup = sr["support"]
+    res = sr["resistance"]
+    atr = _atr(candles, 14)
+    atr_buf = max(atr * 0.35, last * 0.0015)  # safety buffer
 
     bias = chk.bias
-    atr_buf = max(atrv * 0.35, last * 0.0015)
+    tag = _confidence_tag(chk)
 
+    # default fib zone by confidence
+    if tag == "SWING":
+        z0, z1 = 0.618, 0.705
+    elif tag == "SCALP":
+        z0, z1 = 0.382, 0.5
+    else:  # INTRADAY
+        z0, z1 = 0.5, 0.618
+
+    imp = _find_impulse_for_fib(candles, bias)
+
+    if imp:
+        i0, p0, i1, p1 = imp
+        entry_a = _fib_price(p0, p1, z1, bias)
+        entry_b = _fib_price(p0, p1, z0, bias)
+        entry_lo, entry_hi = (min(entry_a, entry_b), max(entry_a, entry_b))
+
+        # SL: beyond deeper fib + buffer (or beyond impulse extreme)
+        deep = 0.786
+        sl_raw = _fib_price(p0, p1, deep, bias)
+        if bias == "LONG":
+            sl = min(sl_raw, p0) - atr_buf * 0.35
+        elif bias == "SHORT":
+            sl = max(sl_raw, p0) + atr_buf * 0.35
+        else:
+            sl = (sup - atr_buf)
+
+        fib_info = {
+            "impulse": (p0, p1),
+            "fib_zone": (z0, z1),
+            "impulse_idx": (i0, i1),
+        }
+    else:
+        # fallback to S/R based plan
+        fib_info = None
+        if bias == "LONG":
+            entry_lo = sup + atr_buf * 0.2
+            entry_hi = sup + atr_buf * 1.2
+            sl = sup - atr_buf * 1.2
+        elif bias == "SHORT":
+            entry_lo = res - atr_buf * 1.2
+            entry_hi = res - atr_buf * 0.2
+            sl = res + atr_buf * 1.2
+        else:
+            entry_lo = sup + atr_buf * 0.2
+            entry_hi = sup + atr_buf * 1.0
+            sl = sup - atr_buf * 1.2
+
+    # TPs: aim back to the opposite edge of the range
     if bias == "LONG":
-        entry_lo = sup + atr_buf * 0.2
-        entry_hi = sup + atr_buf * 1.2
-        sl = sup - atr_buf * 1.2
         tp1 = last + (res - last) * 0.35
         tp2 = last + (res - last) * 0.70
         tp3 = res
     elif bias == "SHORT":
-        entry_lo = res - atr_buf * 1.2
-        entry_hi = res - atr_buf * 0.2
-        sl = res + atr_buf * 1.2
         tp1 = last - (last - sup) * 0.35
         tp2 = last - (last - sup) * 0.70
         tp3 = sup
     else:
-        # neutral / range fallback
-        entry_lo = sup + atr_buf * 0.2
-        entry_hi = sup + atr_buf * 1.0
-        sl = sup - atr_buf * 1.2
-        tp1 = last
-        tp2 = last + (res - last) * 0.50
-        tp3 = res
+        tp1, tp2, tp3 = last, last + (res - last) * 0.5, res
 
-    plan = {
+    # sanity ordering for SHORT (tp1>tp2>tp3) and LONG (tp1<tp2<tp3)
+    tps = [float(tp1), float(tp2), float(tp3)]
+    if bias == "SHORT":
+        tps = sorted(tps, reverse=True)
+    elif bias == "LONG":
+        tps = sorted(tps)
+
+    return {
         "symbol": sym,
+        "bias": bias,
+        "tag": tag,
         "status": chk.status,
-        "bias": bias,
         "score": f"{chk.score}/{chk.max_score}",
-        "last": last,
-        "support": sup,
-        "resistance": res,
-        "atr": atrv,
-        "entry_zone": (float(entry_lo), float(entry_hi)),
+        "last": float(last),
+        "support": float(sup),
+        "resistance": float(res),
+        "atr": float(atr),
+        "entry": (float(entry_lo), float(entry_hi)),
         "sl": float(sl),
-        "tps": [float(tp1), float(tp2), float(tp3)],
+        "tps": tps,
+        "fib": fib_info,
     }
 
-    # store plan for TP watcher
-    PLAN_STATE[sym] = {
-        "bias": bias,
-        "entry_zone": plan["entry_zone"],
-        "sl": plan["sl"],
-        "tps": plan["tps"],
-        "created_utc": datetime.now(timezone.utc),
-        "tp_hits": [False, False, False],
-        "last_price": None,
-    }
-    return plan
-
-def _tp_hit(bias: str, price: float, target: float) -> bool:
-    b = (bias or "").upper()
-    if b == "LONG":
-        return price >= target
-    if b == "SHORT":
-        return price <= target
-    return False
-
-def get_tp_status_text() -> str:
-    symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
-    lines = ["🎯 [TP Status]"]
-
-    for s in symbols:
-        sym = _normalize_symbol(s)
-        st = PLAN_STATE.get(sym)
-        if not st:
-            lines.append(f"{sym} — no active plan yet.")
-            continue
-
-        bias = st.get("bias", "—")
-        tps = st.get("tps") or []
-        hits = st.get("tp_hits") or [False, False, False]
-        last_price = st.get("last_price")
-        last_str = f"{last_price:.2f}" if isinstance(last_price, (int, float)) else "—"
-
-        def _mark(i: int) -> str:
-            return "✅" if hits[i] else "⏳"
-
-        if len(tps) >= 3:
-            lines.append(
-                f"{sym} — {bias} | last: {last_str} | "
-                f"TP1 {_mark(0)} {tps[0]:.0f} | TP2 {_mark(1)} {tps[1]:.0f} | TP3 {_mark(2)} {tps[2]:.0f}"
-            )
-        else:
-            lines.append(f"{sym} — {bias} | last: {last_str} | no TP levels stored.")
-
-    return "\n".join(lines)
 
 def _format_plan_block(plan: Dict[str, Any]) -> str:
-    if plan.get("error"):
-        return f"⚠️ Plan unavailable: {plan['error']}"
-    ez = plan["entry_zone"]
+    entry_lo, entry_hi = plan["entry"]
     tps = plan["tps"]
     return (
         "🧾 Plan (auto)\n"
-        f"• Entry: {ez[0]:.0f} – {ez[1]:.0f}\n"
+        f"• Confidence: {plan['tag']}\n"
+        f"• Entry: {entry_lo:.0f} – {entry_hi:.0f}\n"
         f"• SL: {plan['sl']:.0f}\n"
         f"• TP1: {tps[0]:.0f}\n"
         f"• TP2: {tps[1]:.0f}\n"
         f"• TP3: {tps[2]:.0f}"
     )
 
-def start_tp_hit_watcher(send_func: Callable[[str], None]) -> None:
-    if not TRADEWATCH_TP_ALERTS:
-        print("[TradeWatch] TP hit watcher disabled (TRADEWATCH_TP_ALERTS != 1)")
-        return
-
-    print("[TradeWatch] TP hit watcher started ✅")
-
-    symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
-
-    while True:
-        try:
-            STATE["last_tp_scan_utc"] = datetime.now(timezone.utc)
-
-            for s in symbols:
-                sym = _normalize_symbol(s)
-
-                if TRADEWATCH_TP_REQUIRE_PLAN and sym not in PLAN_STATE:
-                    continue
-
-                st = PLAN_STATE.get(sym)
-                if not st:
-                    continue
-
-                price = fetch_last_price(sym)
-                if price is None:
-                    continue
-
-                st["last_price"] = price
-
-                bias = (st.get("bias") or "NEUTRAL").upper()
-                tps = st.get("tps") or []
-                hits = st.get("tp_hits") or [False, False, False]
-
-                if len(tps) < 3:
-                    continue
-
-                # sequential updates (TP1 then TP2 then TP3)
-                for i in range(3):
-                    if hits[i]:
-                        continue
-                    if _tp_hit(bias, price, float(tps[i])):
-                        hits[i] = True
-                        st["tp_hits"] = hits
-
-                        pct = (i + 1) * 33
-                        send_func(
-                            "🎯 [TP HIT]\n"
-                            f"Pair: {sym}\n"
-                            f"Bias: {bias}\n"
-                            f"TP{i+1} hit: {tps[i]:.0f}\n"
-                            f"Price: {price:.2f}\n"
-                            f"Progress: {pct}%\n"
-                            f"Time (UTC): {_iso_utc_now()}"
-                        )
-                        # only fire one TP per cycle to avoid spam if it gaps through multiple
-                        break
-
-        except Exception as e:
-            STATE["last_error"] = f"TP watcher error: {e}"
-            print("[TradeWatch] TP watcher error:", e)
-
-        time.sleep(TRADEWATCH_TP_POLL_SEC)
 
 # =========================
-# Auto AI Setup Alerts + /setup_status
+# Auto AI Setup Alerts + /setup_status + TP hit updates
 # =========================
+
 
 def _bias_emoji(bias: str) -> str:
     b = (bias or "").upper()
@@ -894,6 +972,7 @@ def _bias_emoji(bias: str) -> str:
         return "🔴"
     return "⚪️"
 
+
 def _status_emoji(status: str) -> str:
     if "SETUP VALID" in status:
         return "✅"
@@ -902,6 +981,7 @@ def _status_emoji(status: str) -> str:
     if "NO TRADE" in status or "NO DATA" in status:
         return "🔴"
     return "⚪️"
+
 
 def _should_alert(sym: str, res: ChecklistResult) -> bool:
     sym = _normalize_symbol(sym)
@@ -936,21 +1016,73 @@ def _should_alert(sym: str, res: ChecklistResult) -> bool:
 
     return False
 
+
+def classify_trade_style(res: ChecklistResult, atr: float, sl_distance: float) -> str:
+    """
+    Returns: SCALP | INTRADAY | SWING
+    """
+    score = res.score
+    confirmations = sum([
+        bool(res.structure.ok),
+        bool(res.liquidity.ok),
+        bool(res.fvg.ok),
+    ])
+
+    if score <= 6 or confirmations <= 1 or (atr > 0 and sl_distance <= atr * 0.6):
+        return "SCALP"
+    if score <= 7 or confirmations == 2:
+        return "INTRADAY"
+    return "SWING"
+
+def _style_tag(res: ChecklistResult, plan: Dict[str, Any]) -> Optional[str]:
+    """
+    Builds a simple confidence tag: ⚡ SCALP / 🕒 INTRADAY / 🧨 SWING
+    Uses checklist strength + ATR vs stop distance.
+    """
+    if not TRADEWATCH_CONFIDENCE_TAGS:
+        return None
+    if plan.get("error"):
+        return None
+
+    atr = float(plan.get("atr") or 0.0)
+    ez_lo, ez_hi = plan["entry_zone"]
+    sl = float(plan["sl"])
+    bias = (plan.get("bias") or res.bias or "NEUTRAL").upper()
+
+    if bias == "LONG":
+        sl_distance = abs(ez_lo - sl)
+    elif bias == "SHORT":
+        sl_distance = abs(sl - ez_hi)
+    else:
+        sl_distance = abs(ez_lo - sl)
+
+    style = classify_trade_style(res, atr=atr, sl_distance=sl_distance)
+    emoji = {"SCALP": "⚡", "INTRADAY": "🕒", "SWING": "🧨"}.get(style, "🧩")
+    return f"{emoji} {style}"
+
 def _format_ai_alert(sym: str, res: ChecklistResult) -> str:
     sym = _normalize_symbol(sym)
     se = _status_emoji(res.status)
     be = _bias_emoji(res.bias)
 
-    # ✅ build & attach plan so group gets entry/sl/tps immediately
-    plan = build_plan(sym)
-    plan_block = _format_plan_block(plan)
+    plan_block = ""
+    if TRADEWATCH_PLAN_IN_ALERTS and "SETUP VALID" in res.status:
+        try:
+            plan = build_auto_plan(sym)
+            if not plan.get("error"):
+                plan_block = "\n\n" + _format_plan_block(plan)
+                # stash for TP tracking
+                _seed_plan_state_from_plan(plan)
+        except Exception as _:
+            # keep alert clean if plan fails
+            plan_block = ""
 
     return (
         f"{se} [AI SETUP ALERT]\n"
         f"Pair: {sym}\n"
         f"Bias: {be} {res.bias}\n"
         f"Score: {res.score}/{res.max_score}\n"
-        f"Status: {res.status}\n\n"
+        f"Status: {res.status}"
         f"{plan_block}\n\n"
         f"Fast checks:\n"
         f"• Structure: {res.structure.bias} ({res.structure.score}/{res.structure.max_score})\n"
@@ -959,6 +1091,89 @@ def _format_ai_alert(sym: str, res: ChecklistResult) -> str:
         f"Time (UTC): {_iso_utc_now()}"
     )
 
+
+def _seed_plan_state_from_plan(plan: Dict[str, Any]) -> None:
+    """Store latest plan for TP monitoring (per symbol)."""
+    sym = plan.get("symbol")
+    if not sym:
+        return
+    entry_lo, entry_hi = plan["entry"]
+    PLAN_STATE[sym] = {
+        "active": True,
+        "bias": plan["bias"],
+        "entry_lo": float(entry_lo),
+        "entry_hi": float(entry_hi),
+        "sl": float(plan["sl"]),
+        "tps": [float(x) for x in plan["tps"]],
+        "hit": {"entry": False, "tp1": False, "tp2": False, "tp3": False},
+        "last_price": None,
+        "created_utc": datetime.now(timezone.utc),
+        "tag": plan.get("tag", "INTRADAY"),
+    }
+
+
+def _price_in_entry_zone(price: float, entry_lo: float, entry_hi: float) -> bool:
+    lo, hi = (min(entry_lo, entry_hi), max(entry_lo, entry_hi))
+    if TRADEWATCH_ENTRY_TRIGGER_MODE == "touch":
+        # for touch mode, any touch of either bound counts
+        return price <= hi and price >= lo
+    # zone mode: we still treat as within zone
+    return lo <= price <= hi
+
+
+def _check_tp_hits(sym: str, send_func: Callable[[str], None]) -> None:
+    """Check price vs entry + tps and send one-time updates."""
+    if not TRADEWATCH_TP_ALERTS:
+        return
+
+    st = PLAN_STATE.get(sym)
+    if not st or not st.get("active"):
+        return
+
+    bias = st.get("bias")
+    try:
+        price = _get_last_price(sym)
+    except Exception as e:
+        STATE["last_error"] = f"TP ticker error {sym}: {e}"
+        return
+
+    st["last_price"] = price
+    entry_lo = float(st["entry_lo"])
+    entry_hi = float(st["entry_hi"])
+    tps = [float(x) for x in st["tps"]]
+
+    # 1) Entry tagged
+    if not st["hit"].get("entry"):
+        if _price_in_entry_zone(price, entry_lo, entry_hi):
+            st["hit"]["entry"] = True
+            send_func(
+                f"🎯 [ENTRY TAGGED]\nPair: {sym}\nBias: {_bias_emoji(bias)} {bias}\nZone: {entry_lo:.0f}–{entry_hi:.0f}\nPrice: {price:.0f}\nTime (UTC): {_iso_utc_now()}"
+            )
+        else:
+            return  # don't check TPs until entry is tagged
+
+    # 2) TP hits
+    def _hit(tp: float) -> bool:
+        if bias == "LONG":
+            return price >= tp
+        if bias == "SHORT":
+            return price <= tp
+        return False
+
+    for i, key in enumerate(["tp1", "tp2", "tp3"], start=1):
+        if st["hit"].get(key):
+            continue
+        if _hit(tps[i - 1]):
+            st["hit"][key] = True
+            send_func(
+                f"✅ [TP{i} HIT]\nPair: {sym}\nBias: {_bias_emoji(bias)} {bias}\nTP{i}: {tps[i-1]:.0f}\nPrice: {price:.0f}\nTime (UTC): {_iso_utc_now()}"
+            )
+
+    # optional: deactivate after TP3
+    if st["hit"].get("tp3"):
+        st["active"] = False
+
+
 def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
     if not TRADEWATCH_AI_ALERTS:
         print("[TradeWatch] AI setup alerts disabled (TRADEWATCH_AI_ALERTS != 1)")
@@ -966,6 +1181,7 @@ def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
 
     symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
 
+    # init baseline states
     for s in symbols:
         sym = _normalize_symbol(s)
         SETUP_STATE.setdefault(sym, {"last_status": "—", "last_bias": "—", "last_score": "—", "last_alert_utc": None})
@@ -979,9 +1195,14 @@ def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
 
     print("[TradeWatch] AI setup alerts started ✅")
 
+    last_tp_poll = 0.0
+
     while True:
         try:
+            now = time.time()
             STATE["last_ai_scan_utc"] = datetime.now(timezone.utc)
+
+            # AI setup scan
             for s in symbols:
                 sym = _normalize_symbol(s)
                 res = evaluate_checklist(sym)
@@ -994,11 +1215,19 @@ def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
                 SETUP_STATE[sym]["last_bias"] = res.bias
                 SETUP_STATE[sym]["last_score"] = f"{res.score}/{res.max_score}"
 
+            # TP polling (separate cadence)
+            if TRADEWATCH_TP_ALERTS and (now - last_tp_poll) >= max(5, TRADEWATCH_TP_POLL_SEC):
+                STATE["last_tp_scan_utc"] = datetime.now(timezone.utc)
+                for sym in list(PLAN_STATE.keys()):
+                    _check_tp_hits(sym, send_func)
+                last_tp_poll = now
+
         except Exception as e:
             STATE["last_error"] = f"AI alerts error: {e}"
             print("[TradeWatch] AI alerts error:", e)
 
         time.sleep(TRADEWATCH_AI_INTERVAL_SEC)
+
 
 def get_setup_status_text() -> str:
     symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
@@ -1016,28 +1245,25 @@ def get_setup_status_text() -> str:
         )
     return "\n".join(lines)
 
-def classify_trade_style(res: ChecklistResult, atr: float, sl_distance: float) -> str:
-    """
-    Returns: SCALP | INTRADAY | SWING
-    """
-    score = res.score
-    confirmations = sum([
-        res.structure.ok,
-        res.liquidity.ok,
-        res.fvg.ok
-    ])
 
-    if score <= 6 or confirmations <= 1 or sl_distance <= atr * 0.6:
-        return "SCALP"
+def get_plan_status_text() -> str:
+    """Optional helper if you want a /plan_status later."""
+    if not PLAN_STATE:
+        return "🧾 [Plan Status] No active plans yet."
+    lines = ["🧾 [Plan Status]"]
+    for sym, st in PLAN_STATE.items():
+        hit = st.get("hit", {})
+        tps = st.get("tps", [])
+        lines.append(
+            f"{sym} ({st.get('tag','INTRADAY')}) {st.get('bias','—')} | entry:{'✅' if hit.get('entry') else '—'} | TP1:{'✅' if hit.get('tp1') else '—'} TP2:{'✅' if hit.get('tp2') else '—'} TP3:{'✅' if hit.get('tp3') else '—'} | last:{(st.get('last_price') or 0):.0f}"
+        )
+    return "\n".join(lines)
 
-    if score <= 7 or confirmations == 2:
-        return "INTRADAY"
-
-    return "SWING"
 
 # =========================
 # Main: Trade execution watcher
 # =========================
+
 
 def start_tradewatch(send_func: Callable[[str], None]) -> None:
     if not TRADEWATCH_ENABLED:
@@ -1068,6 +1294,7 @@ def start_tradewatch(send_func: Callable[[str], None]) -> None:
                         seen.add(str(tid))
                 first_run = False
             else:
+
                 def _ctime(x: dict) -> int:
                     try:
                         return int(x.get("cTime") or 0)
