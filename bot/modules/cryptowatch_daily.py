@@ -334,11 +334,12 @@ def command_loop():
 
             # 🍊 TrumpWatch
             elif text.startswith("/trumpwatch"):
-                force = "force" in text
-                trumpwatch.post_mock(force=force)
+    # Trigger an immediate LIVE poll
+    trumpwatch_live.poll_once()
+    send_text("🍊 [TrumpWatch] Live poll executed.")
 
-            elif text.startswith("/tw_recent"):
-                trumpwatch.show_recent()
+elif text.startswith("/tw_recent"):
+    send_text("🍊 [TrumpWatch] Recent view not enabled yet in live mode.")
 
             # 🏦 FedWatch
             elif text.startswith("/fedwatch"):
