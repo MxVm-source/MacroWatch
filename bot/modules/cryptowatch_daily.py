@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from bot.utils import send_text, get_updates
-import bot.modules.trumpwatch_live as trumpwatch
+import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.fedwatch as fedwatch
 import bot.modules.cryptowatch as cryptowatch
 import bot.modules.cryptowatch_daily as cryptowatch_daily
