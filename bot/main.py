@@ -217,7 +217,7 @@ def command_loop():
                     "🧠 *AI Strategy*\n"
                     "/ai – Strategy rules (quick)\n"
                     "/levels – Key BTC/ETH support & resistance\n"
-                    "/plan – Clean AI trade plan (BTC & ETH)\n\n"
+                    "/ai_plan – Clean AI trade plan (BTC & ETH)\n\n"
                     "📊 *Positions*\n"
                     "/position – Current Bitget futures positions\n\n"
                     "📊 *CryptoWatch*\n"
@@ -269,7 +269,7 @@ def command_loop():
                 continue
 
             # PLAN
-            if text.startswith("/plan"):
+            if text.startswith("/ai_plan"):
                 try:
                     b = _build_plan("BTCUSDT")
                     e = _build_plan("ETHUSDT")
