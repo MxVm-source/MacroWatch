@@ -137,9 +137,7 @@ def start_scheduler():
         )
 
     # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
-    if os.getenv("ENABLE_TRUMPWATCH", "false").lower() in ("1", "true", "yes", "on"):
-        minutes = int(os.getenv("TW_INTERVAL_MIN", "15"))
-        sched.add_job(trumpwatch.post_mock, "interval", minutes=minutes)
+    # (Disabled) mock TrumpWatch scheduler - using LIVE thread instead
 
     # 🏦 FedWatch alerts (ICS + BTC/ETH reaction)
     if os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
