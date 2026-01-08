@@ -8,12 +8,14 @@ from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from bot.utils import send_text, get_updates
-import bot.modules.trumpwatch as trumpwatch
 import bot.modules.fedwatch as fedwatch
 import bot.modules.cryptowatch as cryptowatch
 import bot.modules.cryptowatch_daily as cryptowatch_daily
 
 from bot.datafeed_bitget import get_position_report_safe
+
+# ✅ Use LIVE TrumpWatch as the source of truth
+import bot.modules.trumpwatch_live as trumpwatch_live
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
 
@@ -62,6 +64,7 @@ def _atr_simple(candles, period=14):
 def _build_plan(symbol: str):
     """
     Uses TradeWatch checklist + levels to build a clean plan.
+    NOTE: If you pause TradeWatch entirely, you can later replace this with BotWatch plans.
     Returns dict: {symbol,last,bias,entry_zone,sl,tp_list,notes}
     """
     from bot.modules import tradewatch as tw
@@ -124,7 +127,7 @@ def _build_plan(symbol: str):
 
 
 def start_scheduler():
-    """Start jobs for TrumpWatch, FedWatch loop, CryptoWatch, and TradeWatch."""
+    """Start jobs for FedWatch loop, CryptoWatch, and optional TradeWatch."""
     sched = BackgroundScheduler(timezone=os.getenv("TIMEZONE", "Europe/Brussels"))
 
     # ✅ Guard CryptoWatch Daily so the whole bot never crashes if it's missing main()
@@ -135,11 +138,6 @@ def start_scheduler():
             f"(loaded from {getattr(cryptowatch_daily, '__file__', 'unknown')})",
             flush=True,
         )
-
-    # 🍊 TrumpWatch mock interval (OPTIONAL; keep false when using LIVE)
-    if os.getenv("ENABLE_TRUMPWATCH", "false").lower() in ("1", "true", "yes", "on"):
-        minutes = int(os.getenv("TW_INTERVAL_MIN", "15"))
-        sched.add_job(trumpwatch.post_mock, "interval", minutes=minutes)
 
     # 🏦 FedWatch alerts (ICS + BTC/ETH reaction)
     if os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
@@ -170,7 +168,7 @@ def start_scheduler():
             replace_existing=True,
         )
 
-    # 📘 TradeWatch – Futures executions + AI setup alerts + TP hit updates
+    # 📘 TradeWatch – (PAUSED by default)
     if os.getenv("TRADEWATCH_ENABLED", "0") == "1":
         from bot.modules.tradewatch import start_tradewatch, start_ai_setup_alerts
 
@@ -209,24 +207,21 @@ def command_loop():
             if text.startswith("/help"):
                 send_text(
                     "🤖 *MacroWatch – Command Guide*\n\n"
-                    "📈 *TradeWatch*\n"
-                    "/tradewatch_status – TradeWatch system status\n"
-                    "/setup_status – AI setup status (BTC & ETH)\n"
-                    "/checklist [SYMBOL] – AI checklist (ex: /checklist BTCUSDT)\n"
-                    "/tp_status – TP progress for latest AI plan\n\n"
+                    "🏦 *FedWatch*\n"
+                    "/fedwatch – Next Fed event\n"
+                    "/fed_diag – FedWatch diagnostics\n\n"
+                    "🍊 *TrumpWatch (LIVE)*\n"
+                    "/trumpwatch – Trigger an immediate live poll\n"
+                    "/tw_recent – (coming back soon) show recent alerts\n\n"
                     "🧠 *AI Strategy*\n"
                     "/ai – Strategy rules (quick)\n"
                     "/levels – Key BTC/ETH support & resistance\n"
                     "/plan – Clean AI trade plan (BTC & ETH)\n\n"
                     "📊 *Positions*\n"
                     "/position – Current Bitget futures positions\n\n"
-                    "🏦 *FedWatch*\n"
-                    "/fedwatch – Next Fed event\n"
-                    "/fed_diag – FedWatch diagnostics\n\n"
-                    "🍊 *TrumpWatch*\n"
-                    "/trumpwatch – Post mock update\n"
-                    "/trumpwatch force – Force mock post\n"
-                    "/tw_recent – Recent posts\n\n"
+                    "📊 *CryptoWatch*\n"
+                    "/cw_daily – Daily market brief\n"
+                    "/cw_weekly – Weekly sentiment\n\n"
                     "🩺 *System*\n"
                     "/health – Bot health + uptime\n"
                 )
@@ -299,46 +294,16 @@ def command_loop():
                 except Exception as e:
                     send_text(f"🧠 [Plan] Error: {e}")
 
-            # 🎯 TP STATUS (latest plan progress)
-            elif text.startswith("/tp_status"):
-                try:
-                    from bot.modules.tradewatch import get_tp_status_text
-                    send_text(get_tp_status_text())
-                except Exception as e:
-                    send_text(f"🎯 [TP Status] Error: {e}")
-
-            # 🩺 HEALTH
-            elif text.startswith("/health"):
-                try:
-                    from bot.modules import tradewatch as tw
-                    st = getattr(tw, "STATE", {}) or {}
-                    last_poll = st.get("last_poll_utc")
-                    last_ai = st.get("last_ai_scan_utc")
-                    last_err = st.get("last_error")
-
-                    def _dt_str(x):
-                        return x.strftime("%Y-%m-%d %H:%M:%S") if x else "—"
-
-                    send_text(
-                        "🩺 *MacroWatch Health*\n"
-                        f"• Uptime: {_fmt_uptime()}\n"
-                        f"• Started (UTC): {STARTED_AT_UTC.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        f"• Python: {sys.version.split()[0]} | {platform.system()} {platform.release()}\n\n"
-                        "📈 *TradeWatch*\n"
-                        f"• Last poll (UTC): {_dt_str(last_poll)}\n"
-                        f"• Last AI scan (UTC): {_dt_str(last_ai)}\n"
-                        f"• Last error: {last_err or '—'}\n"
-                    )
-                except Exception as e:
-                    send_text(f"🩺 [Health] Error: {e}")
-
-            # 🍊 TrumpWatch
+            # 🍊 TrumpWatch (LIVE)
             elif text.startswith("/trumpwatch"):
-                force = "force" in text
-                trumpwatch.post_mock(force=force)
+                try:
+                    trumpwatch_live.poll_once()
+                    send_text("🍊 [TrumpWatch] Live poll executed.")
+                except Exception as e:
+                    send_text(f"🍊 [TrumpWatch] Error running live poll: {e}")
 
             elif text.startswith("/tw_recent"):
-                trumpwatch.show_recent()
+                send_text("🍊 [TrumpWatch] Recent view is coming back soon (live mode).")
 
             # 🏦 FedWatch
             elif text.startswith("/fedwatch"):
@@ -363,32 +328,22 @@ def command_loop():
                 out = get_position_report_safe()
                 send_text(out)
 
-            # 📈 TradeWatch status
-            elif text.startswith("/tradewatch_status"):
-                try:
-                    from bot.modules.tradewatch import get_status
-                    send_text(get_status())
-                except Exception as e:
-                    send_text(f"📈 [TradeWatch] Status unavailable: {e}")
+            # ⏸️ TradeWatch commands (PAUSED)
+            elif text.startswith("/tradewatch_status") or text.startswith("/setup_status") or text.startswith("/tp_status") or text.startswith("/checklist"):
+                send_text("⏸️ TradeWatch is paused while BotWatch takes over execution. Use BotWatch commands in the BotWatch group/bot.")
+                continue
 
-            # 🧠 AI setup status
-            elif text.startswith("/setup_status"):
+            # 🩺 HEALTH
+            elif text.startswith("/health"):
                 try:
-                    from bot.modules.tradewatch import get_setup_status_text
-                    send_text(get_setup_status_text())
+                    send_text(
+                        "🩺 *MacroWatch Health*\n"
+                        f"• Uptime: {_fmt_uptime()}\n"
+                        f"• Started (UTC): {STARTED_AT_UTC.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"• Python: {sys.version.split()[0]} | {platform.system()} {platform.release()}\n"
+                    )
                 except Exception as e:
-                    send_text(f"🧠 [AI Setup] Status unavailable: {e}")
-
-            # 🧠 Checklist on demand
-            elif text.startswith("/checklist"):
-                try:
-                    parts = text_raw.split()
-                    symbol = parts[1].strip().upper() if len(parts) > 1 else "BTCUSDT"
-                    symbol = symbol.replace(".P", "")
-                    from bot.modules.tradewatch import get_checklist_status_text
-                    send_text(get_checklist_status_text(symbol, include_reasons=True))
-                except Exception as e:
-                    send_text(f"🧠 [AI Checklist] Error: {e}")
+                    send_text(f"🩺 [Health] Error: {e}")
 
 
 if __name__ == "__main__":
@@ -396,10 +351,9 @@ if __name__ == "__main__":
 
     start_scheduler()
 
-    # Start optional TrumpWatch Live in a dedicated thread
+    # Start TrumpWatch Live in a dedicated thread (recommended)
     try:
         if os.getenv("ENABLE_TRUMPWATCH_LIVE", "true").lower() in ("1", "true", "yes", "on"):
-            import bot.modules.trumpwatch_live as trumpwatch_live
             threading.Thread(target=trumpwatch_live.run_loop, daemon=True).start()
             print("🍊 TrumpWatch Live started ✅", flush=True)
         else:
