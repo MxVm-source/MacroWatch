@@ -398,13 +398,7 @@ def command_loop():
                     send_text(f"📊 [Pos+Orders] Error: {e}")
                 continue
 
-            # TRADEWATCH PAUSED COMMANDS
-            if text.startswith(("/tradewatch_status", "/setup_status", "/tp_status", "/checklist")):
-                send_text(
-                    "⏸️ TradeWatch is paused while BotWatch takes over execution.\n"
-                    "Use BotWatch commands in the BotWatch bot/group."
-                )
-                continue
+            
 
             # HEALTH
             if text.startswith("/health"):
