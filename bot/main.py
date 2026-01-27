@@ -1,3 +1,5 @@
+# bot/main.py
+
 import os
 import sys
 import platform
@@ -8,7 +10,13 @@ from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from bot.utils import send_text, get_updates
-from bot.datafeed_bitget import get_position_report_safe
+
+# ✅ Positions + Orders (new)
+from bot.datafeed_bitget import (
+    get_position_report_safe,
+    build_positions_and_orders_message,
+    build_open_orders_message,
+)
 
 import bot.modules.fedwatch as fedwatch
 import bot.modules.cryptowatch as cryptowatch
@@ -241,8 +249,11 @@ def command_loop():
                     "/ai – Strategy rules (quick)\n"
                     "/levels – Key BTC/ETH support & resistance\n"
                     "/ai_plan – Clean AI trade plan (BTC & ETH)\n\n"
-                    "📊 *Positions*\n"
-                    "/position – Current Bitget futures positions\n\n"
+                    "📊 *Positions / Orders*\n"
+                    "/position – Current Bitget futures positions\n"
+                    "/orders – Pending TP/SL plan orders (BTC+ETH)\n"
+                    "/orders ETHUSDT – Orders for a single symbol\n"
+                    "/pos_orders – Combined positions + orders (only symbols with activity)\n\n"
                     "📊 *CryptoWatch*\n"
                     "/cw_daily – Daily market brief\n"
                     "/cw_weekly – Weekly sentiment\n\n"
@@ -363,6 +374,28 @@ def command_loop():
             # POSITION
             if text.startswith("/position"):
                 send_text(get_position_report_safe())
+                continue
+
+            # ✅ NEW: ORDERS (TP/SL plan orders)
+            if text.startswith("/orders"):
+                try:
+                    parts = text_raw.split()
+                    sym = parts[1].strip().upper() if len(parts) > 1 else None
+                    if sym:
+                        send_text(build_open_orders_message(sym))
+                    else:
+                        # show both BTC/ETH, but only if orders exist for that symbol (handled inside combined view)
+                        send_text(build_positions_and_orders_message())
+                except Exception as e:
+                    send_text(f"📑 [Orders] Error: {e}")
+                continue
+
+            # ✅ NEW: COMBINED POS + ORDERS
+            if text.startswith("/pos_orders"):
+                try:
+                    send_text(build_positions_and_orders_message())
+                except Exception as e:
+                    send_text(f"📊 [Pos+Orders] Error: {e}")
                 continue
 
             # TRADEWATCH PAUSED COMMANDS
