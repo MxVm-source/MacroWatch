@@ -140,43 +140,66 @@ def start_scheduler():
     if os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
         threading.Thread(target=fedwatch.schedule_loop, daemon=True).start()
 
-    # CryptoWatch Daily (cron)
+    # CryptoWatch Daily (cron) — SAFE: don't crash if module has no main()
     if os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() in ("1", "true", "yes", "on"):
-        sched.add_job(
-            cryptowatch_daily.main,
-            "cron",
-            hour=15,
-            minute=28,
-            id="cryptowatch_daily_task",
-            max_instances=1,
-            replace_existing=True,
-        )
+        if hasattr(cryptowatch_daily, "main") and callable(getattr(cryptowatch_daily, "main")):
+            sched.add_job(
+                cryptowatch_daily.main,
+                "cron",
+                hour=15,
+                minute=28,
+                id="cryptowatch_daily_task",
+                max_instances=1,
+                replace_existing=True,
+            )
+        else:
+            print(
+                f"⚠️ CryptoWatch Daily disabled: cryptowatch_daily.main() not found "
+                f"(loaded from {getattr(cryptowatch_daily, '__file__', 'unknown')})",
+                flush=True,
+            )
 
     # CryptoWatch Weekly (cron)
     if os.getenv("ENABLE_CRYPTOWATCH_WEEKLY", "true").lower() in ("1", "true", "yes", "on"):
-        sched.add_job(
-            cryptowatch.main,
-            "cron",
-            day_of_week="sun",
-            hour=18,
-            minute=0,
-            id="cryptowatch_weekly_task",
-            max_instances=1,
-            replace_existing=True,
-        )
+        if hasattr(cryptowatch, "main") and callable(getattr(cryptowatch, "main")):
+            sched.add_job(
+                cryptowatch.main,
+                "cron",
+                day_of_week="sun",
+                hour=18,
+                minute=0,
+                id="cryptowatch_weekly_task",
+                max_instances=1,
+                replace_existing=True,
+            )
+        else:
+            print(
+                f"⚠️ CryptoWatch Weekly disabled: cryptowatch.main() not found "
+                f"(loaded from {getattr(cryptowatch, '__file__', 'unknown')})",
+                flush=True,
+            )
 
     # TradeWatch background threads (optional)
     if os.getenv("TRADEWATCH_ENABLED", "0") == "1":
-        from bot.modules.tradewatch import start_tradewatch, start_ai_setup_alerts
+        try:
+            from bot.modules.tradewatch import start_tradewatch, start_ai_setup_alerts
 
-        threading.Thread(target=start_tradewatch, args=(send_text,), daemon=True).start()
+            threading.Thread(target=start_tradewatch, args=(send_text,), daemon=True).start()
 
-        if os.getenv("TRADEWATCH_AI_ALERTS", "0") == "1":
-            threading.Thread(target=start_ai_setup_alerts, args=(send_text,), daemon=True).start()
+            if os.getenv("TRADEWATCH_AI_ALERTS", "0") == "1":
+                threading.Thread(target=start_ai_setup_alerts, args=(send_text,), daemon=True).start()
 
-        if os.getenv("TRADEWATCH_TP_ALERTS", "0") == "1":
-            from bot.modules.tradewatch import start_tp_hit_watcher
-            threading.Thread(target=start_tp_hit_watcher, args=(send_text,), daemon=True).start()
+            if os.getenv("TRADEWATCH_TP_ALERTS", "0") == "1":
+                from bot.modules.tradewatch import start_tp_hit_watcher
+                threading.Thread(target=start_tp_hit_watcher, args=(send_text,), daemon=True).start()
+
+            # Optional: position/orders watcher (only if you added it)
+            if os.getenv("TRADEWATCH_POS_ORDERS_WATCH", "0") == "1":
+                from bot.modules.tradewatch import start_position_order_watcher
+                threading.Thread(target=start_position_order_watcher, args=(send_text,), daemon=True).start()
+
+        except Exception as e:
+            print("⚠️ TradeWatch failed to start:", e, flush=True)
 
     sched.start()
     return sched
@@ -307,7 +330,6 @@ def command_loop():
                 continue
 
             if text.startswith("/tw_recent"):
-                # Only works if you added `show_recent()` in trumpwatch_live.py
                 if hasattr(trumpwatch_live, "show_recent"):
                     trumpwatch_live.show_recent()
                 else:
@@ -325,11 +347,17 @@ def command_loop():
 
             # CRYPTOWATCH
             if text.startswith("/cw_daily"):
-                cryptowatch_daily.main()
+                if hasattr(cryptowatch_daily, "main") and callable(getattr(cryptowatch_daily, "main")):
+                    cryptowatch_daily.main()
+                else:
+                    send_text("📊 [CryptoWatch] Daily is disabled (cryptowatch_daily.main() missing).")
                 continue
 
             if text.startswith("/cw_weekly"):
-                cryptowatch.main()
+                if hasattr(cryptowatch, "main") and callable(getattr(cryptowatch, "main")):
+                    cryptowatch.main()
+                else:
+                    send_text("📊 [CryptoWatch] Weekly is disabled (cryptowatch.main() missing).")
                 continue
 
             # POSITION
