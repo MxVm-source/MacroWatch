@@ -1264,3 +1264,60 @@ def start_tradewatch(send_func: Callable[[str], None]) -> None:
             print("[TradeWatch] Error:", e)
 
         time.sleep(TRADEWATCH_POLL_INTERVAL_SEC)
+        
+def start_position_order_watcher(send_func: Callable[[str], None]) -> None:
+    """
+    Watches for changes in:
+    - position open/close
+    - TP/SL plan orders added/removed
+    Sends Telegram messages only when something changes.
+    """
+    from bot.datafeed_bitget import get_positions_snapshot, build_positions_and_orders_message
+
+    poll = int(os.getenv("TRADEWATCH_POS_POLL_SEC", "20"))
+    symbols = _parse_symbols(os.getenv("TRADEWATCH_SYMBOLS", "BTCUSDT,ETHUSDT"))
+
+    print(f"[TradeWatch] Position/Orders watcher started ✅ ({poll}s)", flush=True)
+
+    last = None
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            STATE["last_poll_utc"] = now
+
+            cur = get_positions_snapshot(symbols)
+
+            if last is None:
+                # first snapshot, do not spam
+                last = cur
+            else:
+                # detect changes
+                changed = False
+
+                for sym in symbols:
+                    a = last.get(sym) or {}
+                    b = cur.get(sym) or {}
+
+                    # position changes
+                    if a.get("has_position") != b.get("has_position"):
+                        changed = True
+
+                    # size/side changes
+                    if a.get("side") != b.get("side") or a.get("size") != b.get("size"):
+                        changed = True
+
+                    # TP/SL changes
+                    if a.get("tp") != b.get("tp") or a.get("sl") != b.get("sl"):
+                        changed = True
+
+                if changed:
+                    send_func(build_positions_and_orders_message(symbols))
+
+                last = cur
+
+        except Exception as e:
+            STATE["last_error"] = f"pos/orders watcher error: {e}"
+            print("[TradeWatch] pos/orders watcher error:", e, flush=True)
+
+        time.sleep(max(10, poll))
