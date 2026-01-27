@@ -51,6 +51,23 @@ def _pnl_color(pnl: float) -> str:
     return f"⚪ {pnl}"
 
 
+def _to_float(v, default=0.0) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _as_list(x):
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return x
+    if isinstance(x, dict):
+        return [x]
+    return []
+
+
 def _signed_request(method: str, request_path: str,
                     params: dict | None = None,
                     body: dict | None = None):
@@ -144,20 +161,63 @@ def get_ticker(symbol: str):
 # Fetch Futures Data
 # ======================
 
-def _fetch_current_futures_position(symbol: str):
+def _fetch_all_futures_positions() -> list[dict]:
+    """
+    ✅ Reliable: fetch ALL positions for productType+marginCoin,
+    then filter locally. This avoids single-position quirks.
+    """
     params = {
         "productType": BITGET_PRODUCT_TYPE,
-        "symbol": symbol,
         "marginCoin": BITGET_MARGIN_COIN,
     }
     res = _signed_request(
         "GET",
-        "/api/v2/mix/position/single-position",
+        "/api/v2/mix/position/all-position",
         params=params,
         body=None,
     )
-    data = res.get("data") or []
-    return data[0] if data else None
+
+    data = res.get("data")
+    positions = _as_list(data)
+
+    # If Bitget wraps the list in a dict, try common keys
+    if len(positions) == 1 and isinstance(positions[0], dict):
+        for k in ("positions", "positionList", "list", "data"):
+            if isinstance(positions[0].get(k), list):
+                positions = positions[0][k]
+                break
+
+    # Only keep dict entries
+    return [p for p in positions if isinstance(p, dict)]
+
+
+def _find_position_for_symbol(symbol: str) -> dict | None:
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return None
+
+    positions = _fetch_all_futures_positions()
+
+    # strict symbol match
+    for p in positions:
+        if (p.get("symbol") or "").upper() == symbol:
+            return p
+
+    # fallback keys (just in case)
+    for p in positions:
+        for k in ("instId", "instrumentId", "symbolName"):
+            if (p.get(k) or "").upper() == symbol:
+                return p
+
+    return None
+
+
+def _fetch_current_futures_position(symbol: str):
+    """
+    Backward compatible wrapper.
+    Now uses all-position under the hood.
+    """
+    return _find_position_for_symbol(symbol)
 
 
 def _fetch_pending_tp_sl_orders(symbol: str):
@@ -180,21 +240,21 @@ def _fetch_pending_tp_sl_orders(symbol: str):
     tps, sls = [], []
 
     for o in entrusted:
-        if o.get("symbol", "").upper() != symbol.upper():
+        if (o.get("symbol", "") or "").upper() != symbol.upper():
             continue
 
         tp = o.get("stopSurplusTriggerPrice")
         if tp:
             try:
                 tps.append(float(tp))
-            except:
+            except Exception:
                 pass
 
         sl = o.get("stopLossTriggerPrice")
         if sl:
             try:
                 sls.append(float(sl))
-            except:
+            except Exception:
                 pass
 
     return {"tp": tps, "sl": sls}
@@ -203,10 +263,9 @@ def _fetch_pending_tp_sl_orders(symbol: str):
 def _position_is_open(pos: dict | None) -> bool:
     if not pos:
         return False
-    try:
-        return float(pos.get("total", "0") or "0") != 0.0
-    except:
-        return False
+    total = pos.get("total")
+    available = pos.get("available")
+    return abs(_to_float(total if total is not None else available, 0.0)) > 0.0
 
 
 # ======================
@@ -218,7 +277,7 @@ def build_futures_position_message(symbol: str | None = None) -> str:
     Single-symbol position report (kept for backward compatibility).
     If symbol is None, uses BITGET_SYMBOL.
     """
-    symbol = (symbol or BITGET_SYMBOL).upper()
+    symbol = (symbol or BITGET_SYMBOL).strip().upper()
     pos = _fetch_current_futures_position(symbol)
 
     if not _position_is_open(pos):
@@ -280,7 +339,7 @@ def build_futures_position_message(symbol: str | None = None) -> str:
             if risk > 0:
                 rr = reward / risk
                 lines.append(f"RR Ratio: {rr:.2f}")
-        except:
+        except Exception:
             pass
 
     if liq:
@@ -289,7 +348,7 @@ def build_futures_position_message(symbol: str | None = None) -> str:
     try:
         pnl_f = float(pnl)
         lines.append(f"Unrealized PnL: {_pnl_color(pnl_f)}")
-    except:
+    except Exception:
         lines.append(f"Unrealized PnL: {pnl}")
 
     lines.append(f"Time (UTC): {iso_utc_now()}")
@@ -300,15 +359,14 @@ def build_futures_position_message(symbol: str | None = None) -> str:
 def build_multi_futures_position_message(symbols: list[str] | None = None) -> str:
     """
     Multi-symbol position report.
-    - If no positions are open: returns ONE clean 'no open positions' line.
-    - If at least one is open: returns ONLY open position reports (no spam for flat symbols).
+    - If no positions are open: returns ONE clean line.
+    - If at least one is open: returns ONLY open position reports.
     """
     symbols = symbols or BITGET_SYMBOLS
 
     open_reports: list[str] = []
-
     for sym in symbols:
-        sym_u = sym.strip().upper()
+        sym_u = (sym or "").strip().upper()
         if not sym_u:
             continue
         pos = _fetch_current_futures_position(sym_u)
@@ -329,13 +387,14 @@ def get_position_report_safe() -> str:
     try:
         return build_multi_futures_position_message()
     except Exception as e:
-        print("[Bitget] /position error:", e)
+        print("[Bitget] /position error:", e, flush=True)
         return "⚠️ Could not fetch position from Bitget. Check API keys & futures permissions."
-        
+
+
 def get_position_snapshot(symbol: str) -> dict:
     """
     Returns a normalized snapshot dict for one symbol.
-    This is used by TradeWatch to detect changes without parsing Telegram text.
+    Used by TradeWatch to detect changes without parsing Telegram text.
     """
     symbol = (symbol or BITGET_SYMBOL).strip().upper()
     pos = _fetch_current_futures_position(symbol)
@@ -345,13 +404,13 @@ def get_position_snapshot(symbol: str) -> dict:
         "symbol": symbol,
         "has_position": _position_is_open(pos),
         "side": (pos.get("holdSide") or "").upper() if pos else "",
-        "size": float(pos.get("total") or 0) if pos else 0.0,
-        "entry": float(pos.get("openPriceAvg") or pos.get("openPrice") or 0) if pos else 0.0,
+        "size": _to_float(pos.get("total") or pos.get("available") or 0) if pos else 0.0,
+        "entry": _to_float(pos.get("openPriceAvg") or pos.get("openPrice") or 0) if pos else 0.0,
         "leverage": pos.get("leverage") if pos else None,
-        "liq": pos.get("liquidationPrice") or pos.get("liqPx") if pos else None,
-        "upl": float(pos.get("unrealizedPL") or pos.get("upl") or 0) if pos else 0.0,
-        "tp": sorted([float(x) for x in (orders.get("tp") or [])]),
-        "sl": sorted([float(x) for x in (orders.get("sl") or [])]),
+        "liq": (pos.get("liquidationPrice") or pos.get("liqPx")) if pos else None,
+        "upl": _to_float(pos.get("unrealizedPL") or pos.get("upl") or 0) if pos else 0.0,
+        "tp": sorted([_to_float(x) for x in (orders.get("tp") or [])]),
+        "sl": sorted([_to_float(x) for x in (orders.get("sl") or [])]),
     }
     return snap
 
@@ -376,8 +435,8 @@ def build_open_orders_message(symbol: str) -> str:
     """
     symbol = (symbol or BITGET_SYMBOL).strip().upper()
     orders = _fetch_pending_tp_sl_orders(symbol)
-    tps = sorted([float(x) for x in (orders.get("tp") or [])])
-    sls = sorted([float(x) for x in (orders.get("sl") or [])])
+    tps = sorted([_to_float(x) for x in (orders.get("tp") or [])])
+    sls = sorted([_to_float(x) for x in (orders.get("sl") or [])])
 
     if not tps and not sls:
         return f"📑 [Orders]\nPair: {symbol}\nNo pending TP/SL plan orders."
