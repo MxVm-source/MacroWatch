@@ -331,3 +331,102 @@ def get_position_report_safe() -> str:
     except Exception as e:
         print("[Bitget] /position error:", e)
         return "⚠️ Could not fetch position from Bitget. Check API keys & futures permissions."
+        
+def get_position_snapshot(symbol: str) -> dict:
+    """
+    Returns a normalized snapshot dict for one symbol.
+    This is used by TradeWatch to detect changes without parsing Telegram text.
+    """
+    symbol = (symbol or BITGET_SYMBOL).strip().upper()
+    pos = _fetch_current_futures_position(symbol)
+    orders = _fetch_pending_tp_sl_orders(symbol)
+
+    snap = {
+        "symbol": symbol,
+        "has_position": _position_is_open(pos),
+        "side": (pos.get("holdSide") or "").upper() if pos else "",
+        "size": float(pos.get("total") or 0) if pos else 0.0,
+        "entry": float(pos.get("openPriceAvg") or pos.get("openPrice") or 0) if pos else 0.0,
+        "leverage": pos.get("leverage") if pos else None,
+        "liq": pos.get("liquidationPrice") or pos.get("liqPx") if pos else None,
+        "upl": float(pos.get("unrealizedPL") or pos.get("upl") or 0) if pos else 0.0,
+        "tp": sorted([float(x) for x in (orders.get("tp") or [])]),
+        "sl": sorted([float(x) for x in (orders.get("sl") or [])]),
+    }
+    return snap
+
+
+def get_positions_snapshot(symbols: list[str] | None = None) -> dict:
+    """
+    Snapshot for multiple symbols: { "BTCUSDT": {...}, "ETHUSDT": {...} }
+    """
+    symbols = symbols or BITGET_SYMBOLS
+    out = {}
+    for s in symbols:
+        s = (s or "").strip().upper()
+        if not s:
+            continue
+        out[s] = get_position_snapshot(s)
+    return out
+
+
+def build_open_orders_message(symbol: str) -> str:
+    """
+    Telegram-friendly message for TP/SL plan orders for one symbol.
+    """
+    symbol = (symbol or BITGET_SYMBOL).strip().upper()
+    orders = _fetch_pending_tp_sl_orders(symbol)
+    tps = sorted([float(x) for x in (orders.get("tp") or [])])
+    sls = sorted([float(x) for x in (orders.get("sl") or [])])
+
+    if not tps and not sls:
+        return f"📑 [Orders]\nPair: {symbol}\nNo pending TP/SL plan orders."
+
+    lines = ["📑 [Orders]", f"Pair: {symbol}"]
+
+    if tps:
+        lines.append("")
+        for i, p in enumerate(tps[:5], 1):
+            lines.append(f"TP{i}: {p}")
+
+    if sls:
+        lines.append("")
+        lines.append(f"SL: {sls[0]}")
+
+    lines.append(f"Time (UTC): {iso_utc_now()}")
+    return "\n".join(lines)
+
+
+def build_positions_and_orders_message(symbols: list[str] | None = None) -> str:
+    """
+    Combined report: only show symbols that have either:
+    - an open position OR
+    - pending TP/SL orders
+    """
+    symbols = symbols or BITGET_SYMBOLS
+
+    blocks = []
+    for s in symbols:
+        s = (s or "").strip().upper()
+        if not s:
+            continue
+
+        snap = get_position_snapshot(s)
+        has_pos = snap["has_position"]
+        has_orders = bool(snap["tp"] or snap["sl"])
+
+        if not has_pos and not has_orders:
+            continue
+
+        parts = []
+        if has_pos:
+            parts.append(build_futures_position_message(s))
+        if has_orders:
+            parts.append(build_open_orders_message(s))
+
+        blocks.append("\n\n".join(parts))
+
+    if not blocks:
+        return f"ℹ️ No open positions or pending TP/SL orders for: {', '.join(symbols)}."
+
+    return "\n\n────────────\n\n".join(blocks)
