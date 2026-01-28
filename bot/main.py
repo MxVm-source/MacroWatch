@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from bot.utils import send_text, get_updates
 
-# ✅ Positions + Orders (new)
+# ✅ Positions + Orders
 from bot.datafeed_bitget import (
     get_position_report_safe,
     build_positions_and_orders_message,
@@ -187,7 +187,7 @@ def start_scheduler():
                 flush=True,
             )
 
-    # TradeWatch background threads (optional)
+    # ✅ TradeWatch background threads (LIVE)
     if os.getenv("TRADEWATCH_ENABLED", "0") == "1":
         try:
             from bot.modules.tradewatch import start_tradewatch, start_ai_setup_alerts
@@ -254,6 +254,11 @@ def command_loop():
                     "/orders – Pending TP/SL plan orders (BTC+ETH)\n"
                     "/orders ETHUSDT – Orders for a single symbol\n"
                     "/pos_orders – Combined positions + orders (only symbols with activity)\n\n"
+                    "📈 *TradeWatch*\n"
+                    "/tradewatch_status – TradeWatch status\n"
+                    "/setup_status – AI setup status (BTC/ETH)\n"
+                    "/tp_status – TP progress for latest AI plans\n"
+                    "/checklist [SYMBOL] – AI checklist (ex: /checklist BTCUSDT)\n\n"
                     "📊 *CryptoWatch*\n"
                     "/cw_daily – Daily market brief\n"
                     "/cw_weekly – Weekly sentiment\n\n"
@@ -384,7 +389,6 @@ def command_loop():
                     if sym:
                         send_text(build_open_orders_message(sym))
                     else:
-                        # show both BTC/ETH, but only if orders exist for that symbol (handled inside combined view)
                         send_text(build_positions_and_orders_message())
                 except Exception as e:
                     send_text(f"📑 [Orders] Error: {e}")
@@ -398,7 +402,50 @@ def command_loop():
                     send_text(f"📊 [Pos+Orders] Error: {e}")
                 continue
 
-            
+            # =========================
+            # ✅ TradeWatch (LIVE again)
+            # =========================
+
+            if text.startswith("/tradewatch_status"):
+                try:
+                    from bot.modules.tradewatch import get_status
+                    send_text(get_status())
+                except Exception as e:
+                    send_text(f"📈 [TradeWatch] Status error: {e}")
+                continue
+
+            if text.startswith("/setup_status"):
+                try:
+                    from bot.modules.tradewatch import get_setup_status_text
+                    send_text(get_setup_status_text())
+                except Exception as e:
+                    send_text(f"🧠 [AI Setup] Error: {e}")
+                continue
+
+            if text.startswith("/tp_status"):
+                try:
+                    # Some versions name it get_plan_status_text; keep both
+                    from bot.modules import tradewatch as tw
+                    if hasattr(tw, "get_tp_status_text"):
+                        send_text(tw.get_tp_status_text())
+                    elif hasattr(tw, "get_plan_status_text"):
+                        send_text(tw.get_plan_status_text())
+                    else:
+                        send_text("🎯 [TP Status] Not available in this TradeWatch version.")
+                except Exception as e:
+                    send_text(f"🎯 [TP Status] Error: {e}")
+                continue
+
+            if text.startswith("/checklist"):
+                try:
+                    parts = text_raw.split()
+                    symbol = parts[1].strip().upper() if len(parts) > 1 else "BTCUSDT"
+                    symbol = symbol.replace(".P", "")
+                    from bot.modules.tradewatch import get_checklist_status_text
+                    send_text(get_checklist_status_text(symbol, include_reasons=True))
+                except Exception as e:
+                    send_text(f"🧠 [Checklist] Error: {e}")
+                continue
 
             # HEALTH
             if text.startswith("/health"):
