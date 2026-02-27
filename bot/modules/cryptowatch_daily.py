@@ -3,6 +3,7 @@ import os
 import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+from urllib.parse import quote
 
 import requests
 from openai import OpenAI
@@ -12,10 +13,7 @@ from bot.utils import send_text
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger("cryptowatch_daily")
 
-log.warning("✅ cryptowatch_daily.py LOADED (OpenAI version)")
-
 client = OpenAI()
-
 BRUSSELS_TZ = ZoneInfo("Europe/Brussels")
 
 # ======================
@@ -35,11 +33,81 @@ PRODUCT_TYPE = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")  # allow env ove
 FEDWATCH_DAILY_URL = os.getenv("FEDWATCH_DAILY_URL", "").strip()
 
 # ======================
+# Stooq macro overlay symbols (env override supported)
+# ======================
+
+# Stooq daily history endpoint:
+# https://stooq.com/q/d/l/?s=^spx&i=d
+STOOQ_BASE = "https://stooq.com/q/d/l/"
+
+# Defaults (you can override in Render env vars if needed)
+STOOQ_SYMBOL_DXY   = os.getenv("STOOQ_SYMBOL_DXY", "^dxy").strip()     # Dollar Index
+STOOQ_SYMBOL_SPX   = os.getenv("STOOQ_SYMBOL_SPX", "^spx").strip()     # S&P 500 Index
+STOOQ_SYMBOL_GOLD  = os.getenv("STOOQ_SYMBOL_GOLD", "xauusd").strip()  # Gold spot proxy
+STOOQ_SYMBOL_US10Y = os.getenv("STOOQ_SYMBOL_US10Y", "^tnx").strip()   # 10Y yield proxy (TNX)
+
+# ======================
 # OpenAI prompt
 # ======================
 
 DAILY_SYSTEM_PROMPT = """You are CryptoWatch, an elite crypto market analyst writing a concise, trader-focused daily brief.
-[... keep your prompt exactly as-is ...]
+
+Audience:
+- Advanced crypto traders, mainly trading BTC/ETH perps using short-term structure + liquidity concepts.
+- They hate fluff. They want signal, not noise.
+
+Style:
+- Direct, confident, and clear.
+- Use short paragraphs and bullet points.
+- Emojis sparingly, no spam.
+- Never say you are an AI. Speak like a desk analyst.
+- Assume prices are in USD unless stated.
+
+STRICT RULES:
+- This DAILY brief must NOT include entries, stop-loss, take-profit targets, or a "trade plan".
+- Context only: price, structure, levels, volatility, flow, macro.
+
+INPUT JSON:
+- snapshot.btc / snapshot.eth: Bitget futures ticker info
+- snapshot.meta.macro_context: optional text from FedWatch (if present)
+- snapshot.meta.macro_overlay: real-market overlay from Stooq (if present)
+
+YOU MUST USE THE MACRO OVERLAY if provided:
+- DXY (Dollar strength)
+- US10Y (rates/yields)
+- S&P 500 (risk-on/off)
+- Gold (risk hedge / real rates proxy)
+Use it inside the "Macro & Cross-Asset" section and bias framing.
+
+STRUCTURE (follow this order, include every section):
+
+1) Header
+   - Line 1: "🧠 [CryptoWatch] Daily Macro Brief"
+   - Line 2: "📅 {date} — Before U.S. Market Open"
+
+2) Market Mood
+   - Sentiment: Bullish / Bearish / Neutral / Cautious.
+   - BTC 24h performance in simple terms.
+   - Overnight flow sentence (buyers/sellers in control).
+   - Volatility: expanding/contracting/elevated/muted.
+
+3) Crypto Snapshot (BTC/ETH)
+   - BTC price + 24h high/low + range note.
+   - ETH price + whether it out/underperformed BTC.
+   - Funding bias (positive/negative/not available).
+   - BTC structure: trend/range + nearest key support/resistance (from your internal logic if present; otherwise keep general).
+
+4) Macro & Cross-Asset (IMPORTANT)
+   - If macro_overlay exists: summarize DXY / US10Y / SPX / Gold direction and what that implies for risk appetite.
+   - If macro_context exists: incorporate Fed/CPI/events in 1–3 bullets.
+   - If both are missing: say data limited and keep it generic but useful.
+
+5) Bias for Today
+   - Explicit BTC bias: Bullish / Bearish / Neutral / Choppy.
+   - One key level BTC must hold or reclaim (no entries/targets).
+   - Volatility setup: expansion likely / range likely / trap risk.
+
+Keep the brief ~200–450 words. Don’t invent precision.
 """
 
 # ======================
@@ -66,11 +134,9 @@ def _public_get(path: str, params: dict | None = None) -> dict | None:
 def _parse_mix_ticker(data: dict) -> dict | None:
     if not data:
         return None
-
     items = data.get("data") or []
     if not isinstance(items, list) or not items:
         return None
-
     tick = items[0]
 
     def _f(key):
@@ -92,6 +158,117 @@ def _parse_mix_ticker(data: dict) -> dict | None:
         "markPrice": _f("markPrice"),
     }
 
+# ======================
+# Stooq macro overlay helpers
+# ======================
+
+def _stooq_fetch_last_two_daily(symbol: str) -> list[dict]:
+    """
+    Fetch last 2 daily rows from Stooq CSV.
+    Returns list of dict rows: [{"date": "...", "close": float}, ...] newest last.
+    """
+    sym = (symbol or "").strip().lower()
+    if not sym:
+        return []
+
+    # Stooq expects e.g. ^spx, xauusd, ^dxy, ^tnx
+    url = f"{STOOQ_BASE}?s={quote(sym)}&i=d"
+    try:
+        r = requests.get(url, timeout=6)
+        if r.status_code != 200:
+            return []
+        text = (r.text or "").strip()
+        if not text or "404" in text.lower():
+            return []
+        lines = text.splitlines()
+        if len(lines) < 3:
+            return []
+
+        # header: Date,Open,High,Low,Close,Volume
+        # grab last two data lines
+        data_lines = [ln for ln in lines[1:] if ln and "," in ln][-2:]
+        out = []
+        for ln in data_lines:
+            parts = ln.split(",")
+            if len(parts) < 5:
+                continue
+            dt = parts[0].strip()
+            close_s = parts[4].strip()
+            try:
+                close = float(close_s)
+            except Exception:
+                continue
+            out.append({"date": dt, "close": close})
+        return out
+    except Exception:
+        return []
+
+
+def _macro_point(name: str, symbol: str) -> dict | None:
+    rows = _stooq_fetch_last_two_daily(symbol)
+    if not rows:
+        return None
+
+    last = rows[-1]["close"]
+    prev = rows[-2]["close"] if len(rows) >= 2 else None
+
+    change = None
+    change_pct = None
+    direction = "flat"
+
+    if prev and prev != 0:
+        change = last - prev
+        change_pct = (change / prev) * 100.0
+        if abs(change_pct) < 0.05:
+            direction = "flat"
+        elif change > 0:
+            direction = "up"
+        else:
+            direction = "down"
+
+    return {
+        "name": name,
+        "symbol": symbol,
+        "last": last,
+        "prev_close": prev,
+        "change": change,
+        "change_pct": change_pct,
+        "direction": direction,
+        "as_of": rows[-1]["date"],
+    }
+
+
+def fetch_macro_overlay() -> dict:
+    """
+    Returns macro overlay dict. Missing instruments are simply omitted.
+    """
+    overlay = {"source": "stooq", "as_of_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")}
+    items = []
+
+    # US10Y via TNX (index points; narrative still works: up/down yields)
+    us10y = _macro_point("US10Y (TNX proxy)", STOOQ_SYMBOL_US10Y)
+    if us10y:
+        items.append(us10y)
+
+    dxy = _macro_point("DXY", STOOQ_SYMBOL_DXY)
+    if dxy:
+        items.append(dxy)
+
+    spx = _macro_point("S&P 500", STOOQ_SYMBOL_SPX)
+    if spx:
+        items.append(spx)
+
+    gold = _macro_point("Gold", STOOQ_SYMBOL_GOLD)
+    if gold:
+        items.append(gold)
+
+    overlay["items"] = items
+    overlay["notes"] = "Daily close-to-close changes. US10Y uses TNX proxy where available."
+    return overlay
+
+# ======================
+# Snapshot builder
+# ======================
 
 def fetch_basic_market_snapshot() -> dict:
     snapshot: dict = {
@@ -113,10 +290,9 @@ def fetch_basic_market_snapshot() -> dict:
         eth["symbol"] = ETH_SYMBOL
         snapshot["eth"] = eth
 
-    snapshot["meta"]["total_market_cap"] = None
     snapshot["meta"]["notes"] = "BTC/ETH USDT perpetual futures data from Bitget V2 (ticker)."
     snapshot["meta"]["macro_context"] = None
-
+    snapshot["meta"]["macro_overlay"] = None
     return snapshot
 
 # ======================
@@ -162,16 +338,16 @@ def generate_daily_brief(snapshot: dict) -> str:
             max_tokens=900,
             messages=[
                 {"role": "system", "content": DAILY_SYSTEM_PROMPT},
-                {"role": "user", "content": "Generate the DAILY market brief ONLY (no strategy plan):\n\n" + payload_str},
+                {"role": "user", "content": "Generate the DAILY brief (no trade plan, no entries/stops/TPs):\n\n" + payload_str},
             ],
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
         log.exception("OpenAI call failed: %s", e)
         return (
-            "🧠 [CryptoWatch] AI Market Brief\n"
+            "🧠 [CryptoWatch] Daily Macro Brief\n"
             "⚠️ Could not generate full daily analysis today (model error).\n"
-            "Assume conditions are uncertain and manage risk defensively."
+            "Manage risk defensively."
         )
 
 # ======================
@@ -183,13 +359,26 @@ def main():
         snapshot = fetch_basic_market_snapshot()
     except Exception as e:
         log.exception("error building snapshot: %s", e)
-        send_text("🧠 [CryptoWatch] AI Market Brief\n⚠️ Could not build market snapshot from Bitget.")
+        send_text("🧠 [CryptoWatch] Daily Macro Brief\n⚠️ Could not build market snapshot from Bitget.")
         return
 
+    # Macro context from FedWatch (optional)
     macro_text = fetch_macro_context()
     if macro_text:
         snapshot.setdefault("meta", {})
         snapshot["meta"]["macro_context"] = macro_text
+
+    # ✅ Macro overlay from Stooq (optional but preferred)
+    try:
+        overlay = fetch_macro_overlay()
+        if overlay.get("items"):
+            snapshot.setdefault("meta", {})
+            snapshot["meta"]["macro_overlay"] = overlay
+        else:
+            # No overlay items fetched; keep it silent (no spam).
+            pass
+    except Exception as e:
+        log.warning("macro overlay fetch failed: %s", e)
 
     brief = generate_daily_brief(snapshot)
     send_text(brief)
