@@ -5,6 +5,8 @@ import html
 import re
 from datetime import datetime, timedelta
 from xml.etree import ElementTree as ET
+from collections import deque
+
 from bot.utils import send_text
 
 # Primary: X mirror (fast)
@@ -22,6 +24,10 @@ VERIFY_WINDOW  = int(os.getenv('TW_VERIFY_WINDOW_MIN', '2'))
 
 # Toggle market-only filter
 MARKET_FILTER  = os.getenv('TW_MARKET_FILTER', 'true').lower() in ('1', 'true', 'yes', 'on')
+
+# ✅ Recent alerts buffer (for /tw_recent)
+RECENT_MAX = int(os.getenv("TW_RECENT_MAX", "10"))
+RECENT_ALERTS = deque(maxlen=RECENT_MAX)
 
 STATE = {
     'seen': {},      # id/text_sig -> iso time
@@ -191,6 +197,20 @@ def _try_verify_with_ts(x_item, ts_items):
     return False, None
 
 
+# ✅ /tw_recent support
+def show_recent():
+    if not RECENT_ALERTS:
+        send_text("🍊 [TrumpWatch] No recent alerts stored yet.")
+        return
+
+    header = "🍊 *[TrumpWatch] Recent Alerts*\n"
+    blocks = []
+    for x in list(RECENT_ALERTS):
+        blocks.append(x)
+
+    send_text(header + "\n\n────────────\n\n".join(blocks))
+
+
 def poll_once():
     # refresh TS cache
     ts_items = _fetch_ts_items()
@@ -231,6 +251,10 @@ def poll_once():
             f"📡 Source: {src}\n"
             f"{link_line}"
         ).strip()
+
+        # ✅ store recent with timestamp line
+        stamped = f"🕒 {now_iso} UTC\n{msg}"
+        RECENT_ALERTS.appendleft(stamped)
 
         send_text(msg)
         STATE["seen"][key] = now_iso
