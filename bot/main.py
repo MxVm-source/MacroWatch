@@ -39,12 +39,6 @@ def _fmt_uptime() -> str:
 
 
 def _compute_levels_from_candles(candles, lookback=48):
-    """
-    Simple S/R from recent 4H candles:
-    - support = min(low)
-    - resistance = max(high)
-    - last = last close
-    """
     if not candles:
         return None
     lb = candles[-lookback:] if len(candles) > lookback else candles
@@ -72,8 +66,8 @@ def _atr_simple(candles, period=14):
 
 def _build_plan(symbol: str):
     """
-    Builds a clean plan using existing TradeWatch candle fetching + checklist.
-    If TradeWatch is fully removed later, swap this to BotWatch plan generation.
+    Optional. Kept only because your file already supports /ai_plan.
+    If you want ALL AI plan stuff removed, delete this function + /ai_plan handler.
     """
     from bot.modules import tradewatch as tw
 
@@ -91,7 +85,7 @@ def _build_plan(symbol: str):
     res = levels["resistance"]
 
     bias = chk.bias
-    atr_buf = max(atr * 0.35, last * 0.0015)  # safety buffer
+    atr_buf = max(atr * 0.35, last * 0.0015)
 
     if bias == "LONG":
         entry_lo = sup + atr_buf * 0.2
@@ -138,17 +132,13 @@ def _build_plan(symbol: str):
 # Scheduler
 # ----------------------------
 def start_scheduler():
-    """
-    Start APScheduler jobs.
-    NOTE: TrumpWatch LIVE runs in its own thread (not APScheduler).
-    """
     sched = BackgroundScheduler(timezone=os.getenv("TIMEZONE", "Europe/Brussels"))
 
     # FedWatch loop
     if os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
         threading.Thread(target=fedwatch.schedule_loop, daemon=True).start()
 
-    # CryptoWatch Daily (cron) — SAFE: don't crash if module has no main()
+    # CryptoWatch Daily
     if os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() in ("1", "true", "yes", "on"):
         if hasattr(cryptowatch_daily, "main") and callable(getattr(cryptowatch_daily, "main")):
             sched.add_job(
@@ -167,7 +157,7 @@ def start_scheduler():
                 flush=True,
             )
 
-    # CryptoWatch Weekly (cron)
+    # CryptoWatch Weekly
     if os.getenv("ENABLE_CRYPTOWATCH_WEEKLY", "true").lower() in ("1", "true", "yes", "on"):
         if hasattr(cryptowatch, "main") and callable(getattr(cryptowatch, "main")):
             sched.add_job(
@@ -190,18 +180,20 @@ def start_scheduler():
     # ✅ TradeWatch background threads (LIVE)
     if os.getenv("TRADEWATCH_ENABLED", "0") == "1":
         try:
-            from bot.modules.tradewatch import start_tradewatch, start_ai_setup_alerts
+            from bot.modules.tradewatch import start_tradewatch
 
             threading.Thread(target=start_tradewatch, args=(send_text,), daemon=True).start()
 
+            # 🚫 IMPORTANT: AI SETUP ALERTS are OFF by default now.
+            # If you ever want them back, set TRADEWATCH_AI_ALERTS=1 in Render env.
             if os.getenv("TRADEWATCH_AI_ALERTS", "0") == "1":
+                from bot.modules.tradewatch import start_ai_setup_alerts
                 threading.Thread(target=start_ai_setup_alerts, args=(send_text,), daemon=True).start()
 
             if os.getenv("TRADEWATCH_TP_ALERTS", "0") == "1":
                 from bot.modules.tradewatch import start_tp_hit_watcher
                 threading.Thread(target=start_tp_hit_watcher, args=(send_text,), daemon=True).start()
 
-            # Optional: position/orders watcher (only if you added it)
             if os.getenv("TRADEWATCH_POS_ORDERS_WATCH", "0") == "1":
                 from bot.modules.tradewatch import start_position_order_watcher
                 threading.Thread(target=start_position_order_watcher, args=(send_text,), daemon=True).start()
@@ -235,7 +227,7 @@ def command_loop():
             if chat_allow and chat != chat_allow:
                 continue
 
-            # HELP
+            # HELP (removed /ai command from the guide)
             if text.startswith("/help"):
                 send_text(
                     "🤖 *MacroWatch – Command Guide*\n\n"
@@ -244,20 +236,14 @@ def command_loop():
                     "/fed_diag – FedWatch diagnostics\n\n"
                     "🍊 *TrumpWatch (LIVE)*\n"
                     "/trumpwatch – Trigger an immediate live poll\n"
-                    "/tw_recent – (optional) recent alerts (if enabled)\n\n"
-                    "🧠 *AI Strategy*\n"
-                    "/ai – Strategy rules (quick)\n"
-                    "/levels – Key BTC/ETH support & resistance\n"
-                    "/ai_plan – Clean AI trade plan (BTC & ETH)\n\n"
+                    "/tw_recent – Recent alerts\n\n"
                     "📊 *Positions / Orders*\n"
                     "/position – Current Bitget futures positions\n"
                     "/orders – Pending TP/SL plan orders (BTC+ETH)\n"
                     "/orders ETHUSDT – Orders for a single symbol\n"
-                    "/pos_orders – Combined positions + orders (only symbols with activity)\n\n"
+                    "/pos_orders – Combined positions + orders\n\n"
                     "📈 *TradeWatch*\n"
                     "/tradewatch_status – TradeWatch status\n"
-                    "/setup_status – AI setup status (BTC/ETH)\n"
-                    "/tp_status – TP progress for latest AI plans\n"
                     "/checklist [SYMBOL] – AI checklist (ex: /checklist BTCUSDT)\n\n"
                     "📊 *CryptoWatch*\n"
                     "/cw_daily – Daily market brief\n"
@@ -267,18 +253,7 @@ def command_loop():
                 )
                 continue
 
-            # AI STRATEGY QUICK
-            if text.startswith("/ai"):
-                send_text(
-                    "🧠 *AI Strategy (BTC/ETH)*\n"
-                    "• 📈 Structure first (HH/HL = long, LH/LL = short)\n"
-                    "• 🧲 Liquidity sweep + reclaim = best entries\n"
-                    "• 🕳️ FVG reaction = confirmation (wick + close)\n"
-                    "• 🎯 Scale out in 2–3 TPs, protect capital\n"
-                    "• 🛡️ Invalidation (SL) beyond key S/R + buffer\n"
-                    "• ⚠️ Mixed structure → wait or scalp edges only\n"
-                )
-                continue
+            # 🚫 REMOVED: /ai (AI strategy text)
 
             # LEVELS
             if text.startswith("/levels"):
@@ -307,7 +282,7 @@ def command_loop():
                     send_text(f"📌 [Levels] Error: {e}")
                 continue
 
-            # PLAN
+            # PLAN (optional)
             if text.startswith("/ai_plan"):
                 try:
                     b = _build_plan("BTCUSDT")
@@ -346,10 +321,11 @@ def command_loop():
                 continue
 
             if text.startswith("/tw_recent"):
-                if hasattr(trumpwatch_live, "show_recent"):
+                # Now that trumpwatch_live.py has show_recent(), just call it.
+                try:
                     trumpwatch_live.show_recent()
-                else:
-                    send_text("🍊 [TrumpWatch] Recent view not enabled yet in live mode.")
+                except Exception as e:
+                    send_text(f"🍊 [TrumpWatch] Recent error: {e}")
                 continue
 
             # FEDWATCH
@@ -381,7 +357,7 @@ def command_loop():
                 send_text(get_position_report_safe())
                 continue
 
-            # ✅ NEW: ORDERS (TP/SL plan orders)
+            # ORDERS
             if text.startswith("/orders"):
                 try:
                     parts = text_raw.split()
@@ -394,7 +370,7 @@ def command_loop():
                     send_text(f"📑 [Orders] Error: {e}")
                 continue
 
-            # ✅ NEW: COMBINED POS + ORDERS
+            # COMBINED POS + ORDERS
             if text.startswith("/pos_orders"):
                 try:
                     send_text(build_positions_and_orders_message())
@@ -402,10 +378,7 @@ def command_loop():
                     send_text(f"📊 [Pos+Orders] Error: {e}")
                 continue
 
-            # =========================
-            # ✅ TradeWatch (LIVE again)
-            # =========================
-
+            # TradeWatch (LIVE)
             if text.startswith("/tradewatch_status"):
                 try:
                     from bot.modules.tradewatch import get_status
@@ -414,28 +387,7 @@ def command_loop():
                     send_text(f"📈 [TradeWatch] Status error: {e}")
                 continue
 
-            if text.startswith("/setup_status"):
-                try:
-                    from bot.modules.tradewatch import get_setup_status_text
-                    send_text(get_setup_status_text())
-                except Exception as e:
-                    send_text(f"🧠 [AI Setup] Error: {e}")
-                continue
-
-            if text.startswith("/tp_status"):
-                try:
-                    # Some versions name it get_plan_status_text; keep both
-                    from bot.modules import tradewatch as tw
-                    if hasattr(tw, "get_tp_status_text"):
-                        send_text(tw.get_tp_status_text())
-                    elif hasattr(tw, "get_plan_status_text"):
-                        send_text(tw.get_plan_status_text())
-                    else:
-                        send_text("🎯 [TP Status] Not available in this TradeWatch version.")
-                except Exception as e:
-                    send_text(f"🎯 [TP Status] Error: {e}")
-                continue
-
+            # Checklist (allowed)
             if text.startswith("/checklist"):
                 try:
                     parts = text_raw.split()
