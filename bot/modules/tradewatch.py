@@ -52,6 +52,9 @@ TRADEWATCH_PRODUCT_TYPE = os.environ.get("TRADEWATCH_PRODUCT_TYPE", "USDT-FUTURE
 TRADEWATCH_CHECKLIST_ENABLED = os.environ.get("TRADEWATCH_CHECKLIST_ENABLED", "1") == "1"
 TRADEWATCH_CHECKLIST_GRANULARITY = os.environ.get("TRADEWATCH_CHECKLIST_GRANULARITY", "4H")  # "4H" or "240"
 
+# ✅ NEW: do NOT attach checklist to executions (prevents the spam you still see)
+TRADEWATCH_APPEND_CHECKLIST_TO_FILLS = os.environ.get("TRADEWATCH_APPEND_CHECKLIST_TO_FILLS", "0") == "1"
+
 # Setup Radar alerts (optional)
 TRADEWATCH_AI_ALERTS = os.environ.get("TRADEWATCH_AI_ALERTS", "0") == "1"  # kept name for compatibility
 TRADEWATCH_AI_MIN_SCORE = int(os.environ.get("TRADEWATCH_AI_MIN_SCORE", "6"))
@@ -289,24 +292,25 @@ def _classify_execution(fill: dict) -> str:
     return "Execution"
 
 
+# ✅ UPDATED: first execution style (minimal) + no checklist attachment
 def _format_execution_message(fill: dict, checklist_block: str | None = None) -> str:
     pair = _normalize_symbol(fill.get("symbol") or "N/A")
     side_raw = (fill.get("side") or "N/A").upper()
-    price = fill.get("price") or fill.get("priceAvg") or "N/A"
+
+    # Try common Bitget keys
+    price = fill.get("price") or fill.get("priceAvg") or fill.get("fillPrice") or "N/A"
     size = fill.get("baseVolume") or fill.get("size") or fill.get("amount") or "N/A"
+
     trade_id = fill.get("tradeId") or fill.get("id") or ""
-    trade_scope = (fill.get("tradeScope") or "").lower()
     trade_side = (fill.get("tradeSide") or "").lower()
+    scope = (fill.get("tradeScope") or "").upper()
+
+    side_emoji = "🟢" if side_raw == "BUY" else ("🔴" if side_raw == "SELL" else "📘")
 
     if TRADEWATCH_DEGEN:
         header = random.choice(DEGEN_OPEN if "open" in trade_side else DEGEN_CLOSE)
     else:
-        header = "📈 [TradeWatch] Futures Execution"
-
-    side_emoji = "🟢" if side_raw == "BUY" else ("🔴" if side_raw == "SELL" else "📘")
-
-    execution = _classify_execution(fill)
-    maker_taker = f"{trade_scope}".upper() if trade_scope else "—"
+        header = "📈 Trade executed."
 
     msg = (
         f"{side_emoji} {header}\n"
@@ -314,16 +318,12 @@ def _format_execution_message(fill: dict, checklist_block: str | None = None) ->
         f"Side: {side_raw}\n"
         f"Price: {price}\n"
         f"Size: {size}\n"
-        f"Execution: {execution}\n"
-        f"Fill: {maker_taker} | tradeSide: {trade_side or '—'}\n"
+        f"Fill: {scope or '—'} | {trade_side or '—'}\n"
         f"TradeId: {trade_id}\n"
         f"Time (UTC): {_iso_utc_now()}"
-    )
+    ).strip()
 
-    if checklist_block:
-        msg += "\n\n" + checklist_block
-
-    if TRADEWATCH_DEGEN and random.random() < 0.25:
+    if TRADEWATCH_DEGEN and random.random() < float(os.getenv("TRADEWATCH_DEGEN_PROB", "0.22")):
         msg += f"\n\n{random.choice(DEGEN_RANDOM)}"
 
     return msg
@@ -926,7 +926,6 @@ def _should_alert(sym: str, res: ChecklistResult) -> bool:
     now = datetime.now(timezone.utc)
     last_alert = SETUP_STATE.get(sym, {}).get("last_alert_utc")
 
-    # cooldown only for valid setups
     if is_valid and last_alert and (now - last_alert) < timedelta(minutes=TRADEWATCH_AI_COOLDOWN_MIN):
         return False
 
@@ -1034,7 +1033,6 @@ def _format_setup_radar(sym: str, res: ChecklistResult) -> str:
         except Exception:
             plan_block = ""
 
-    # single-line summary of why (short)
     why = []
     if res.structure.bias in ("LONG", "SHORT"):
         why.append(f"Structure {res.structure.bias}")
@@ -1230,8 +1228,9 @@ def start_tradewatch(send_func: Callable[[str], None]) -> None:
                     STATE["last_trade_side"] = (f.get("side") or "").upper()
                     STATE["last_error"] = None
 
+                    # ✅ IMPORTANT: do not append checklist to fill messages unless you explicitly enable it.
                     checklist_block = None
-                    if TRADEWATCH_CHECKLIST_ENABLED and sym:
+                    if TRADEWATCH_APPEND_CHECKLIST_TO_FILLS and TRADEWATCH_CHECKLIST_ENABLED and sym:
                         try:
                             checklist_block = get_checklist_status_text(sym, include_reasons=False)
                         except Exception as ce:
