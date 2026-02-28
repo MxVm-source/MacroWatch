@@ -1,36 +1,20 @@
 #!/usr/bin/env python3
-"""TradeWatch (Bitget)
+"""
+TradeWatch (Bitget) — LIVE
 
-Futures Executions + AI Checklist + Auto Setup Alerts + Auto Plan (Fib) + TP Hit Updates
-======================================================================================
+Futures Executions + Setup Checklist + Optional Setup Radar + Auto Plan + TP Updates
+===============================================================================
 
-Features
---------
+What this module does:
 - Watches Bitget **Futures (MIX)** fills/executions and sends Telegram messages via send_func(text)
-- Computes an AI checklist (Structure / Liquidity / FVG) from **4H candles**
-- Optionally sends **Auto AI Setup Alerts** even when you haven't executed a trade yet
-- Builds an **Auto Plan** (Entry / SL / TP1-TP3) using:
-  - recent 4H support/resistance
-  - ATR buffer
-  - Fibonacci retracement entry zones (0.382/0.5/0.618/0.705)
-- Optional **TP hit updates** (TP1/TP2/TP3) after an entry is "tagged".
+- Computes a checklist (Structure / Liquidity / FVG) from **4H candles**
+- Optional "Setup Radar" alerts (clean + minimal, no "AI SETUP ALERT" spam)
+- Optional Auto Plan (Entry / SL / TP1-TP3) using SR + ATR + Fibonacci entry zones
+- Optional TP hit updates (TP1/TP2/TP3) after entry is tagged
 
-Notes
------
-- TP updates are driven by *price*, not by your exchange order fills.
-- An "entry" is considered active once price reaches the entry zone.
-
-Compatibility
--------------
-Some runners/schedulers import `start_tp_hit_watcher`.
-This module primarily performs TP polling inside `start_ai_setup_alerts`,
-but it also exports `start_tp_hit_watcher(send_func)` for backward compatibility.
-
-If you enable both TP polling inside AI loop **and** start_tp_hit_watcher,
-you may get duplicate TP alerts.
-
-Use env var to control behavior:
-- TRADEWATCH_TP_STANDALONE=1   # run TP polling in start_tp_hit_watcher
+Notes:
+- TP updates are driven by *price*, not exchange order fills.
+- Entry is considered active once price reaches the entry zone.
 """
 
 from __future__ import annotations
@@ -49,7 +33,7 @@ from typing import Any, Dict, List, Tuple, Optional, Callable
 import requests
 
 # =========================
-# TradeWatch Configuration
+# Configuration
 # =========================
 
 BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "")
@@ -68,14 +52,14 @@ TRADEWATCH_PRODUCT_TYPE = os.environ.get("TRADEWATCH_PRODUCT_TYPE", "USDT-FUTURE
 TRADEWATCH_CHECKLIST_ENABLED = os.environ.get("TRADEWATCH_CHECKLIST_ENABLED", "1") == "1"
 TRADEWATCH_CHECKLIST_GRANULARITY = os.environ.get("TRADEWATCH_CHECKLIST_GRANULARITY", "4H")  # "4H" or "240"
 
-# Auto AI setup alerts (no trade needed)
-TRADEWATCH_AI_ALERTS = os.environ.get("TRADEWATCH_AI_ALERTS", "0") == "1"
+# Setup Radar alerts (optional)
+TRADEWATCH_AI_ALERTS = os.environ.get("TRADEWATCH_AI_ALERTS", "0") == "1"  # kept name for compatibility
 TRADEWATCH_AI_MIN_SCORE = int(os.environ.get("TRADEWATCH_AI_MIN_SCORE", "6"))
-TRADEWATCH_AI_INTERVAL_SEC = int(os.environ.get("TRADEWATCH_AI_INTERVAL_SEC", "60"))
+TRADEWATCH_AI_INTERVAL_SEC = int(os.environ.get("TRADEWATCH_AI_INTERVAL_SEC", "90"))
 TRADEWATCH_AI_COOLDOWN_MIN = int(os.environ.get("TRADEWATCH_AI_COOLDOWN_MIN", "180"))
 TRADEWATCH_AI_SEND_PARTIAL = os.environ.get("TRADEWATCH_AI_SEND_PARTIAL", "0") == "1"
 
-# Auto plan in AI alerts
+# Auto plan in alerts
 TRADEWATCH_PLAN_IN_ALERTS = os.environ.get("TRADEWATCH_PLAN_IN_ALERTS", "1") == "1"
 TRADEWATCH_PLAN_LOOKBACK = int(os.environ.get("TRADEWATCH_PLAN_LOOKBACK", "48"))
 
@@ -120,11 +104,11 @@ STATE: Dict[str, Any] = {
     "last_checklist_utc": None,
     "last_checklist_symbol": None,
     "last_checklist_status": None,
-    "last_ai_scan_utc": None,
+    "last_setup_scan_utc": None,
     "last_tp_scan_utc": None,
 }
 
-# Per-symbol state for AI alerts + /setup_status
+# Per-symbol state for Setup Radar + /setup_status
 SETUP_STATE: Dict[str, Dict[str, Any]] = {}
 
 # Per-symbol state for plan + TP tracking
@@ -137,7 +121,7 @@ PLAN_STATE: Dict[str, Dict[str, Any]] = {}
 DEGEN_OPEN = [
     "🚀 Admin yeeted into a trade!",
     "💀 Admin just sent it.",
-    "🧨 Admin deployed capital irresponsibly.",
+    "🧨 Capital deployed irresponsibly.",
     "🔥 Position opened — cope accordingly.",
     "🦍 Big ape energy detected.",
 ]
@@ -149,10 +133,16 @@ DEGEN_CLOSE = [
     "💸 Trade ended — PnL prayed for.",
 ]
 
+DEGEN_RANDOM = [
+    "🧠📐 Structure > feelings.",
+    "🧯 Don’t chase — let it come to you.",
+    "🧲 Liquidity is the map. Price is the story.",
+    "🗡️ Tight stops feed the market.",
+]
+
 # =========================
 # Helpers
 # =========================
-
 
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -180,7 +170,6 @@ def _signed_request(method: str, request_path: str, params: dict | None = None, 
     query = ""
     if params:
         from urllib.parse import urlencode
-
         query = urlencode(params)
 
     body_str = json.dumps(body, separators=(",", ":")) if body else ""
@@ -242,17 +231,25 @@ def _get_last_price(symbol: str) -> float:
         "/api/v2/mix/market/ticker",
         params={"symbol": symbol, "productType": TRADEWATCH_PRODUCT_TYPE},
     )
-    d = raw.get("data") or {}
-    for k in ("lastPr", "last", "close"):
-        if k in d and d[k] not in (None, ""):
-            return float(d[k])
+
+    d = raw.get("data")
+    # Bitget can return dict or list
+    if isinstance(d, list):
+        d = d[0] if d else {}
+    if not isinstance(d, dict):
+        d = {}
+
+    for k in ("lastPr", "last", "close", "markPrice"):
+        v = d.get(k)
+        if v not in (None, ""):
+            return float(v)
+
     raise RuntimeError(f"No ticker last price for {symbol}")
 
 
 # =========================
 # Futures Fills (Executions)
 # =========================
-
 
 def _fetch_futures_fills(limit: int = 100, symbol: str | None = None) -> List[dict]:
     params: Dict[str, str] = {
@@ -292,7 +289,7 @@ def _classify_execution(fill: dict) -> str:
     return "Execution"
 
 
-def _format_message(fill: dict, checklist_block: str | None = None) -> str:
+def _format_execution_message(fill: dict, checklist_block: str | None = None) -> str:
     pair = _normalize_symbol(fill.get("symbol") or "N/A")
     side_raw = (fill.get("side") or "N/A").upper()
     price = fill.get("price") or fill.get("priceAvg") or "N/A"
@@ -326,6 +323,9 @@ def _format_message(fill: dict, checklist_block: str | None = None) -> str:
     if checklist_block:
         msg += "\n\n" + checklist_block
 
+    if TRADEWATCH_DEGEN and random.random() < 0.25:
+        msg += f"\n\n{random.choice(DEGEN_RANDOM)}"
+
     return msg
 
 
@@ -337,12 +337,12 @@ def get_status() -> str:
         f"ProductType: {TRADEWATCH_PRODUCT_TYPE}",
         f"Symbols: {symbols}",
         f"Polling: {TRADEWATCH_POLL_INTERVAL_SEC}s",
-        f"AI alerts: {'Yes ✅' if TRADEWATCH_AI_ALERTS else 'No ❌'} (every {TRADEWATCH_AI_INTERVAL_SEC}s, min {TRADEWATCH_AI_MIN_SCORE}/10)",
+        f"Setup Radar: {'Yes ✅' if TRADEWATCH_AI_ALERTS else 'No ❌'} (every {TRADEWATCH_AI_INTERVAL_SEC}s, min {TRADEWATCH_AI_MIN_SCORE}/10)",
         f"Plan in alerts: {'Yes ✅' if TRADEWATCH_PLAN_IN_ALERTS else 'No ❌'} | TP updates: {'Yes ✅' if TRADEWATCH_TP_ALERTS else 'No ❌'}",
         f"Running loop: {'Yes ✅' if STATE['running'] else 'No ❌'}",
         f"Last poll (UTC): {_iso_or_none(STATE['last_poll_utc'])}",
         f"Last trade (UTC): {_iso_or_none(STATE['last_trade_utc'])}",
-        f"Last AI scan (UTC): {_iso_or_none(STATE.get('last_ai_scan_utc'))}",
+        f"Last Setup scan (UTC): {_iso_or_none(STATE.get('last_setup_scan_utc'))}",
         f"Last TP scan (UTC): {_iso_or_none(STATE.get('last_tp_scan_utc'))}",
     ]
     if STATE.get("last_trade_pair"):
@@ -357,7 +357,7 @@ def get_status() -> str:
 
 
 # ============================================================
-# AI Checklist (Structure / Liquidity / FVG) — 4H candles
+# Checklist (Structure / Liquidity / FVG) — 4H candles
 # ============================================================
 
 Candle = Dict[str, float]
@@ -395,14 +395,7 @@ def bitget_klines_to_candles(raw: Any) -> List[Candle]:
             if ts > 1e12:
                 ts /= 1000.0
             out.append(
-                {
-                    "ts": ts,
-                    "open": float(row[1]),
-                    "high": float(row[2]),
-                    "low": float(row[3]),
-                    "close": float(row[4]),
-                    "volume": float(row[5]),
-                }
+                {"ts": ts, "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "volume": float(row[5])}
             )
     out.sort(key=lambda x: x["ts"])
     return out
@@ -465,11 +458,7 @@ def _atr(candles: List[Candle], period: int = 14) -> float:
     for i in range(-period, 0):
         c = candles[i]
         prev = candles[i - 1]
-        tr = max(
-            c["high"] - c["low"],
-            abs(c["high"] - prev["close"]),
-            abs(c["low"] - prev["close"]),
-        )
+        tr = max(c["high"] - c["low"], abs(c["high"] - prev["close"]), abs(c["low"] - prev["close"]))
         trs.append(tr)
     return sum(trs) / len(trs) if trs else 0.0
 
@@ -534,22 +523,22 @@ def check_structure(candles: List[Candle], ema_period: int = 200) -> CheckResult
     if bullish:
         bias = "LONG"
         score += 2
-        reasons.append(f"Structure: HH/HL (H {h1:.0f}->{h2:.0f}, L {l1:.0f}->{l2:.0f}).")
+        reasons.append(f"HH/HL (H {h1:.0f}->{h2:.0f}, L {l1:.0f}->{l2:.0f}).")
     elif bearish:
         bias = "SHORT"
         score += 2
-        reasons.append(f"Structure: LH/LL (H {h1:.0f}->{h2:.0f}, L {l1:.0f}->{l2:.0f}).")
+        reasons.append(f"LH/LL (H {h1:.0f}->{h2:.0f}, L {l1:.0f}->{l2:.0f}).")
     else:
-        reasons.append("Structure: mixed pivots (range/transition).")
+        reasons.append("Mixed pivots (range/transition).")
 
     if bias == "LONG" and last_close > last_ema:
         score += 2
-        reasons.append(f"EMA{ema_period}: close above.")
+        reasons.append(f"EMA{ema_period} aligned (above).")
     elif bias == "SHORT" and last_close < last_ema:
         score += 2
-        reasons.append(f"EMA{ema_period}: close below.")
+        reasons.append(f"EMA{ema_period} aligned (below).")
     elif bias != "NEUTRAL":
-        reasons.append(f"EMA{ema_period}: not aligned (close {last_close:.0f} vs {last_ema:.0f}).")
+        reasons.append(f"EMA{ema_period} not aligned (close {last_close:.0f} vs {last_ema:.0f}).")
 
     ok = bias in ("LONG", "SHORT") and score >= 2
     return CheckResult(ok, score, 4, bias, reasons, {"close": last_close, "ema": last_ema, "pivots": {"highs": highs, "lows": lows}})
@@ -581,27 +570,27 @@ def check_liquidity(candles: List[Candle], lookback: int = 24, reclaim_required:
     if swept_low:
         bias = "LONG"
         score += 1
-        reasons.append(f"Sweep: sell-side below {recent_low:.0f}.")
+        reasons.append(f"Sweep below {recent_low:.0f}.")
         if reclaim_required and reclaimed_after_low:
             score += 2
-            reasons.append("Reclaim: close back above swept low.")
+            reasons.append("Reclaim confirmed.")
         elif reclaim_required:
-            reasons.append("Reclaim: not yet (wait).")
+            reasons.append("Reclaim missing (wait).")
         else:
             score += 1
     elif swept_high:
         bias = "SHORT"
         score += 1
-        reasons.append(f"Sweep: buy-side above {recent_high:.0f}.")
+        reasons.append(f"Sweep above {recent_high:.0f}.")
         if reclaim_required and reclaimed_after_high:
             score += 2
-            reasons.append("Reclaim: close back below swept high.")
+            reasons.append("Reclaim confirmed.")
         elif reclaim_required:
-            reasons.append("Reclaim: not yet (wait).")
+            reasons.append("Reclaim missing (wait).")
         else:
             score += 1
     else:
-        reasons.append("No clear sweep detected.")
+        reasons.append("No clear sweep.")
 
     ok = score >= (3 if reclaim_required else 2)
     return CheckResult(ok, score, 3, bias, reasons, {"recent_high": recent_high, "recent_low": recent_low, "atr": atr, "margin": margin})
@@ -657,9 +646,9 @@ def check_fvg(candles: List[Candle], max_lookback: int = 80) -> CheckResult:
 
     if close_ok:
         score += 1
-        reasons.append("Close confirms direction vs midpoint.")
+        reasons.append("Close confirms direction.")
     else:
-        reasons.append("Close not confirming (lower confidence).")
+        reasons.append("Close not confirming.")
 
     return CheckResult(score >= 2, score, 3, bias, reasons, {"zone": (kind, z_low, z_high), "mid": mid})
 
@@ -704,7 +693,7 @@ def get_checklist_status_text(symbol: str, include_reasons: bool = True) -> str:
     symbol = _normalize_symbol(symbol)
     res = evaluate_checklist(symbol)
     lines = [
-        "🧠 [AI Checklist]",
+        "🧠 [Setup Checklist]",
         f"Symbol: {symbol}",
         f"Status: {res.status}",
         f"Bias: {res.bias}",
@@ -713,21 +702,21 @@ def get_checklist_status_text(symbol: str, include_reasons: bool = True) -> str:
     if include_reasons:
         lines.append("")
         lines.append("Structure:")
-        for r in res.structure.reasons[:5]:
+        for r in res.structure.reasons[:4]:
             lines.append(f"• {r}")
         lines.append("Liquidity:")
-        for r in res.liquidity.reasons[:5]:
+        for r in res.liquidity.reasons[:4]:
             lines.append(f"• {r}")
         lines.append("FVG:")
-        for r in res.fvg.reasons[:5]:
+        for r in res.fvg.reasons[:4]:
             lines.append(f"• {r}")
+    lines.append(f"Time (UTC): {_iso_utc_now()}")
     return "\n".join(lines)
 
 
 # ============================================================
 # Auto Plan (S/R + ATR + Fibonacci) + Confidence tags
 # ============================================================
-
 
 def _compute_sr(candles: List[Candle], lookback: int) -> Optional[Dict[str, float]]:
     if not candles:
@@ -740,11 +729,6 @@ def _compute_sr(candles: List[Candle], lookback: int) -> Optional[Dict[str, floa
 
 
 def _find_impulse_for_fib(candles: List[Candle], bias: str) -> Optional[Tuple[int, float, int, float]]:
-    """Return (i0, p0, i1, p1) as impulse start/end for fib.
-
-    LONG: (pivot_low -> pivot_high)
-    SHORT: (pivot_high -> pivot_low)
-    """
     bias = (bias or "").upper()
     if bias not in ("LONG", "SHORT") or len(candles) < 20:
         return None
@@ -775,7 +759,6 @@ def _find_impulse_for_fib(candles: List[Candle], bias: str) -> Optional[Tuple[in
 
 
 def _fib_price(p0: float, p1: float, level: float, bias: str) -> float:
-    """Fib retracement price."""
     bias = (bias or "").upper()
     if bias == "LONG":
         return p1 - (p1 - p0) * level
@@ -783,7 +766,6 @@ def _fib_price(p0: float, p1: float, level: float, bias: str) -> float:
 
 
 def _confidence_tag(chk: ChecklistResult) -> str:
-    """Simple tag: scalp / intraday / swing."""
     if not TRADEWATCH_CONFIDENCE_TAGS:
         return "—"
     if "PARTIAL" in chk.status:
@@ -796,7 +778,6 @@ def _confidence_tag(chk: ChecklistResult) -> str:
 
 
 def build_auto_plan(symbol: str) -> Dict[str, Any]:
-    """Builds plan using checklist + SR + ATR + Fib entry zones."""
     sym = _normalize_symbol(symbol)
     candles = fetch_candles_4h(sym, limit=260)
     if not candles:
@@ -840,11 +821,7 @@ def build_auto_plan(symbol: str) -> Dict[str, Any]:
         else:
             sl = sup - atr_buf
 
-        fib_info = {
-            "impulse": (p0, p1),
-            "fib_zone": (z0, z1),
-            "impulse_idx": (i0, i1),
-        }
+        fib_info = {"impulse": (p0, p1), "fib_zone": (z0, z1), "impulse_idx": (i0, i1)}
     else:
         fib_info = None
         if bias == "LONG":
@@ -910,9 +887,8 @@ def _format_plan_block(plan: Dict[str, Any]) -> str:
 
 
 # =========================
-# Auto AI Setup Alerts + /setup_status + TP hit updates
+# Setup Radar + TP updates
 # =========================
-
 
 def _bias_emoji(bias: str) -> str:
     b = (bias or "").upper()
@@ -948,11 +924,11 @@ def _should_alert(sym: str, res: ChecklistResult) -> bool:
         return False
 
     now = datetime.now(timezone.utc)
+    last_alert = SETUP_STATE.get(sym, {}).get("last_alert_utc")
 
-    if is_valid:
-        last_alert = SETUP_STATE.get(sym, {}).get("last_alert_utc")
-        if last_alert and (now - last_alert) < timedelta(minutes=TRADEWATCH_AI_COOLDOWN_MIN):
-            return False
+    # cooldown only for valid setups
+    if is_valid and last_alert and (now - last_alert) < timedelta(minutes=TRADEWATCH_AI_COOLDOWN_MIN):
+        return False
 
     prev = SETUP_STATE.get(sym, {})
     if prev.get("last_status") == res.status and prev.get("last_bias") == res.bias:
@@ -988,8 +964,6 @@ def _seed_plan_state_from_plan(plan: Dict[str, Any]) -> None:
 
 def _price_in_entry_zone(price: float, entry_lo: float, entry_hi: float) -> bool:
     lo, hi = (min(entry_lo, entry_hi), max(entry_lo, entry_hi))
-    if TRADEWATCH_ENTRY_TRIGGER_MODE == "touch":
-        return price <= hi and price >= lo
     return lo <= price <= hi
 
 
@@ -1042,7 +1016,10 @@ def _check_tp_hits(sym: str, send_func: Callable[[str], None]) -> None:
         st["active"] = False
 
 
-def _format_ai_alert(sym: str, res: ChecklistResult) -> str:
+def _format_setup_radar(sym: str, res: ChecklistResult) -> str:
+    """
+    Minimal, important-only. No 'AI SETUP ALERT' and no long fast-check spam.
+    """
     sym = _normalize_symbol(sym)
     se = _status_emoji(res.status)
     be = _bias_emoji(res.bias)
@@ -1057,24 +1034,37 @@ def _format_ai_alert(sym: str, res: ChecklistResult) -> str:
         except Exception:
             plan_block = ""
 
+    # single-line summary of why (short)
+    why = []
+    if res.structure.bias in ("LONG", "SHORT"):
+        why.append(f"Structure {res.structure.bias}")
+    if res.liquidity.ok:
+        why.append("Sweep+reclaim")
+    if res.fvg.ok:
+        why.append("FVG reaction")
+    why_str = " • ".join(why) if why else "No clean confirmation"
+
+    tail = f"\n\n{random.choice(DEGEN_RANDOM)}" if (TRADEWATCH_DEGEN and random.random() < 0.18) else ""
+
     return (
-        f"{se} [AI SETUP ALERT]\n"
+        f"{se} [Setup Radar]\n"
         f"Pair: {sym}\n"
         f"Bias: {be} {res.bias}\n"
-        f"Score: {res.score}/{res.max_score}\n"
-        f"Status: {res.status}"
-        f"{plan_block}\n\n"
-        f"Fast checks:\n"
-        f"• Structure: {res.structure.bias} ({res.structure.score}/{res.structure.max_score})\n"
-        f"• Liquidity: {res.liquidity.bias} ({res.liquidity.score}/{res.liquidity.max_score})\n"
-        f"• FVG: {res.fvg.bias} ({res.fvg.score}/{res.fvg.max_score})\n"
+        f"Status: {res.status} | Score: {res.score}/{res.max_score}\n"
+        f"Note: {why_str}"
+        f"{plan_block}\n"
         f"Time (UTC): {_iso_utc_now()}"
+        f"{tail}"
     )
 
 
 def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
+    """
+    Compatibility name kept.
+    This is now "Setup Radar" (minimal).
+    """
     if not TRADEWATCH_AI_ALERTS:
-        print("[TradeWatch] AI setup alerts disabled (TRADEWATCH_AI_ALERTS != 1)")
+        print("[TradeWatch] Setup Radar disabled (TRADEWATCH_AI_ALERTS != 1)")
         return
 
     symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
@@ -1088,23 +1078,23 @@ def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
             SETUP_STATE[sym]["last_bias"] = r0.bias
             SETUP_STATE[sym]["last_score"] = f"{r0.score}/{r0.max_score}"
         except Exception as e:
-            STATE["last_error"] = f"AI init error {sym}: {e}"
+            STATE["last_error"] = f"Setup init error {sym}: {e}"
 
-    print("[TradeWatch] AI setup alerts started ✅")
+    print("[TradeWatch] Setup Radar started ✅")
 
     last_tp_poll = 0.0
 
     while True:
         try:
             now = time.time()
-            STATE["last_ai_scan_utc"] = datetime.now(timezone.utc)
+            STATE["last_setup_scan_utc"] = datetime.now(timezone.utc)
 
             for s in symbols:
                 sym = _normalize_symbol(s)
                 res = evaluate_checklist(sym)
 
                 if _should_alert(sym, res):
-                    send_func(_format_ai_alert(sym, res))
+                    send_func(_format_setup_radar(sym, res))
                     SETUP_STATE[sym]["last_alert_utc"] = datetime.now(timezone.utc)
 
                 SETUP_STATE[sym]["last_status"] = res.status
@@ -1118,29 +1108,24 @@ def start_ai_setup_alerts(send_func: Callable[[str], None]) -> None:
                 last_tp_poll = now
 
         except Exception as e:
-            STATE["last_error"] = f"AI alerts error: {e}"
-            print("[TradeWatch] AI alerts error:", e)
+            STATE["last_error"] = f"Setup Radar error: {e}"
+            print("[TradeWatch] Setup Radar error:", e)
 
         time.sleep(TRADEWATCH_AI_INTERVAL_SEC)
 
 
 def start_tp_hit_watcher(send_func: Callable[[str], None]) -> None:
-    """Backward-compatible TP watcher.
-
-    By default, this does **nothing** because TP polling is handled inside
-    `start_ai_setup_alerts()`.
-
-    If you *do* want a standalone TP poller (e.g., scheduler expects it), set:
-      TRADEWATCH_TP_STANDALONE=1
-
-    Warning: running this AND the TP polling inside AI loop can duplicate alerts.
+    """
+    Standalone TP watcher (optional).
+    By default TP polling is done inside Setup Radar loop.
+    Enable with TRADEWATCH_TP_STANDALONE=1 if you need it.
     """
     if not TRADEWATCH_TP_ALERTS:
         print("[TradeWatch] TP hit watcher disabled (TRADEWATCH_TP_ALERTS != 1)")
         return
 
     if not TRADEWATCH_TP_STANDALONE:
-        print("[TradeWatch] TP hit watcher not started (TP handled in AI loop). Set TRADEWATCH_TP_STANDALONE=1 to enable.")
+        print("[TradeWatch] TP watcher not started (TP handled in Setup Radar). Set TRADEWATCH_TP_STANDALONE=1 to enable.")
         return
 
     print("[TradeWatch] TP hit watcher started ✅")
@@ -1159,7 +1144,7 @@ def start_tp_hit_watcher(send_func: Callable[[str], None]) -> None:
 
 def get_setup_status_text() -> str:
     symbols = TRADEWATCH_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
-    lines = ["🧠 [AI Setup Status]"]
+    lines = ["🧠 [Setup Radar Status]"]
     for s in symbols:
         sym = _normalize_symbol(s)
         st = SETUP_STATE.get(sym, {})
@@ -1192,7 +1177,6 @@ def get_plan_status_text() -> str:
 # Main: Trade execution watcher
 # =========================
 
-
 def start_tradewatch(send_func: Callable[[str], None]) -> None:
     if not TRADEWATCH_ENABLED:
         print("[TradeWatch] Disabled (TRADEWATCH_ENABLED != 1)")
@@ -1204,7 +1188,7 @@ def start_tradewatch(send_func: Callable[[str], None]) -> None:
         STATE["running"] = False
         return
 
-    print("[TradeWatch] Watcher started (FUTURES fills)...")
+    print("[TradeWatch] Watcher started ✅ (FUTURES fills)...")
     STATE["running"] = True
 
     seen: set[str] = set()
@@ -1222,7 +1206,6 @@ def start_tradewatch(send_func: Callable[[str], None]) -> None:
                         seen.add(str(tid))
                 first_run = False
             else:
-
                 def _ctime(x: dict) -> int:
                     try:
                         return int(x.get("cTime") or 0)
@@ -1254,7 +1237,7 @@ def start_tradewatch(send_func: Callable[[str], None]) -> None:
                         except Exception as ce:
                             checklist_block = f"🧠 Checklist: unavailable ({ce})"
 
-                    send_func(_format_message(f, checklist_block=checklist_block))
+                    send_func(_format_execution_message(f, checklist_block=checklist_block))
 
                 if len(seen) > 4000:
                     seen = set(list(seen)[-2500:])
@@ -1264,7 +1247,8 @@ def start_tradewatch(send_func: Callable[[str], None]) -> None:
             print("[TradeWatch] Error:", e)
 
         time.sleep(TRADEWATCH_POLL_INTERVAL_SEC)
-        
+
+
 def start_position_order_watcher(send_func: Callable[[str], None]) -> None:
     """
     Watches for changes in:
@@ -1289,25 +1273,18 @@ def start_position_order_watcher(send_func: Callable[[str], None]) -> None:
             cur = get_positions_snapshot(symbols)
 
             if last is None:
-                # first snapshot, do not spam
-                last = cur
+                last = cur  # first snapshot, do not spam
             else:
-                # detect changes
                 changed = False
 
                 for sym in symbols:
                     a = last.get(sym) or {}
                     b = cur.get(sym) or {}
 
-                    # position changes
                     if a.get("has_position") != b.get("has_position"):
                         changed = True
-
-                    # size/side changes
                     if a.get("side") != b.get("side") or a.get("size") != b.get("size"):
                         changed = True
-
-                    # TP/SL changes
                     if a.get("tp") != b.get("tp") or a.get("sl") != b.get("sl"):
                         changed = True
 
