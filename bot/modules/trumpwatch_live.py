@@ -326,8 +326,15 @@ def _norm(s: str) -> str:
 
 
 def _url_key(url: str) -> str:
-    """Canonical dedup key derived from URL — source-independent."""
-    # Strip query params and trailing slashes, lowercase
+    """
+    Canonical dedup key — extracts the numeric post ID so that
+    trumpstruth.org/statuses/37000 and truthsocial.com/.../37000
+    both resolve to the same key: 'post:37000'.
+    Falls back to the cleaned full URL if no ID found.
+    """
+    m = re.search(r"/(\d{4,})/?$", (url or "").split("?")[0])
+    if m:
+        return f"post:{m.group(1)}"
     return re.sub(r"[?#].*", "", url).rstrip("/").lower()
 
 
