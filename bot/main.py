@@ -121,24 +121,6 @@ def start_scheduler():
         )
         print("📊 CryptoWatch Weekly scheduled (Sun 18:00) ✅", flush=True)
 
-    # ── TradeWatch — kept as event-driven threads (different architecture)
-    if os.getenv("TRADEWATCH_ENABLED", "0") == "1":
-        try:
-            from bot.modules.tradewatch import start_tradewatch
-            threading.Thread(target=start_tradewatch, args=(send_text,), daemon=True).start()
-            if os.getenv("TRADEWATCH_AI_ALERTS", "0") == "1":
-                from bot.modules.tradewatch import start_ai_setup_alerts
-                threading.Thread(target=start_ai_setup_alerts, args=(send_text,), daemon=True).start()
-            if os.getenv("TRADEWATCH_TP_ALERTS", "0") == "1":
-                from bot.modules.tradewatch import start_tp_hit_watcher
-                threading.Thread(target=start_tp_hit_watcher, args=(send_text,), daemon=True).start()
-            if os.getenv("TRADEWATCH_POS_ORDERS_WATCH", "0") == "1":
-                from bot.modules.tradewatch import start_position_order_watcher
-                threading.Thread(target=start_position_order_watcher, args=(send_text,), daemon=True).start()
-            print("📈 TradeWatch threads started ✅", flush=True)
-        except Exception as e:
-            print(f"⚠️ TradeWatch failed to start: {e}", flush=True)
-
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
 
@@ -171,35 +153,7 @@ def _atr_simple(candles, period=14):
     ]
     return sum(trs) / len(trs) if trs else 0.0
 
-def _build_plan(symbol: str):
-    from bot.modules import tradewatch as tw
-    sym     = symbol.replace(".P", "").upper()
-    candles = tw.fetch_candles_4h(sym, limit=220)
-    if not candles:
-        return {"symbol": sym, "error": "No candles returned."}
-    levels  = _compute_levels_from_candles(candles, lookback=48)
-    atr     = _atr_simple(candles, 14)
-    chk     = tw.evaluate_checklist(sym)
-    last, sup, res = levels["last"], levels["support"], levels["resistance"]
-    buf     = max(atr * 0.35, last * 0.0015)
-    if chk.bias == "LONG":
-        return {"symbol": sym, "last": last, "support": sup, "resistance": res,
-                "checklist_status": chk.status, "bias": "LONG", "score": f"{chk.score}/{chk.max_score}",
-                "entry_zone": (sup + buf*0.2, sup + buf*1.2), "sl": sup - buf*1.2,
-                "tps": [last + (res-last)*0.35, last + (res-last)*0.70, res],
-                "notes": "Prefer long after sweep/reclaim + reaction wick on 4H."}
-    elif chk.bias == "SHORT":
-        return {"symbol": sym, "last": last, "support": sup, "resistance": res,
-                "checklist_status": chk.status, "bias": "SHORT", "score": f"{chk.score}/{chk.max_score}",
-                "entry_zone": (res - buf*1.2, res - buf*0.2), "sl": res + buf*1.2,
-                "tps": [last - (last-sup)*0.35, last - (last-sup)*0.70, sup],
-                "notes": "Prefer short after failure to reclaim resistance + bearish FVG reaction."}
-    else:
-        return {"symbol": sym, "last": last, "support": sup, "resistance": res,
-                "checklist_status": chk.status, "bias": "NEUTRAL", "score": f"{chk.score}/{chk.max_score}",
-                "entry_zone": (sup + buf*0.2, sup + buf*1.0), "sl": sup - buf*1.2,
-                "tps": [last, last + (res-last)*0.50, res],
-                "notes": "Neutral range: longs near support only, avoid mid-range chop."}
+
 
 
 # ─── Health summary ──────────────────────────────────────────────────────────
@@ -293,11 +247,7 @@ def _handle_command(text: str, text_raw: str):
             "📊 *CryptoWatch*\n"
             "/cw_daily — Daily market brief\n"
             "/cw_weekly — Weekly sentiment\n\n"
-            "📈 *TradeWatch*\n"
-            "/tradewatch_status — TradeWatch status\n"
-            "/checklist [SYMBOL] — Pattern checklist\n"
-            "/levels — Key S/R levels (BTC + ETH)\n"
-            "/ai_plan — AI trade plan (BTC + ETH)\n\n"
+
             "📑 *Positions & Orders*\n"
             "/position — Current Bitget futures positions\n"
             "/orders [SYMBOL] — Open TP/SL orders\n"
@@ -411,72 +361,7 @@ def _handle_command(text: str, text_raw: str):
         send_text(build_positions_and_orders_message())
         return
 
-    # ── /tradewatch_status ────────────────────────────────────────────────────
-    if text.startswith("/tradewatch_status"):
-        try:
-            from bot.modules.tradewatch import get_status
-            send_text(get_status())
-        except Exception as e:
-            send_text(f"📈 [TradeWatch] Status error: {e}")
-        return
 
-    # ── /checklist ────────────────────────────────────────────────────────────
-    if text.startswith("/checklist"):
-        parts  = text_raw.split()
-        symbol = parts[1].strip().upper().replace(".P", "") if len(parts) > 1 else "BTCUSDT"
-        try:
-            from bot.modules.tradewatch import get_checklist_status_text
-            send_text(get_checklist_status_text(symbol, include_reasons=True))
-        except Exception as e:
-            send_text(f"🧠 [Checklist] Error: {e}")
-        return
-
-    # ── /levels ───────────────────────────────────────────────────────────────
-    if text.startswith("/levels"):
-        try:
-            from bot.modules import tradewatch as tw
-            btc = tw.fetch_candles_4h("BTCUSDT", limit=220)
-            eth = tw.fetch_candles_4h("ETHUSDT", limit=220)
-            b   = _compute_levels_from_candles(btc)
-            e   = _compute_levels_from_candles(eth)
-            if not b or not e:
-                send_text("📌 [Levels] Not enough candle data.")
-            else:
-                send_text(
-                    "📌 *Key Levels (4H)*\n\n"
-                    f"₿ BTCUSDT\n• Last: {b['last']:.0f}\n• Support: {b['support']:.0f}\n• Resistance: {b['resistance']:.0f}\n\n"
-                    f"Ξ ETHUSDT\n• Last: {e['last']:.0f}\n• Support: {e['support']:.0f}\n• Resistance: {e['resistance']:.0f}"
-                )
-        except Exception as e:
-            send_text(f"📌 [Levels] Error: {e}")
-        return
-
-    # ── /ai_plan ──────────────────────────────────────────────────────────────
-    if text.startswith("/ai_plan"):
-        try:
-            b = _build_plan("BTCUSDT")
-            e = _build_plan("ETHUSDT")
-            if b.get("error") or e.get("error"):
-                send_text(f"🧠 [Plan] Error: {b.get('error') or e.get('error')}")
-            else:
-                send_text(
-                    "🧠 *AI Trade Plan (4H)*\n\n"
-                    f"₿ BTCUSDT\n"
-                    f"• Status: {b['checklist_status']} | Bias: {b['bias']} | Score: {b['score']}\n"
-                    f"• Key: S {b['support']:.0f} / R {b['resistance']:.0f} | Last {b['last']:.0f}\n"
-                    f"• Entry: {b['entry_zone'][0]:.0f}–{b['entry_zone'][1]:.0f} | SL: {b['sl']:.0f}\n"
-                    f"• TP1: {b['tps'][0]:.0f} | TP2: {b['tps'][1]:.0f} | TP3: {b['tps'][2]:.0f}\n"
-                    f"• {b['notes']}\n\n"
-                    f"Ξ ETHUSDT\n"
-                    f"• Status: {e['checklist_status']} | Bias: {e['bias']} | Score: {e['score']}\n"
-                    f"• Key: S {e['support']:.0f} / R {e['resistance']:.0f} | Last {e['last']:.0f}\n"
-                    f"• Entry: {e['entry_zone'][0]:.0f}–{e['entry_zone'][1]:.0f} | SL: {e['sl']:.0f}\n"
-                    f"• TP1: {e['tps'][0]:.0f} | TP2: {e['tps'][1]:.0f} | TP3: {e['tps'][2]:.0f}\n"
-                    f"• {e['notes']}"
-                )
-        except Exception as e:
-            send_text(f"🧠 [Plan] Error: {e}")
-        return
 
 
 # ─── Entrypoint ──────────────────────────────────────────────────────────────
