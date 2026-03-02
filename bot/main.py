@@ -7,7 +7,7 @@ Polling architecture (all via APScheduler, no raw threads for polling):
   FedWatch     → every 5min
   CryptoWatch  → weekly cron (Sunday 18:00)
   CryptoDaily  → daily cron  (15:28)
-  TradeWatch   → own threads (event-driven, kept as-is)
+  PositionWatch → every 10s (open/close/TP/SL detection)
 
 Command loop runs in a single daemon thread.
 All poll functions are wrapped so one crash never kills the scheduler.
@@ -37,6 +37,21 @@ import bot.modules.cryptowatch_daily as cryptowatch_daily
 import bot.modules.trumpwatch_live as trumpwatch_live
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
+
+# ─── PositionWatch state ─────────────────────────────────────────────────────
+# Tracks last known snapshot per symbol so we can detect changes.
+# Initialised as None — first poll just seeds the baseline, no alerts.
+from bot.datafeed_bitget import (
+    _fetch_current_futures_position,
+    _fetch_pending_tp_sl_orders,
+    _position_is_open,
+    _to_float,
+    iso_utc_now,
+    BITGET_SYMBOLS,
+)
+
+_POS_SNAPSHOT: dict = {}   # { "BTCUSDT": { has_position, side, size, entry, tp, sl }, ... }
+_POS_INITIALISED = False
 
 # ─── Scheduler (module-level so commands can inspect jobs) ───────────────────
 
@@ -83,6 +98,112 @@ def _err(module: str, exc: Exception):
 
 # ─── Scheduler setup ─────────────────────────────────────────────────────────
 
+def _job_positionwatch():
+    try:
+        _poll_positions()
+    except Exception as e:
+        _err("PositionWatch", e)
+
+
+def _poll_positions():
+    global _POS_INITIALISED, _POS_SNAPSHOT
+
+    symbols = BITGET_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
+
+    for sym in symbols:
+        sym = sym.strip().upper()
+        try:
+            pos    = _fetch_current_futures_position(sym)
+            orders = _fetch_pending_tp_sl_orders(sym)
+            tps    = sorted([_to_float(x) for x in (orders.get("tp") or [])])
+            sls    = sorted([_to_float(x) for x in (orders.get("sl") or [])])
+            is_open = _position_is_open(pos)
+
+            cur = {
+                "has_position": is_open,
+                "side":  (pos.get("holdSide") or "").upper() if pos else "",
+                "size":  _to_float(pos.get("total") or pos.get("available") or 0) if pos else 0.0,
+                "entry": _to_float(pos.get("openPriceAvg") or pos.get("openPrice") or 0) if pos else 0.0,
+                "lev":   pos.get("leverage", "?") if pos else "?",
+                "tp":    tps,
+                "sl":    sls,
+            }
+
+            prev = _POS_SNAPSHOT.get(sym)
+
+            # First run — seed baseline silently
+            if not _POS_INITIALISED:
+                _POS_SNAPSHOT[sym] = cur
+                continue
+
+            if prev is None:
+                _POS_SNAPSHOT[sym] = cur
+                continue
+
+            # ── Detect changes ───────────────────────────────────────────
+            side_emoji = "🟢" if cur["side"] == "LONG" else "🔴"
+
+            # Position opened
+            if not prev["has_position"] and cur["has_position"]:
+                send_text(
+                    f"📘 *Position Opened*\n"
+                    f"Pair: {sym}\n"
+                    f"Side: {side_emoji} {cur['side']}\n"
+                    f"Entry: {cur['entry']:.2f}\n"
+                    f"Size: {cur['size']}\n"
+                    f"Leverage: {cur['lev']}x\n"
+                    f"Time (UTC): {iso_utc_now()}"
+                )
+
+            # Position closed
+            elif prev["has_position"] and not cur["has_position"]:
+                send_text(
+                    f"🏁 *Position Closed*\n"
+                    f"Pair: {sym}\n"
+                    f"Side was: {side_emoji if prev['side'] else '⚪'} {prev['side'] or '?'}\n"
+                    f"Time (UTC): {iso_utc_now()}"
+                )
+
+            elif cur["has_position"] and prev["has_position"]:
+                prev_tps = prev.get("tp") or []
+                cur_tps  = cur.get("tp") or []
+                prev_sls = prev.get("sl") or []
+                cur_sls  = cur.get("sl") or []
+
+                # TP hit — a TP price disappeared from the order list
+                for tp in prev_tps:
+                    if tp not in cur_tps:
+                        send_text(
+                            f"✅ *TP Hit*\n"
+                            f"Pair: {sym}\n"
+                            f"Side: {side_emoji} {cur['side']}\n"
+                            f"TP: {tp}\n"
+                            f"Time (UTC): {iso_utc_now()}"
+                        )
+
+                # SL hit — SL price disappeared and position still open (partial fill)
+                # or position closed handles full SL — detect via SL disappearing
+                for sl in prev_sls:
+                    if sl not in cur_sls and not cur["has_position"]:
+                        send_text(
+                            f"❌ *SL Hit*\n"
+                            f"Pair: {sym}\n"
+                            f"Side was: {side_emoji} {prev['side']}\n"
+                            f"SL: {sl}\n"
+                            f"Time (UTC): {iso_utc_now()}"
+                        )
+
+            _POS_SNAPSHOT[sym] = cur
+
+        except Exception as e:
+            print(f"[PositionWatch] Error for {sym}: {e}", flush=True)
+
+    # Mark initialised after first full pass
+    if not _POS_INITIALISED:
+        _POS_INITIALISED = True
+        print("📘 PositionWatch baseline set ✅", flush=True)
+
+
 def _on_job_error(event):
     print(f"[APScheduler] Job {event.job_id} raised: {event.exception}", flush=True)
 
@@ -120,6 +241,13 @@ def start_scheduler():
             id="cryptowatch_weekly", max_instances=1,
         )
         print("📊 CryptoWatch Weekly scheduled (Sun 18:00) ✅", flush=True)
+
+    # ── PositionWatch — every 10s
+    SCHED.add_job(
+        _job_positionwatch, "interval", seconds=10,
+        id="positionwatch", max_instances=1, misfire_grace_time=5,
+    )
+    print("📘 PositionWatch scheduled (10s) ✅", flush=True)
 
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
