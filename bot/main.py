@@ -20,7 +20,7 @@ import json
 import platform
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.events import EVENT_JOB_ERROR
@@ -143,6 +143,7 @@ for sym in symbols:
 
         # Position opened
         if not prev["has_position"] and cur["has_position"]:
+            cur["opened_at"] = datetime.now(timezone.utc)
             send_text(
                 f"📘 *Position Opened*\n"
                 f"Pair: {sym}\n"
@@ -155,10 +156,44 @@ for sym in symbols:
 
         # Position closed
         elif prev["has_position"] and not cur["has_position"]:
+            prev_side = prev.get("side") or "?"
+            prev_emoji = "🟢" if prev_side == "LONG" else "🔴"
+            entry = prev.get("entry", 0.0)
+
+            # Fetch last price for PnL estimate
+            try:
+                from bot.datafeed_bitget import get_ticker
+                last_px = get_ticker(sym) or 0.0
+            except Exception:
+                last_px = 0.0
+
+            # PnL % from entry to close price
+            pnl_pct = ""
+            pnl_sign = ""
+            if entry and last_px:
+                raw = (last_px - entry) / entry * 100
+                if prev_side == "SHORT":
+                    raw = -raw
+                lev = _to_float(prev.get("lev") or 1)
+                leveraged = raw * lev
+                sign = "🟢 +" if leveraged >= 0 else "🔴 "
+                pnl_pct = f"\nEst. PnL: {sign}{leveraged:.1f}% (@ {last_px:.2f})"
+
+            # Hold duration
+            duration = ""
+            opened_at = prev.get("opened_at")
+            if opened_at:
+                delta = datetime.now(timezone.utc) - opened_at
+                h, rem = divmod(int(delta.total_seconds()), 3600)
+                m = rem // 60
+                duration = f"\nHeld: {h}h {m:02d}m"
+
             send_text(
                 f"🏁 *Position Closed*\n"
                 f"Pair: {sym}\n"
-                f"Side was: {side_emoji if prev['side'] else '⚪'} {prev['side'] or '?'}\n"
+                f"Side: {prev_emoji} {prev_side}"
+                f"{pnl_pct}"
+                f"{duration}\n"
                 f"Time (UTC): {iso_utc_now()}"
             )
 
@@ -202,6 +237,80 @@ if not _POS_INITIALISED:
     print("📘 PositionWatch baseline set ✅", flush=True)
 ```
 
+# ─── WeeklyPerf ──────────────────────────────────────────────────────────────
+
+def _job_weekly_perf():
+try:
+_send_weekly_perf()
+except Exception as e:
+_err(“WeeklyPerf”, e)
+
+def _send_weekly_perf():
+“””
+Monday 09:00 — INFINEX weekly performance recap.
+Fetches ETH 7-day OHLC from Bitget 4H candles and posts a clean summary.
+“””
+from bot.datafeed_bitget import _public_get, BITGET_PRODUCT_TYPE
+import json as _json
+
+```
+sym = os.getenv("INFINEX_SYMBOL", "ETHUSDT")
+
+try:
+    raw = _public_get(
+        "/api/v2/mix/market/candles",
+        {"symbol": sym, "granularity": "4H", "limit": "42",
+         "productType": BITGET_PRODUCT_TYPE}
+    )
+    data = (raw or {}).get("data") or []
+    closes = [float(r[4]) for r in data if isinstance(r, (list,tuple)) and len(r) >= 5]
+    highs  = [float(r[2]) for r in data if isinstance(r, (list,tuple)) and len(r) >= 5]
+    lows   = [float(r[3]) for r in data if isinstance(r, (list,tuple)) and len(r) >= 5]
+except Exception as e:
+    send_text(f"📊 [WeeklyPerf] Could not fetch ETH data: {e}")
+    return
+
+if not closes:
+    send_text("📊 [WeeklyPerf] No candle data available.")
+    return
+
+open_px  = closes[0]
+close_px = closes[-1]
+high_px  = max(highs)
+low_px   = min(lows)
+chg_pct  = (close_px - open_px) / open_px * 100
+
+chg_emoji = "🟢" if chg_pct >= 0 else "🔴"
+sign      = "+" if chg_pct >= 0 else ""
+
+now = datetime.now(timezone.utc)
+week_end   = (now - timedelta(days=1)).strftime("%b %d")
+week_start = (now - timedelta(days=7)).strftime("%b %d")
+
+send_text(
+    f"📊 *INFINEX Weekly Performance*\n"
+    f"Week: {week_start} → {week_end}\n\n"
+    f"ETH/USDT — 7D\n"
+    f"{chg_emoji} Change: {sign}{chg_pct:.1f}%\n"
+    f"Open:  ${open_px:,.2f}\n"
+    f"Close: ${close_px:,.2f}\n"
+    f"High:  ${high_px:,.2f}\n"
+    f"Low:   ${low_px:,.2f}\n\n"
+    f"Strategy: INFINEX ETH 3H — Sentinel V2 & Ascent V2\n"
+    f"Copy trading: https://share.glassgs.com/sl/H44FZLYY60X3"
+)
+```
+
+def _job_fedwatch_monday():
+“”“Monday 08:00 — push current rate probability to the group.”””
+try:
+if hasattr(fedwatch, “show_rate_probability”):
+fedwatch.show_rate_probability()
+else:
+fedwatch.show_next_event()
+except Exception as e:
+_err(“FedWatch Monday”, e)
+
 def _on_job_error(event):
 print(f”[APScheduler] Job {event.job_id} raised: {event.exception}”, flush=True)
 
@@ -225,13 +334,13 @@ if os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
     )
     print("🏦 FedWatch scheduled (5min) ✅", flush=True)
 
-# ── CryptoWatch Daily — 15:28 every day
+# ── CryptoWatch Daily — 13:00 weekdays only (Mon–Fri)
 if os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() in ("1", "true", "yes", "on"):
     SCHED.add_job(
-        _job_cryptowatch_daily, "cron", hour=15, minute=28,
+        _job_cryptowatch_daily, "cron", day_of_week="mon-fri", hour=13, minute=0,
         id="cryptowatch_daily", max_instances=1,
     )
-    print("📊 CryptoWatch Daily scheduled (15:28) ✅", flush=True)
+    print("📊 CryptoWatch Daily scheduled (Mon–Fri 13:00) ✅", flush=True)
 
 # ── CryptoWatch Weekly — Sunday 18:00
 if os.getenv("ENABLE_CRYPTOWATCH_WEEKLY", "true").lower() in ("1", "true", "yes", "on"):
@@ -247,6 +356,20 @@ SCHED.add_job(
     id="positionwatch", max_instances=1, misfire_grace_time=5,
 )
 print("📘 PositionWatch scheduled (10s) ✅", flush=True)
+
+# ── WeeklyPerf — Monday 09:00
+SCHED.add_job(
+    _job_weekly_perf, "cron", day_of_week="mon", hour=9, minute=0,
+    id="weekly_perf", max_instances=1,
+)
+print("📊 WeeklyPerf scheduled (Mon 09:00) ✅", flush=True)
+
+# ── FedWatch Monday rate probability push — Monday 08:00
+SCHED.add_job(
+    _job_fedwatch_monday, "cron", day_of_week="mon", hour=8, minute=0,
+    id="fedwatch_monday", max_instances=1,
+)
+print("🏦 FedWatch Monday push scheduled (Mon 08:00) ✅", flush=True)
 
 SCHED.start()
 print("🕒 APScheduler started ✅", flush=True)
@@ -442,6 +565,13 @@ if text.startswith("/tw_recent"):
         trumpwatch_live.show_recent()
     except Exception as e:
         send_text(f"🍊 [TrumpWatch] Recent error: {e}")
+    return
+
+if text.startswith("/tw_sentiment"):
+    try:
+        trumpwatch_live.show_sentiment()
+    except Exception as e:
+        send_text(f"🍊 [TrumpWatch] Sentiment error: {e}")
     return
 
 # ── /fedwatch ─────────────────────────────────────────────────────────────
