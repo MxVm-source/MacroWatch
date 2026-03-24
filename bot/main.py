@@ -39,6 +39,7 @@ import bot.modules.cryptowatch     as cryptowatch
 import bot.modules.cryptowatch_daily as cryptowatch_daily
 import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.correlwatch     as correlwatch
+from bot.modules.pnlcard import send_card as send_pnl_card
 import bot.modules.whalewatch      as whalewatch
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
@@ -226,21 +227,41 @@ def _poll_positions():
                     duration = f"\nHeld: {h}h {m:02d}m"
 
                 # Streak
-                streak_line = ""
+                streak_str = ""
                 if entry and last_px:
                     s = _update_streak(leveraged >= 0)
                     if s:
-                        streak_line = f"\n{s}"
+                        streak_str = s
 
-                send_text(
-                    f"🏁 *Position Closed*\n"
-                    f"Pair: {sym}\n"
-                    f"Side: {prev_emoji} {prev_side}"
-                    f"{pnl_pct}"
-                    f"{duration}"
-                    f"{streak_line}\n"
-                    f"Time (UTC): {iso_utc_now()}"
-                )
+                # ── Try image card first, fall back to text ──────────────
+                card_sent = False
+                if entry and last_px:
+                    try:
+                        h_held, rem = divmod(int((datetime.now(timezone.utc) - opened_at).total_seconds()), 3600) if opened_at else (0, 0)
+                        hold_str = f"{h_held}h {rem // 60:02d}m" if opened_at else "—"
+                        card_sent = send_pnl_card(
+                            pair    = sym,
+                            side    = prev_side,
+                            entry   = entry,
+                            exit_px = last_px,
+                            pnl_pct = leveraged,
+                            hold    = hold_str,
+                            streak  = streak_str,
+                        )
+                    except Exception as ce:
+                        log.warning(f"PnL card failed: {ce}")
+
+                if not card_sent:
+                    streak_line = f"\n{streak_str}" if streak_str else ""
+                    send_text(
+                        f"🏁 *Position Closed*\n"
+                        f"Pair: {sym}\n"
+                        f"Side: {prev_emoji} {prev_side}"
+                        f"{pnl_pct}"
+                        f"{duration}"
+                        f"{streak_line}\n"
+                        f"Time (UTC): {iso_utc_now()}"
+                    )
 
             elif cur["has_position"] and prev["has_position"]:
                 prev_tps = prev.get("tp") or []
