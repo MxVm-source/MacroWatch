@@ -40,6 +40,7 @@ import bot.modules.cryptowatch_daily as cryptowatch_daily
 import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.correlwatch     as correlwatch
 from bot.modules.pnlcard import send_card as send_pnl_card
+from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
@@ -416,11 +417,34 @@ def _send_weekly_perf():
         except Exception as e:
             trades_section = f"\nTrade history unavailable: {str(e)[:80]}"
 
-    send_text(
-        f"📊 *Weekly Recap — {week_start_str} → {week_end_str}*\n\n"
-        f"{eth_line}"
-        f"{trades_section}"
-    )
+    # ── Send image first, fall back to text ────────────────────────────────
+    # Parse eth_chg float from eth_line if available
+    _eth_chg_val = None
+    try:
+        import re as _re
+        _m = _re.search(r"([+-][\d.]+)%", eth_line)
+        if _m:
+            _eth_chg_val = float(_m.group(1))
+    except Exception:
+        pass
+
+    _img_sent = False
+    try:
+        _img_sent = send_weekly_image(
+            trades     = closed if BITGET_API_KEY and closed else [],
+            week_start = week_start_str,
+            week_end   = week_end_str,
+            eth_chg    = _eth_chg_val,
+        )
+    except Exception as _ie:
+        log.warning(f"Weekly image failed: {_ie}")
+
+    if not _img_sent:
+        send_text(
+            f"📊 *Weekly Recap — {week_start_str} → {week_end_str}*\n\n"
+            f"{eth_line}"
+            f"{trades_section}"
+        )
 
 
 def _job_monthly_perf():
