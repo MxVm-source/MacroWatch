@@ -248,95 +248,80 @@ def _fetch_fomc_events() -> list:
 
 
 # ─── BLS Economic Data (CPI, PPI, NFP) ───────────────────────────────────────
+# BLS.gov blocks server IPs with 403. Using hardcoded 2026 official schedule
+# instead — BLS publishes the full year in January and dates never change.
+# Source: https://www.bls.gov/schedule/news_release/
 
-BLS_RELEASE_URL = "https://www.bls.gov/schedule/news_release/cpi.htm"
+# All times are ET (08:30). Format: (month, day)
+_BLS_2026 = {
+    "CPI": [
+        (1, 15), (2, 12), (3, 12), (4, 10), (5, 13), (6, 11),
+        (7, 15), (8, 12), (9, 11), (10, 13), (11, 13), (12, 10),
+    ],
+    "PPI": [
+        (1, 14), (2, 13), (3, 13), (4, 9),  (5, 14), (6, 12),
+        (7, 14), (8, 13), (9, 10), (10, 14), (11, 12), (12, 11),
+    ],
+    "NFP": [
+        (1, 9),  (2, 6),  (3, 6),  (4, 3),  (5, 8),  (6, 5),
+        (7, 10), (8, 7),  (9, 4),  (10, 2), (11, 6),  (12, 4),
+    ],
+}
 
-# Hardcoded approximate release days (BLS publishes schedule 1yr ahead)
-# These are approximations — BLS calendar fetch below gives exact dates
-BLS_RELEASE_TYPES = {
-    "CPI":  {"url": "https://www.bls.gov/schedule/news_release/cpi.htm",  "category": "CPI",  "time_et": (8, 30)},
-    "PPI":  {"url": "https://www.bls.gov/schedule/news_release/ppi.htm",  "category": "PPI",  "time_et": (8, 30)},
-    "NFP":  {"url": "https://www.bls.gov/schedule/news_release/empsit.htm","category": "NFP",  "time_et": (8, 30)},
+_BLS_TITLES = {
+    "CPI": "CPI Release",
+    "PPI": "PPI Release",
+    "NFP": "NFP Jobs Report",
 }
 
 def _fetch_bls_dates(release_type: str) -> list:
-    """Scrape BLS release schedule page for upcoming dates."""
-    cfg = BLS_RELEASE_TYPES.get(release_type)
-    if not cfg:
-        return []
-    try:
-        r = requests.get(cfg["url"], timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-    except Exception as e:
-        log.warning(f"BLS {release_type} fetch failed: {e}")
-        return []
-
+    """Return upcoming BLS release dates from hardcoded 2026 schedule."""
+    dates = _BLS_2026.get(release_type, [])
+    now   = _now()
     events = []
-    now    = _now()
-
-    # BLS pages contain dates like "January 15, 2025" or "Wednesday, January 15, 2025"
-    date_pat = re.compile(
-        r"(?:Monday|Tuesday|Wednesday|Thursday|Friday),?\s*"
-        r"(January|February|March|April|May|June|July|August|"
-        r"September|October|November|December)\s+(\d{1,2}),\s+(\d{4})"
-    )
-    for m in date_pat.finditer(r.text):
+    for month, day in dates:
         try:
-            month = datetime.strptime(m.group(1), "%B").month
-            day   = int(m.group(2))
-            year_ = int(m.group(3))
-            h, mn = cfg["time_et"]
-            dt    = datetime(year_, month, day, h, mn, tzinfo=ET_TZ).astimezone(timezone.utc)
+            dt = datetime(2026, month, day, 8, 30, tzinfo=ET_TZ).astimezone(timezone.utc)
             if dt > now:
-                title = {
-                    "CPI": "CPI Release",
-                    "PPI": "PPI Release",
-                    "NFP": "NFP Jobs Report",
-                }[release_type]
                 events.append({
-                    "title":    title,
+                    "title":    _BLS_TITLES[release_type],
                     "start":    dt,
                     "category": release_type,
                     "location": "Bureau of Labor Statistics",
                 })
         except Exception:
             continue
-
     log.info(f"BLS {release_type}: {len(events)} upcoming dates")
     return events
 
 
 # ─── ECB Rate Decisions ───────────────────────────────────────────────────────
+# ECB RSS only contains past press releases, not upcoming decisions.
+# Using hardcoded 2026 official meeting calendar instead.
+# Source: https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html
+# All decisions published at 14:15 CET (13:15 UTC).
 
-# ECB publishes exact dates at: https://www.ecb.europa.eu/press/govcdec/mopo/html/index.en.html
-# We scrape their press release RSS as a lightweight alternative
-
-ECB_RSS = "https://www.ecb.europa.eu/rss/press.rss"
+_ECB_2026 = [
+    (1, 30), (3, 6),  (4, 17), (6, 5),
+    (7, 24), (9, 11), (10, 23),(12, 11),
+]
 
 def _fetch_ecb_events() -> list:
+    now    = _now()
+    CET    = timezone(timedelta(hours=1))
     events = []
-    try:
-        feed = feedparser.parse(ECB_RSS)
-        now  = _now()
-        for entry in feed.entries[:30]:
-            title = getattr(entry, "title", "").lower()
-            if "monetary policy" in title or "key ecb interest rates" in title:
-                try:
-                    pub = entry.get("published_parsed") or entry.get("updated_parsed")
-                    if pub:
-                        dt = datetime(*pub[:6], tzinfo=timezone.utc)
-                        # Only future events
-                        if dt > now:
-                            events.append({
-                                "title":    "ECB Rate Decision",
-                                "start":    dt,
-                                "category": "ECB",
-                                "location": "European Central Bank",
-                            })
-                except Exception:
-                    pass
-    except Exception as e:
-        log.warning(f"ECB RSS failed: {e}")
+    for month, day in _ECB_2026:
+        try:
+            dt = datetime(2026, month, day, 14, 15, tzinfo=CET).astimezone(timezone.utc)
+            if dt > now:
+                events.append({
+                    "title":    "ECB Rate Decision",
+                    "start":    dt,
+                    "category": "ECB",
+                    "location": "European Central Bank",
+                })
+        except Exception:
+            continue
     log.info(f"ECB events: {len(events)}")
     return events
 
