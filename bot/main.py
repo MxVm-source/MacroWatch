@@ -423,6 +423,116 @@ def _send_weekly_perf():
     )
 
 
+def _job_monthly_perf():
+    try:
+        _send_monthly_perf()
+    except Exception as e:
+        _err("MonthlyPerf", e)
+
+
+def _send_monthly_perf():
+    """
+    First Monday of each month at 09:30 — 30-day closed trade recap.
+    Personal trading performance only — no strategy names or links.
+    """
+    from bot.datafeed_bitget import (
+        _signed_request, _public_get, _to_float,
+        BITGET_PRODUCT_TYPE, BITGET_API_KEY
+    )
+
+    sym = os.getenv("INFINEX_SYMBOL", "ETHUSDT")
+    now = datetime.now(timezone.utc)
+    month_start_dt  = now - timedelta(days=30)
+    month_start_str = month_start_dt.strftime("%b %d")
+    month_end_str   = (now - timedelta(days=1)).strftime("%b %d")
+
+    # ── ETH 30D price context ────────────────────────────────────────────────
+    eth_line = ""
+    try:
+        raw = _public_get(
+            "/api/v2/mix/market/candles",
+            {"symbol": sym, "granularity": "4H", "limit": "180",
+             "productType": BITGET_PRODUCT_TYPE}
+        )
+        data   = (raw or {}).get("data") or []
+        closes = [float(r[4]) for r in data if isinstance(r, (list,tuple)) and len(r) >= 5]
+        if closes:
+            chg = (closes[-1] - closes[0]) / closes[0] * 100
+            e   = "📈" if chg >= 0 else "📉"
+            s   = "+" if chg >= 0 else ""
+            eth_line = f"ETH/USDT: {e} {s}{chg:.1f}% this month\n"
+    except Exception:
+        pass
+
+    # ── Closed trades (authenticated) ────────────────────────────────────────
+    trades_section = ""
+    if BITGET_API_KEY:
+        try:
+            start_ms = int(month_start_dt.timestamp() * 1000)
+            end_ms   = int(now.timestamp() * 1000)
+
+            res = _signed_request(
+                "GET",
+                "/api/v2/mix/order/history",
+                params={
+                    "symbol":      sym,
+                    "productType": BITGET_PRODUCT_TYPE,
+                    "startTime":   str(start_ms),
+                    "endTime":     str(end_ms),
+                    "limit":       "100",
+                }
+            )
+            orders = ((res.get("data") or {}).get("orderList") or [])
+
+            closed = []
+            for o in orders:
+                state      = (o.get("state") or "").lower()
+                trade_side = (o.get("tradeSide") or o.get("side") or "").lower()
+                pnl_raw    = o.get("pnl") or o.get("realizedPL") or o.get("profit") or ""
+                if state != "filled":
+                    continue
+                if "close" not in trade_side and "reduce" not in trade_side:
+                    continue
+                try:
+                    pnl = float(pnl_raw)
+                except Exception:
+                    continue
+                try:
+                    ctime = int(o.get("cTime") or o.get("uTime") or 0)
+                    dt    = datetime.fromtimestamp(ctime / 1000, tz=timezone.utc).strftime("%b %d")
+                except Exception:
+                    dt = "—"
+                side = (o.get("holdSide") or trade_side or "").upper()
+                closed.append({"pnl": pnl, "date": dt, "side": side})
+
+            if closed:
+                net_pnl   = sum(t["pnl"] for t in closed)
+                wins      = sum(1 for t in closed if t["pnl"] > 0)
+                losses    = sum(1 for t in closed if t["pnl"] <= 0)
+                best      = max(closed, key=lambda x: x["pnl"])
+                worst     = min(closed, key=lambda x: x["pnl"])
+                win_rate  = round(wins / len(closed) * 100)
+                net_sign  = "📈 +" if net_pnl >= 0 else "📉 "
+
+                trades_section = (
+                    f"\nTrades: {len(closed)} ({wins}W / {losses}L) — {win_rate}% win rate\n"
+                    f"Net PnL: {net_sign}${abs(net_pnl):.2f}\n"
+                    f"Best:  📈 +${best['pnl']:.2f} — {best['date']}\n"
+                    f"Worst: 📉 ${worst['pnl']:.2f} — {worst['date']}"
+                )
+            else:
+                trades_section = "\nNo closed trades this month."
+
+        except Exception as e:
+            trades_section = f"\nTrade history unavailable: {str(e)[:80]}"
+
+    send_text(
+        f"📊 *Monthly Recap — {month_start_str} → {month_end_str}*\n\n"
+        f"{eth_line}"
+        f"{trades_section}"
+    )
+
+
 def _job_fedwatch_monday():
     """Monday 08:00 — push current rate probability to the group."""
     try:
@@ -798,113 +908,3 @@ if __name__ == "__main__":
     # Keep process alive
     while True:
         time.sleep(3600)
-def _job_monthly_perf():
-    try:
-        _send_monthly_perf()
-    except Exception as e:
-        _err("MonthlyPerf", e)
-
-
-def _send_monthly_perf():
-    """
-    First Monday of each month at 09:30 — 30-day closed trade recap.
-    Personal trading performance only — no strategy names or links.
-    """
-    from bot.datafeed_bitget import (
-        _signed_request, _public_get, _to_float,
-        BITGET_PRODUCT_TYPE, BITGET_API_KEY
-    )
-
-    sym = os.getenv("INFINEX_SYMBOL", "ETHUSDT")
-    now = datetime.now(timezone.utc)
-    month_start_dt  = now - timedelta(days=30)
-    month_start_str = month_start_dt.strftime("%b %d")
-    month_end_str   = (now - timedelta(days=1)).strftime("%b %d")
-
-    # ── ETH 30D price context ────────────────────────────────────────────────
-    eth_line = ""
-    try:
-        raw = _public_get(
-            "/api/v2/mix/market/candles",
-            {"symbol": sym, "granularity": "4H", "limit": "180",
-             "productType": BITGET_PRODUCT_TYPE}
-        )
-        data   = (raw or {}).get("data") or []
-        closes = [float(r[4]) for r in data if isinstance(r, (list,tuple)) and len(r) >= 5]
-        if closes:
-            chg = (closes[-1] - closes[0]) / closes[0] * 100
-            e   = "📈" if chg >= 0 else "📉"
-            s   = "+" if chg >= 0 else ""
-            eth_line = f"ETH/USDT: {e} {s}{chg:.1f}% this month\n"
-    except Exception:
-        pass
-
-    # ── Closed trades (authenticated) ────────────────────────────────────────
-    trades_section = ""
-    if BITGET_API_KEY:
-        try:
-            start_ms = int(month_start_dt.timestamp() * 1000)
-            end_ms   = int(now.timestamp() * 1000)
-
-            res = _signed_request(
-                "GET",
-                "/api/v2/mix/order/history",
-                params={
-                    "symbol":      sym,
-                    "productType": BITGET_PRODUCT_TYPE,
-                    "startTime":   str(start_ms),
-                    "endTime":     str(end_ms),
-                    "limit":       "100",
-                }
-            )
-            orders = ((res.get("data") or {}).get("orderList") or [])
-
-            closed = []
-            for o in orders:
-                state      = (o.get("state") or "").lower()
-                trade_side = (o.get("tradeSide") or o.get("side") or "").lower()
-                pnl_raw    = o.get("pnl") or o.get("realizedPL") or o.get("profit") or ""
-                if state != "filled":
-                    continue
-                if "close" not in trade_side and "reduce" not in trade_side:
-                    continue
-                try:
-                    pnl = float(pnl_raw)
-                except Exception:
-                    continue
-                try:
-                    ctime = int(o.get("cTime") or o.get("uTime") or 0)
-                    dt    = datetime.fromtimestamp(ctime / 1000, tz=timezone.utc).strftime("%b %d")
-                except Exception:
-                    dt = "—"
-                side = (o.get("holdSide") or trade_side or "").upper()
-                closed.append({"pnl": pnl, "date": dt, "side": side})
-
-            if closed:
-                net_pnl   = sum(t["pnl"] for t in closed)
-                wins      = sum(1 for t in closed if t["pnl"] > 0)
-                losses    = sum(1 for t in closed if t["pnl"] <= 0)
-                best      = max(closed, key=lambda x: x["pnl"])
-                worst     = min(closed, key=lambda x: x["pnl"])
-                win_rate  = round(wins / len(closed) * 100)
-                net_sign  = "📈 +" if net_pnl >= 0 else "📉 "
-
-                trades_section = (
-                    f"\nTrades: {len(closed)} ({wins}W / {losses}L) — {win_rate}% win rate\n"
-                    f"Net PnL: {net_sign}${abs(net_pnl):.2f}\n"
-                    f"Best:  📈 +${best['pnl']:.2f} — {best['date']}\n"
-                    f"Worst: 📉 ${worst['pnl']:.2f} — {worst['date']}"
-                )
-            else:
-                trades_section = "\nNo closed trades this month."
-
-        except Exception as e:
-            trades_section = f"\nTrade history unavailable: {str(e)[:80]}"
-
-    send_text(
-        f"📊 *Monthly Recap — {month_start_str} → {month_end_str}*\n\n"
-        f"{eth_line}"
-        f"{trades_section}"
-    )
-
-
