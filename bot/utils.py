@@ -82,3 +82,51 @@ def get_updates(offset=None, timeout=20):
         print(f"get_updates exception: {e}")
 
     return {"result": []}
+                f"{API_BASE}/sendMessage",
+                json=payload,
+                timeout=10,
+            )
+
+            if resp.ok:
+                return
+
+            # 429 — Telegram rate limit: honour retry_after
+            if resp.status_code == 429:
+                retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                print(f"send_text: rate limited, retrying in {retry_after}s (attempt {attempt}/{_MAX_RETRIES})")
+                time.sleep(retry_after + 1)
+                continue
+
+            # Any other error — log and give up
+            print(f"send_text error {resp.status_code}: {resp.text[:200]}")
+            return
+
+        except Exception as e:
+            print(f"send_text exception (attempt {attempt}): {e}")
+            if attempt < _MAX_RETRIES:
+                time.sleep(2)
+
+    print("send_text: gave up after max retries")
+
+
+def get_updates(offset=None, timeout=20):
+    if not TELEGRAM_TOKEN:
+        return {"result": []}
+
+    params = {"timeout": timeout}
+    if offset is not None:
+        params["offset"] = offset
+
+    try:
+        resp = requests.get(
+            f"{API_BASE}/getUpdates",
+            params=params,
+            timeout=timeout + 5,
+        )
+        if resp.ok:
+            return resp.json()
+        print(f"get_updates error {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        print(f"get_updates exception: {e}")
+
+    return {"result": []}
