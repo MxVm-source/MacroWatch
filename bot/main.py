@@ -38,6 +38,8 @@ import bot.modules.fedwatch        as fedwatch
 import bot.modules.cryptowatch     as cryptowatch
 import bot.modules.cryptowatch_daily as cryptowatch_daily
 import bot.modules.trumpwatch_live as trumpwatch_live
+import bot.modules.correlwatch     as correlwatch
+import bot.modules.whalewatch      as whalewatch
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
 
@@ -411,6 +413,20 @@ def _job_fedwatch_monday():
         _err("FedWatch Monday", e)
 
 
+def _job_correlwatch():
+    try:
+        correlwatch.poll_once()
+    except Exception as e:
+        _err("CorrelWatch", e)
+
+
+def _job_whalewatch():
+    try:
+        whalewatch.poll_once()
+    except Exception as e:
+        _err("WhaleWatch", e)
+
+
 def _on_job_error(event):
     print(f"[APScheduler] Job {event.job_id} raised: {event.exception}", flush=True)
 
@@ -469,6 +485,23 @@ def start_scheduler():
         id="monthly_perf", max_instances=1,
     )
     print("📊 MonthlyPerf scheduled (1st Mon 09:30) ✅", flush=True)
+
+    # ── CorrelWatch — every 30 minutes
+    SCHED.add_job(
+        _job_correlwatch, "interval", minutes=30,
+        id="correlwatch", max_instances=1, misfire_grace_time=60,
+    )
+    print("📡 CorrelWatch scheduled (30min) ✅", flush=True)
+
+    # ── WhaleWatch — every 5 min
+    if os.getenv("ETHERSCAN_API_KEY"):
+        SCHED.add_job(
+            _job_whalewatch, "interval", minutes=5,
+            id="whalewatch", max_instances=1, misfire_grace_time=30,
+        )
+        print("🐋 WhaleWatch scheduled (5min) ✅", flush=True)
+    else:
+        print("🐋 WhaleWatch disabled (ETHERSCAN_API_KEY not set)", flush=True)
 
     # ── FedWatch Monday rate probability push — Monday 08:00
     SCHED.add_job(
@@ -539,6 +572,33 @@ def _build_health_msg() -> str:
         f"  Sources: {'✅ All OK' if tw_src_ok else '⚠️ Degraded'}",
         f"  Dedup cache: {tw_seen} entries",
         f"  Buffered alerts: {len(trumpwatch_live.RECENT_ALERTS)}",
+    ]
+
+    # WhaleWatch state
+    ww_check = whalewatch.STATE.get("last_check_utc")
+    ww_fired = whalewatch.STATE.get("total_fired", 0)
+    ww_last  = whalewatch.STATE.get("last_alert_utc")
+    ww_key   = "✅ Configured" if os.getenv("ETHERSCAN_API_KEY") else "❌ ETHERSCAN_API_KEY not set"
+    lines += [
+        "",
+        "🐋 *WhaleWatch*",
+        f"  API: {ww_key}",
+        f"  Last check: {ww_check.strftime('%H:%M UTC') if ww_check else '—'}",
+        f"  Alerts fired: {ww_fired}",
+        f"  Last alert: {ww_last.strftime('%Y-%m-%d %H:%M UTC') if ww_last else 'None yet'}",
+    ]
+
+    # CorrelWatch state
+    cw_last  = correlwatch.STATE.get("last_check_utc")
+    cw_dxy   = correlwatch.STATE.get("last_dxy")
+    cw_btc   = correlwatch.STATE.get("last_btc")
+    cw_alert = correlwatch.STATE.get("last_alert_utc")
+    lines += [
+        "",
+        "📡 *CorrelWatch*",
+        f"  Last check: {cw_last.strftime('%H:%M UTC') if cw_last else '—'}",
+        f"  DXY: {f'{cw_dxy:+.2f}%' if cw_dxy is not None else '—'} | BTC: {f'{cw_btc:+.2f}%' if cw_btc is not None else '—'}",
+        f"  Last alert: {cw_alert.strftime('%Y-%m-%d %H:%M UTC') if cw_alert else 'None yet'}",
     ]
 
     # FedWatch state
