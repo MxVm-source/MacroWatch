@@ -383,8 +383,14 @@ def _fetch_cnn() -> list:
             raw  = it.get("content") or it.get("text") or ""
             text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(raw))).strip()
             url_ = it.get("url") or f"https://truthsocial.com/@realDonaldTrump/{pid}"
-            if text:
-                items.append({"text": text, "url": url_, "ts": it.get("created_at",""), "source": "CNN/TruthSocial"})
+            # Skip empty, placeholder titles, or very short content
+            if not text or len(text) < 30:
+                continue
+            if re.match(r"^\[?no title\]?", text, re.IGNORECASE):
+                continue
+            if re.match(r"^post from \w+ \d+", text, re.IGNORECASE):
+                continue
+            items.append({"text": text, "url": url_, "ts": it.get("created_at",""), "source": "CNN/TruthSocial"})
         STATE["source_health"][url] = {"ok": True, "last_checked": _now_iso(), "error": ""}
         log.info(f"CNN JSON: {len(items)} items")
         return items
@@ -560,14 +566,14 @@ def poll_once():
         # ── Stage 1: Hard block ───────────────────────────────────────
         if _is_endorsement(txt):
             blocked += 1
-            log.info(f"BLOCKED (endorsement): {txt[:80]}")
+            log.debug(f"BLOCKED (endorsement): {txt[:80]}")
             _dedup_mark(key)   # never re-process this post again
             continue
 
         # ── Stage 2: Keyword gate ─────────────────────────────────────
         if not _passes_gate(txt):
             filtered += 1
-            log.info(f"FILTERED (no keywords): {txt[:80]}")
+            log.debug(f"FILTERED (no keywords): {txt[:80]}")
             _dedup_mark(key)
             continue
 
@@ -578,7 +584,7 @@ def poll_once():
         log.info(f"AI score {score}/10 [{ai['sentiment']}]: {txt[:80]}")
 
         if score < AI_SCORE_MIN:
-            log.info(f"  └ Below threshold ({AI_SCORE_MIN}) — skipped")
+            log.debug(f"  └ Below threshold ({AI_SCORE_MIN}) — skipped")
             _dedup_mark(key)
             continue
 
