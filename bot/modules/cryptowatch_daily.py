@@ -65,6 +65,7 @@ OUTPUT FORMAT (follow exactly, no extra sections):
 📊 [CryptoWatch] {date} — Pre-US Open
 
 Mood: [Bullish/Bearish/Neutral/Cautious] — [one clause, max 10 words]
+Fear & Greed: [value]/100 — [label] (only include if fear_greed is in snapshot)
 
 BTC  $[lastPr] | 24h [change%] | H [high24h] / L [low24h]
 ETH  $[lastPr] | 24h [change%] | [outperformed / underperformed BTC]
@@ -324,6 +325,27 @@ def generate_daily_brief(snapshot: dict) -> str:
 # Entry point
 # ======================
 
+def fetch_fear_greed() -> dict | None:
+    """
+    Fetch current Fear & Greed index from alternative.me (free, no key).
+    Returns {"value": 34, "label": "Fear", "updated": "..."} or None.
+    """
+    try:
+        r = requests.get(
+            "https://api.alternative.me/fng/?limit=1",
+            timeout=5,
+        )
+        data = r.json().get("data", [{}])[0]
+        return {
+            "value": int(data.get("value", 0)),
+            "label": data.get("value_classification", ""),
+            "updated": data.get("timestamp", ""),
+        }
+    except Exception as e:
+        log.warning("Fear & Greed fetch failed: %s", e)
+        return None
+
+
 def main():
     try:
         snapshot = fetch_basic_market_snapshot()
@@ -338,17 +360,23 @@ def main():
         snapshot.setdefault("meta", {})
         snapshot["meta"]["macro_context"] = macro_text
 
-    # ✅ Macro overlay from Stooq (optional but preferred)
+    # Macro overlay from Stooq (optional but preferred)
     try:
         overlay = fetch_macro_overlay()
         if overlay.get("items"):
             snapshot.setdefault("meta", {})
             snapshot["meta"]["macro_overlay"] = overlay
-        else:
-            # No overlay items fetched; keep it silent (no spam).
-            pass
     except Exception as e:
         log.warning("macro overlay fetch failed: %s", e)
+
+    # Fear & Greed index
+    try:
+        fg = fetch_fear_greed()
+        if fg:
+            snapshot.setdefault("meta", {})
+            snapshot["meta"]["fear_greed"] = fg
+    except Exception as e:
+        log.warning("fear & greed fetch failed: %s", e)
 
     brief = generate_daily_brief(snapshot)
     send_text(brief)
