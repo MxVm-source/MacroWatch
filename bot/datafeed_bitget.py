@@ -143,7 +143,8 @@ def get_ticker(symbol: str):
             tick = tick[0] if tick else {}
 
         price_str = (
-            tick.get("last")
+            tick.get("lastPr")      # Bitget V2 field name
+            or tick.get("last")     # fallback for older responses
             or tick.get("close")
             or tick.get("markPrice")
         )
@@ -391,44 +392,6 @@ def get_position_report_safe() -> str:
         return "⚠️ Could not fetch position from Bitget. Check API keys & futures permissions."
 
 
-def get_position_snapshot(symbol: str) -> dict:
-    """
-    Returns a normalized snapshot dict for one symbol.
-    Used by TradeWatch to detect changes without parsing Telegram text.
-    """
-    symbol = (symbol or BITGET_SYMBOL).strip().upper()
-    pos = _fetch_current_futures_position(symbol)
-    orders = _fetch_pending_tp_sl_orders(symbol)
-
-    snap = {
-        "symbol": symbol,
-        "has_position": _position_is_open(pos),
-        "side": (pos.get("holdSide") or "").upper() if pos else "",
-        "size": _to_float(pos.get("total") or pos.get("available") or 0) if pos else 0.0,
-        "entry": _to_float(pos.get("openPriceAvg") or pos.get("openPrice") or 0) if pos else 0.0,
-        "leverage": pos.get("leverage") if pos else None,
-        "liq": (pos.get("liquidationPrice") or pos.get("liqPx")) if pos else None,
-        "upl": _to_float(pos.get("unrealizedPL") or pos.get("upl") or 0) if pos else 0.0,
-        "tp": sorted([_to_float(x) for x in (orders.get("tp") or [])]),
-        "sl": sorted([_to_float(x) for x in (orders.get("sl") or [])]),
-    }
-    return snap
-
-
-def get_positions_snapshot(symbols: list[str] | None = None) -> dict:
-    """
-    Snapshot for multiple symbols: { "BTCUSDT": {...}, "ETHUSDT": {...} }
-    """
-    symbols = symbols or BITGET_SYMBOLS
-    out = {}
-    for s in symbols:
-        s = (s or "").strip().upper()
-        if not s:
-            continue
-        out[s] = get_position_snapshot(s)
-    return out
-
-
 def build_open_orders_message(symbol: str) -> str:
     """
     Telegram-friendly message for TP/SL plan orders for one symbol.
@@ -461,6 +424,9 @@ def build_positions_and_orders_message(symbols: list[str] | None = None) -> str:
     Combined report: only show symbols that have either:
     - an open position OR
     - pending TP/SL orders
+
+    Fetches position + orders once per symbol (single API call each),
+    then reuses the data for both the position block and the orders block.
     """
     symbols = symbols or BITGET_SYMBOLS
 
@@ -470,18 +436,91 @@ def build_positions_and_orders_message(symbols: list[str] | None = None) -> str:
         if not s:
             continue
 
-        snap = get_position_snapshot(s)
-        has_pos = snap["has_position"]
-        has_orders = bool(snap["tp"] or snap["sl"])
+        # ── Fetch once ───────────────────────────────────────────────
+        pos    = _fetch_current_futures_position(s)
+        orders = _fetch_pending_tp_sl_orders(s)
+
+        has_pos    = _position_is_open(pos)
+        tps        = sorted([_to_float(x) for x in (orders.get("tp") or [])])
+        sls        = sorted([_to_float(x) for x in (orders.get("sl") or [])])
+        has_orders = bool(tps or sls)
 
         if not has_pos and not has_orders:
             continue
 
         parts = []
+
+        # ── Position block ───────────────────────────────────────────
         if has_pos:
-            parts.append(build_futures_position_message(s))
-        if has_orders:
-            parts.append(build_open_orders_message(s))
+            side_raw = (pos.get("holdSide") or "").lower()
+            side     = "LONG" if side_raw == "long" else "SHORT"
+            entry    = pos.get("openPriceAvg") or pos.get("openPrice") or "N/A"
+            size     = pos.get("total") or pos.get("available") or "N/A"
+            lev      = pos.get("leverage") or "N/A"
+            liq      = pos.get("liquidationPrice") or pos.get("liqPx") or "N/A"
+            pnl      = pos.get("unrealizedPL") or pos.get("upl") or "0"
+            margin_mode = pos.get("marginMode") or ""
+            pos_mode    = pos.get("posMode") or ""
+
+            tp_sorted = sorted(tps, reverse=(side == "SHORT"))
+            sl_sorted = sorted(sls, reverse=(side == "SHORT"))
+
+            lines = [
+                "📘 Current Futures Position",
+                f"Pair: {s}",
+                f"Side: {side}",
+                f"Entry Price: {entry}",
+                f"Size: {size}",
+                f"Leverage: {lev}x",
+            ]
+            if margin_mode:
+                lines.append(f"Margin Mode: {margin_mode}")
+            if pos_mode:
+                lines.append(f"Position Mode: {pos_mode}")
+
+            if tp_sorted:
+                lines.append("")
+                for i, p in enumerate(tp_sorted[:3], 1):
+                    lines.append(f"TP{i}: {p}")
+            if sl_sorted:
+                lines.append("")
+                lines.append(f"SL: {sl_sorted[0]}")
+
+            # RR ratio
+            if tp_sorted and sl_sorted:
+                try:
+                    entry_f = float(entry)
+                    tp      = tp_sorted[0]
+                    sl      = sl_sorted[0]
+                    risk    = entry_f - sl   if side == "LONG" else sl - entry_f
+                    reward  = tp - entry_f   if side == "LONG" else entry_f - tp
+                    if risk > 0:
+                        lines.append(f"RR Ratio: {reward / risk:.2f}")
+                except Exception:
+                    pass
+
+            if liq:
+                lines.append(f"Liq Price: {liq}")
+            try:
+                lines.append(f"Unrealized PnL: {_pnl_color(float(pnl))}")
+            except Exception:
+                lines.append(f"Unrealized PnL: {pnl}")
+
+            lines.append(f"Time (UTC): {iso_utc_now()}")
+            parts.append("\n".join(lines))
+
+        # ── Orders block (only if no position, avoids duplication) ──
+        elif has_orders:
+            lines = ["📑 [Orders]", f"Pair: {s}"]
+            if tps:
+                lines.append("")
+                for i, p in enumerate(tps[:5], 1):
+                    lines.append(f"TP{i}: {p}")
+            if sls:
+                lines.append("")
+                lines.append(f"SL: {sls[0]}")
+            lines.append(f"Time (UTC): {iso_utc_now()}")
+            parts.append("\n".join(lines))
 
         blocks.append("\n\n".join(parts))
 
