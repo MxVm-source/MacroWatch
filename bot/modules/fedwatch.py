@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 from bot.utils import send_text
 from bot.datafeed_bitget import get_ticker
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [FedWatch] %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("fedwatch")
 
 # ─── Timezone ────────────────────────────────────────────────────────────────
