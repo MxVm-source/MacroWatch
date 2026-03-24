@@ -16,6 +16,7 @@ All poll functions are wrapped so one crash never kills the scheduler.
 import os
 import sys
 import json
+import logging
 import platform
 import threading
 import time
@@ -23,6 +24,12 @@ from datetime import datetime, timezone, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.events import EVENT_JOB_ERROR
+
+# ─── Silence APScheduler's per-job INFO spam ─────────────────────────────────
+# Only show WARNING and above — errors will still surface.
+logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.jobstores.default").setLevel(logging.WARNING)
 
 from bot.utils import send_text, get_updates
 
