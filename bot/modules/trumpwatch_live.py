@@ -463,6 +463,60 @@ def show_recent():
               + "\n\n────────────\n\n".join(list(RECENT_ALERTS)))
 
 
+# ─── Sentiment trend ─────────────────────────────────────────────────────────
+
+SENTIMENT_LOG: list = []   # [{"sentiment": "bullish", "score": 8, "ts": "..."}, ...]
+SENTIMENT_MAX = 50
+
+
+def _log_sentiment(sentiment: str, score: int):
+    SENTIMENT_LOG.append({"sentiment": sentiment, "score": score, "ts": _now_iso()})
+    if len(SENTIMENT_LOG) > SENTIMENT_MAX:
+        SENTIMENT_LOG.pop(0)
+
+
+def show_sentiment():
+    if not SENTIMENT_LOG:
+        send_text("🍊 [TrumpWatch] No sentiment data yet — waiting for first alerts to fire.")
+        return
+
+    total   = len(SENTIMENT_LOG)
+    bull    = sum(1 for x in SENTIMENT_LOG if x["sentiment"] == "bullish")
+    bear    = sum(1 for x in SENTIMENT_LOG if x["sentiment"] == "bearish")
+    neutral = total - bull - bear
+    avg_score = sum(x["score"] for x in SENTIMENT_LOG) / total
+
+    bull_pct    = round(bull    / total * 100)
+    bear_pct    = round(bear    / total * 100)
+    neutral_pct = round(neutral / total * 100)
+
+    if bull_pct > bear_pct + 15:
+        bias = "🟢 Risk-On Lean"
+    elif bear_pct > bull_pct + 15:
+        bias = "🔴 Risk-Off Lean"
+    else:
+        bias = "🔵 Mixed / No Clear Bias"
+
+    recent = list(reversed(SENTIMENT_LOG[-5:]))
+    recent_lines = []
+    for r in recent:
+        e = "🟢" if r["sentiment"] == "bullish" else ("🔴" if r["sentiment"] == "bearish" else "🔵")
+        recent_lines.append(f"  {e} {r['sentiment'].capitalize()} | {r['score']}/10 | {r['ts']} UTC")
+
+    lines = [
+        f"🍊 *[TrumpWatch] Sentiment Trend*",
+        f"Based on last {total} alerts\n",
+        f"🟢 Bullish:  {bull_pct}% ({bull})",
+        f"🔴 Bearish:  {bear_pct}% ({bear})",
+        f"🔵 Neutral:  {neutral_pct}% ({neutral})",
+        f"⭐ Avg score: {avg_score:.1f}/10\n",
+        f"Bias: {bias}\n",
+        f"Last 5 alerts:",
+    ] + recent_lines
+
+    send_text("\n".join(lines))
+
+
 # ─── Core poll ───────────────────────────────────────────────────────────────
 
 def poll_once():
