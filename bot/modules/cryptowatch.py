@@ -16,7 +16,6 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
@@ -36,12 +35,15 @@ BITGET_BASE_URL = "https://api.bitget.com"
 BTC_SYMBOL      = "BTCUSDT"
 ETH_SYMBOL      = "ETHUSDT"
 PRODUCT_TYPE    = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
-STOOQ_BASE      = "https://stooq.com/q/d/l/"
+FINNHUB_KEY  = os.getenv("FINNHUB_API_KEY", "").strip()
+FINNHUB_BASE = "https://finnhub.io/api/v1"
 
-STOOQ_SYMBOL_DXY   = os.getenv("STOOQ_SYMBOL_DXY",   "^dxy")
-STOOQ_SYMBOL_SPX   = os.getenv("STOOQ_SYMBOL_SPX",   "^spx")
-STOOQ_SYMBOL_GOLD  = os.getenv("STOOQ_SYMBOL_GOLD",  "xauusd")
-STOOQ_SYMBOL_US10Y = os.getenv("STOOQ_SYMBOL_US10Y", "^tnx")
+FINNHUB_SYMBOLS = {
+    "DXY":   "FOREX:USDX",
+    "SPX":   "^GSPC",
+    "US10Y": "^TNX",
+    "Gold":  "OANDA:XAU_USD",
+}
 
 MODEL = os.getenv("CRYPTOWATCH_WEEKLY_MODEL", "gpt-4.1-mini")
 
@@ -185,47 +187,47 @@ def _fetch_weekly_range(symbol: str) -> dict | None:
 
 # ─── Stooq macro overlay ─────────────────────────────────────────────────────
 
-def _stooq_last_two(symbol: str) -> list[dict]:
-    sym = symbol.strip().lower()
+def _finnhub_quote(symbol: str) -> dict | None:
+    if not FINNHUB_KEY:
+        return None
     try:
-        r = requests.get(f"{STOOQ_BASE}?s={quote(sym)}&i=d", timeout=6)
+        r = requests.get(
+            f"{FINNHUB_BASE}/quote",
+            params={"symbol": symbol, "token": FINNHUB_KEY},
+            timeout=6,
+        )
         if r.status_code != 200:
-            return []
-        lines = [ln for ln in r.text.strip().splitlines()[1:] if "," in ln][-2:]
-        out = []
-        for ln in lines:
-            parts = ln.split(",")
-            if len(parts) >= 5:
-                try:
-                    out.append({"date": parts[0].strip(), "close": float(parts[4].strip())})
-                except Exception:
-                    pass
-        return out
-    except Exception:
-        return []
+            return None
+        data = r.json()
+        if not data.get("c"):
+            return None
+        return {
+            "last":       float(data["c"]),
+            "prev_close": float(data.get("pc") or data["c"]),
+            "change_pct": float(data.get("dp") or 0),
+        }
+    except Exception as e:
+        log.warning(f"Finnhub quote failed for {symbol}: {e}")
+        return None
 
 
 def _macro_point(name: str, symbol: str) -> dict | None:
-    rows = _stooq_last_two(symbol)
-    if not rows:
+    q = _finnhub_quote(symbol)
+    if not q:
         return None
-    last = rows[-1]["close"]
-    prev = rows[-2]["close"] if len(rows) >= 2 else None
-    change_pct = round((last - prev) / prev * 100, 3) if prev else None
-    direction  = "flat"
-    if change_pct:
-        direction = "up" if change_pct > 0.05 else ("down" if change_pct < -0.05 else "flat")
-    return {"name": name, "last": last, "change_pct": change_pct,
-            "direction": direction, "as_of": rows[-1]["date"]}
+    chg = q["change_pct"]
+    direction = "flat" if abs(chg) < 0.05 else ("up" if chg > 0 else "down")
+    return {"name": name, "last": q["last"], "change_pct": round(chg, 3),
+            "direction": direction}
 
 
 def fetch_macro_overlay() -> dict:
-    overlay = {"source": "stooq", "items": []}
+    overlay = {"source": "finnhub", "items": []}
     for name, sym in [
-        ("US10Y (TNX proxy)", STOOQ_SYMBOL_US10Y),
-        ("DXY",               STOOQ_SYMBOL_DXY),
-        ("S&P 500",           STOOQ_SYMBOL_SPX),
-        ("Gold",              STOOQ_SYMBOL_GOLD),
+        ("US10Y", FINNHUB_SYMBOLS["US10Y"]),
+        ("DXY",   FINNHUB_SYMBOLS["DXY"]),
+        ("S&P 500", FINNHUB_SYMBOLS["SPX"]),
+        ("Gold",  FINNHUB_SYMBOLS["Gold"]),
     ]:
         pt = _macro_point(name, sym)
         if pt:

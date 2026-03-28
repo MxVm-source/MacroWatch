@@ -15,7 +15,6 @@ import logging
 import os
 import time
 from datetime import datetime, timezone, timedelta
-from urllib.parse import quote
 
 import requests
 
@@ -32,7 +31,8 @@ BTC_THRESHOLD  = float(os.getenv("CORREL_BTC_THRESHOLD",  "2.0"))  # 2.0% BTC mo
 # Cooldown between alerts (minutes)
 COOLDOWN_MIN   = int(os.getenv("CORREL_COOLDOWN_MIN", "240"))  # 4 hours
 
-STOOQ_BASE     = "https://stooq.com/q/d/l/"
+FINNHUB_KEY    = os.getenv("FINNHUB_API_KEY", "").strip()
+FINNHUB_BASE   = "https://finnhub.io/api/v1"
 BITGET_BASE    = "https://api.bitget.com"
 PRODUCT_TYPE   = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 
@@ -49,21 +49,20 @@ STATE = {
 # ─── Data fetchers ────────────────────────────────────────────────────────────
 
 def _fetch_dxy_change() -> float | None:
-    """Fetch DXY last two daily closes from Stooq, return 1D change %."""
-    sym = os.getenv("STOOQ_SYMBOL_DXY", "^dxy")
+    """Fetch DXY 1D change % from Finnhub."""
+    if not FINNHUB_KEY:
+        return None
     try:
         r = requests.get(
-            f"{STOOQ_BASE}?s={quote(sym)}&i=d",
+            f"{FINNHUB_BASE}/quote",
+            params={"symbol": "FOREX:USDX", "token": FINNHUB_KEY},
             timeout=6,
         )
         if r.status_code != 200:
             return None
-        lines = [l for l in r.text.strip().splitlines()[1:] if "," in l][-2:]
-        if len(lines) < 2:
-            return None
-        prev  = float(lines[0].split(",")[4])
-        last  = float(lines[1].split(",")[4])
-        return (last - prev) / prev * 100 if prev else None
+        data = r.json()
+        dp = data.get("dp")
+        return float(dp) if dp is not None else None
     except Exception as e:
         log.warning(f"DXY fetch failed: {e}")
         return None

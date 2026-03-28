@@ -3,7 +3,6 @@ import os
 import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from urllib.parse import quote
 
 import requests
 from openai import OpenAI
@@ -33,18 +32,22 @@ PRODUCT_TYPE = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")  # allow env ove
 FEDWATCH_DAILY_URL = os.getenv("FEDWATCH_DAILY_URL", "").strip()
 
 # ======================
-# Stooq macro overlay symbols (env override supported)
+# Finnhub macro overlay
 # ======================
+# Free tier: 60 calls/min, no rate issues for 4 symbols/day
+# Sign up at finnhub.io — instant key, no email confirmation needed
+# Set FINNHUB_API_KEY in Render env vars
 
-# Stooq daily history endpoint:
-# https://stooq.com/q/d/l/?s=^spx&i=d
-STOOQ_BASE = "https://stooq.com/q/d/l/"
+FINNHUB_KEY  = os.getenv("FINNHUB_API_KEY", "").strip()
+FINNHUB_BASE = "https://finnhub.io/api/v1"
 
-# Defaults (you can override in Render env vars if needed)
-STOOQ_SYMBOL_DXY   = os.getenv("STOOQ_SYMBOL_DXY", "^dxy").strip()     # Dollar Index
-STOOQ_SYMBOL_SPX   = os.getenv("STOOQ_SYMBOL_SPX", "^spx").strip()     # S&P 500 Index
-STOOQ_SYMBOL_GOLD  = os.getenv("STOOQ_SYMBOL_GOLD", "xauusd").strip()  # Gold spot proxy
-STOOQ_SYMBOL_US10Y = os.getenv("STOOQ_SYMBOL_US10Y", "^tnx").strip()   # 10Y yield proxy (TNX)
+# Finnhub symbols
+FINNHUB_SYMBOLS = {
+    "DXY":   "FOREX:USDX",   # Dollar Index via forex
+    "SPX":   "^GSPC",        # S&P 500
+    "US10Y": "^TNX",         # 10Y Treasury yield
+    "Gold":  "OANDA:XAU_USD",# Gold spot
+}
 
 # ======================
 # OpenAI prompt
@@ -133,108 +136,64 @@ def _parse_mix_ticker(data: dict) -> dict | None:
 # Stooq macro overlay helpers
 # ======================
 
-def _stooq_fetch_last_two_daily(symbol: str) -> list[dict]:
-    """
-    Fetch last 2 daily rows from Stooq CSV.
-    Returns list of dict rows: [{"date": "...", "close": float}, ...] newest last.
-    """
-    sym = (symbol or "").strip().lower()
-    if not sym:
-        return []
-
-    # Stooq expects e.g. ^spx, xauusd, ^dxy, ^tnx
-    url = f"{STOOQ_BASE}?s={quote(sym)}&i=d"
+def _finnhub_quote(symbol: str) -> dict | None:
+    """Fetch current quote from Finnhub. Returns {c, pc, dp} or None."""
+    if not FINNHUB_KEY:
+        return None
     try:
-        r = requests.get(url, timeout=6)
+        r = requests.get(
+            f"{FINNHUB_BASE}/quote",
+            params={"symbol": symbol, "token": FINNHUB_KEY},
+            timeout=6,
+        )
         if r.status_code != 200:
-            return []
-        text = (r.text or "").strip()
-        if not text or "404" in text.lower():
-            return []
-        lines = text.splitlines()
-        if len(lines) < 3:
-            return []
-
-        # header: Date,Open,High,Low,Close,Volume
-        # grab last two data lines
-        data_lines = [ln for ln in lines[1:] if ln and "," in ln][-2:]
-        out = []
-        for ln in data_lines:
-            parts = ln.split(",")
-            if len(parts) < 5:
-                continue
-            dt = parts[0].strip()
-            close_s = parts[4].strip()
-            try:
-                close = float(close_s)
-            except Exception:
-                continue
-            out.append({"date": dt, "close": close})
-        return out
-    except Exception:
-        return []
-
-
-def _macro_point(name: str, symbol: str) -> dict | None:
-    rows = _stooq_fetch_last_two_daily(symbol)
-    if not rows:
+            return None
+        data = r.json()
+        # c = current, pc = previous close, dp = change percent
+        if not data.get("c"):
+            return None
+        return {
+            "last":       float(data["c"]),
+            "prev_close": float(data.get("pc") or data["c"]),
+            "change_pct": float(data.get("dp") or 0),
+        }
+    except Exception as e:
+        log.warning(f"Finnhub quote failed for {symbol}: {e}")
         return None
 
-    last = rows[-1]["close"]
-    prev = rows[-2]["close"] if len(rows) >= 2 else None
 
-    change = None
-    change_pct = None
-    direction = "flat"
-
-    if prev and prev != 0:
-        change = last - prev
-        change_pct = (change / prev) * 100.0
-        if abs(change_pct) < 0.05:
-            direction = "flat"
-        elif change > 0:
-            direction = "up"
-        else:
-            direction = "down"
-
+def _macro_point_finnhub(name: str, symbol: str) -> dict | None:
+    q = _finnhub_quote(symbol)
+    if not q:
+        return None
+    chg = q["change_pct"]
+    direction = "flat" if abs(chg) < 0.05 else ("up" if chg > 0 else "down")
     return {
-        "name": name,
-        "symbol": symbol,
-        "last": last,
-        "prev_close": prev,
-        "change": change,
-        "change_pct": change_pct,
-        "direction": direction,
-        "as_of": rows[-1]["date"],
+        "name":       name,
+        "symbol":     symbol,
+        "last":       q["last"],
+        "prev_close": q["prev_close"],
+        "change_pct": chg,
+        "direction":  direction,
     }
 
 
 def fetch_macro_overlay() -> dict:
-    """
-    Returns macro overlay dict. Missing instruments are simply omitted.
-    """
-    overlay = {"source": "stooq", "as_of_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")}
-    items = []
+    """Returns macro overlay dict using Finnhub."""
+    overlay = {"source": "finnhub", "as_of_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")}
+    items   = []
 
-    # US10Y via TNX (index points; narrative still works: up/down yields)
-    us10y = _macro_point("US10Y (TNX proxy)", STOOQ_SYMBOL_US10Y)
-    if us10y:
-        items.append(us10y)
-
-    dxy = _macro_point("DXY", STOOQ_SYMBOL_DXY)
-    if dxy:
-        items.append(dxy)
-
-    spx = _macro_point("S&P 500", STOOQ_SYMBOL_SPX)
-    if spx:
-        items.append(spx)
-
-    gold = _macro_point("Gold", STOOQ_SYMBOL_GOLD)
-    if gold:
-        items.append(gold)
+    for name, sym in [
+        ("US10Y", FINNHUB_SYMBOLS["US10Y"]),
+        ("DXY",   FINNHUB_SYMBOLS["DXY"]),
+        ("S&P 500", FINNHUB_SYMBOLS["SPX"]),
+        ("Gold",  FINNHUB_SYMBOLS["Gold"]),
+    ]:
+        pt = _macro_point_finnhub(name, sym)
+        if pt:
+            items.append(pt)
 
     overlay["items"] = items
-    overlay["notes"] = "Daily close-to-close changes. US10Y uses TNX proxy where available."
     return overlay
 
 # ======================
