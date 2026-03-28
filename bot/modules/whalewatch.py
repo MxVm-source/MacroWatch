@@ -24,7 +24,7 @@ log = logging.getLogger("whalewatch")
 ETHERSCAN_KEY  = os.getenv("ETHERSCAN_API_KEY", "")
 WHALE_MIN_ETH  = float(os.getenv("WHALE_MIN_ETH", "1000"))   # minimum ETH to alert
 WHALE_MIN_USD  = float(os.getenv("WHALE_MIN_USD", "0"))       # optional USD filter (0 = off)
-ETHERSCAN_BASE = "https://api.etherscan.io/api"
+ETHERSCAN_BASE = "https://api.etherscan.io/v2/api"
 
 # Known exchange/contract labels for cleaner alerts
 KNOWN_LABELS = {
@@ -79,7 +79,7 @@ def _eth_price() -> float:
     try:
         r = requests.get(
             ETHERSCAN_BASE,
-            params={"module": "stats", "action": "ethprice", "apikey": ETHERSCAN_KEY},
+            params={"chainid": "1", "module": "stats", "action": "ethprice", "apikey": ETHERSCAN_KEY},
             timeout=5,
         )
         return float(r.json()["result"]["ethusd"])
@@ -137,6 +137,7 @@ def _fetch_recent_large_txs() -> list:
         r = requests.get(
             ETHERSCAN_BASE,
             params={
+                "chainid": "1",
                 "module":  "proxy",
                 "action":  "eth_blockNumber",
                 "apikey":  ETHERSCAN_KEY,
@@ -150,6 +151,7 @@ def _fetch_recent_large_txs() -> list:
         r2 = requests.get(
             ETHERSCAN_BASE,
             params={
+                "chainid":    "1",
                 "module":     "account",
                 "action":     "txlistinternal",
                 "startblock": str(scan_from),
