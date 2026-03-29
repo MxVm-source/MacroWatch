@@ -47,8 +47,8 @@ STARTED_AT_UTC = datetime.now(timezone.utc)
 
 # ─── Public channel + Challenge config ───────────────────────────────────────
 PUBLIC_CHAT_ID       = os.getenv("PUBLIC_CHAT_ID", "")
-CHALLENGE_START_EUR  = float(os.getenv("CHALLENGE_START_EUR", "1032.80"))
-CHALLENGE_TARGET_EUR = float(os.getenv("CHALLENGE_TARGET_EUR", "100000"))
+CHALLENGE_START_USD  = float(os.getenv("CHALLENGE_START_USD", "1032.80"))
+CHALLENGE_TARGET_USD = float(os.getenv("CHALLENGE_TARGET_USD", "100000"))
 CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
 
 def send_public(text: str):
@@ -95,14 +95,14 @@ def _check_milestones(balance: float):
             _fire_milestone(ms, balance)
 
 def _fire_milestone(ms: float, balance: float):
-    gain_pct = (balance - CHALLENGE_START_EUR) / CHALLENGE_START_EUR * 100
-    is_target = ms >= CHALLENGE_TARGET_EUR
+    gain_pct = (balance - CHALLENGE_START_USD) / CHALLENGE_START_USD * 100
+    is_target = ms >= CHALLENGE_TARGET_USD
 
     if is_target:
         msg = (
             f"🏆 *CHALLENGE COMPLETE!*\n\n"
-            f"€1,000 → €100,000 ✅\n\n"
-            f"Balance: €{balance:,.2f}\n"
+            f"$1,000 → $100,000 ✅\n\n"
+            f"Balance: ${balance:,.2f}\n"
             f"Total gain: +{gain_pct:.1f}%\n\n"
             f"The machine did it.\n"
             f"Zero emotion. Pure execution.\n\n"
@@ -114,10 +114,10 @@ def _fire_milestone(ms: float, balance: float):
         emojis = {2500: "🔥", 5000: "🚀", 10000: "💎", 25000: "⚡", 50000: "🌙"}
         emoji  = emojis.get(int(ms), "📈")
         msg = (
-            f"{emoji} *Milestone Hit — €{ms:,.0f}*\n\n"
-            f"€1,000 → €100,000\n"
-            f"Current: €{balance:,.2f} (+{gain_pct:.1f}%)\n\n"
-            f"Next target: €{next((m for m in CHALLENGE_MILESTONES if m > ms), 100000):,.0f}\n\n"
+            f"{emoji} *Milestone Hit — ${ms:,.0f}*\n\n"
+            f"$1,000 → $100,000\n"
+            f"Current: ${balance:,.2f} (+{gain_pct:.1f}%)\n\n"
+            f"Next target: ${next((m for m in CHALLENGE_MILESTONES if m > ms), 100000):,.0f}\n\n"
             f"🤖 Copy trading live on Bitget\n"
             f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
         )
@@ -418,8 +418,8 @@ def _send_challenge_update():
     """Monday 09:15 — post challenge progress to public channel."""
     balance = _fetch_account_balance_eur()
 
-    start  = CHALLENGE_START_EUR
-    target = CHALLENGE_TARGET_EUR
+    start  = CHALLENGE_START_USD
+    target = CHALLENGE_TARGET_USD
     now    = datetime.now(timezone.utc)
 
     if balance is None:
@@ -444,13 +444,13 @@ def _send_challenge_update():
 
     # Next milestone
     next_ms = next((m for m in CHALLENGE_MILESTONES if m > balance), None)
-    ms_line = f"Next milestone: €{next_ms:,.0f}" if next_ms else "🏆 TARGET REACHED!"
+    ms_line = f"Next milestone: ${next_ms:,.0f}" if next_ms else "🏆 TARGET REACHED!"
 
     send_public(
         f"🎯 *Challenge Update — {now.strftime('%b %d, %Y')}*\n\n"
-        f"€1,000 → €100,000\n\n"
-        f"Balance: *€{balance:,.2f}*\n"
-        f"{trend} {sign}€{abs(gain_eur):,.2f} ({sign}{gain_pct:.1f}%) since start\n\n"
+        f"$1,000 → $100,000\n\n"
+        f"Balance: *${balance:,.2f}*\n"
+        f"{trend} {sign}${abs(gain_eur):,.2f} ({sign}{gain_pct:.1f}%) since start\n\n"
         f"Progress: {progress:.1f}%\n"
         f"`{bar}`\n\n"
         f"{ms_line}\n\n"
@@ -735,6 +735,93 @@ def _job_whalewatch():
         _err("WhaleWatch", e)
 
 
+def _job_market_open():
+    try:
+        _send_market_open()
+    except Exception as e:
+        _err("MarketOpen", e)
+
+
+def _send_market_open():
+    """Mon–Fri 14:30 CET — US market open snapshot."""
+    from bot.datafeed_bitget import _public_get, BITGET_PRODUCT_TYPE
+
+    def _ticker(sym):
+        try:
+            raw = _public_get(
+                "/api/v2/mix/market/ticker",
+                {"symbol": sym, "productType": BITGET_PRODUCT_TYPE}
+            )
+            items = (raw or {}).get("data") or {}
+            if isinstance(items, list):
+                items = items[0] if items else {}
+            def _f(k):
+                v = items.get(k)
+                try: return float(v) if v not in (None, "") else None
+                except: return None
+            return {
+                "last":    _f("lastPr"),
+                "chg24h":  _f("change24h"),
+                "high":    _f("high24h"),
+                "low":     _f("low24h"),
+                "funding": _f("fundingRate"),
+            }
+        except Exception:
+            return None
+
+    btc = _ticker("BTCUSDT")
+    eth = _ticker("ETHUSDT")
+    now = datetime.now(timezone.utc)
+
+    if not btc and not eth:
+        return
+
+    lines = [f"🔔 *US Market Open — {now.strftime('%b %d, %H:%M')} UTC*\n"]
+
+    if btc:
+        chg  = btc["chg24h"] or 0
+        sign = "+" if chg >= 0 else ""
+        e    = "📈" if chg >= 0 else "📉"
+        fund = f" | Funding: {'positive' if (btc['funding'] or 0) > 0 else 'negative'}" if btc["funding"] is not None else ""
+        lines.append(
+            f"₿ BTC  ${btc['last']:,.0f} | {e} {sign}{chg:.2f}%"
+            f" | H {btc['high']:,.0f} / L {btc['low']:,.0f}{fund}"
+        )
+
+    if eth:
+        chg  = eth["chg24h"] or 0
+        sign = "+" if chg >= 0 else ""
+        e    = "📈" if chg >= 0 else "📉"
+        fund = f" | Funding: {'positive' if (eth['funding'] or 0) > 0 else 'negative'}" if eth["funding"] is not None else ""
+        # ETH vs BTC performance
+        if btc and btc["chg24h"] is not None:
+            rel = "outperformed" if chg > (btc["chg24h"] or 0) else "underperformed"
+            lines.append(
+                f"Ξ ETH  ${eth['last']:,.2f} | {e} {sign}{chg:.2f}%"
+                f" | {rel} BTC{fund}"
+            )
+        else:
+            lines.append(f"Ξ ETH  ${eth['last']:,.2f} | {e} {sign}{chg:.2f}%{fund}")
+
+    # Overall bias
+    btc_chg = (btc["chg24h"] or 0) if btc else 0
+    eth_chg = (eth["chg24h"] or 0) if eth else 0
+    avg_chg = (btc_chg + eth_chg) / 2
+
+    if avg_chg > 1.5:
+        bias = "🟢 Bullish open"
+    elif avg_chg > 0:
+        bias = "🟡 Cautious open"
+    elif avg_chg > -1.5:
+        bias = "🟠 Soft open"
+    else:
+        bias = "🔴 Bearish open"
+
+    lines.append(f"\nBias: {bias}")
+
+    send_text("\n".join(lines))
+
+
 def _on_job_error(event):
     print(f"[APScheduler] Job {event.job_id} raised: {event.exception}", flush=True)
 
@@ -793,6 +880,14 @@ def start_scheduler():
         id="monthly_perf", max_instances=1,
     )
     print("📊 MonthlyPerf scheduled (1st Mon 09:30) ✅", flush=True)
+
+    # ── Market Open Alert — Mon–Fri 13:30 UTC (14:30 CET)
+    if os.getenv("ENABLE_MARKET_OPEN", "true").lower() in ("1", "true", "yes", "on"):
+        SCHED.add_job(
+            _job_market_open, "cron", day_of_week="mon-fri", hour=13, minute=30,
+            id="market_open", max_instances=1,
+        )
+        print("🔔 Market Open Alert scheduled (Mon–Fri 13:30 UTC) ✅", flush=True)
 
     # ── CorrelWatch — every 30 minutes
     SCHED.add_job(
