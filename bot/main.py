@@ -790,6 +790,27 @@ def command_loop():
                 if chat_allow and chat != chat_allow:
                     continue
 
+                # ── New member welcome ───────────────────────────────
+                new_members = msg.get("new_chat_members") or []
+                for member in new_members:
+                    if member.get("is_bot"):
+                        continue
+                    username = member.get("username")
+                    first    = member.get("first_name", "")
+                    mention  = f"@{username}" if username else first
+                    send_text(
+                        f"🔥 {mention} just entered the HQ.\n\n"
+                        f"No hype. No calls. No noise.\n"
+                        f"Just real-time intelligence and live execution.\n\n"
+                        f"Read the pinned message.\n"
+                        f"Activate copy trading.\n"
+                        f"Let the system do the rest.\n\n"
+                        f"🚀 https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
+                    )
+
+                if not text:
+                    continue
+
                 try:
                     _handle_command(text, text_raw)
                 except Exception as e:
