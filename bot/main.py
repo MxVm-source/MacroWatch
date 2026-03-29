@@ -45,6 +45,27 @@ import bot.modules.whalewatch      as whalewatch
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
 
+# ─── Public channel + Challenge config ───────────────────────────────────────
+PUBLIC_CHAT_ID       = os.getenv("PUBLIC_CHAT_ID", "")
+CHALLENGE_START_EUR  = float(os.getenv("CHALLENGE_START_EUR", "1032.80"))
+CHALLENGE_TARGET_EUR = float(os.getenv("CHALLENGE_TARGET_EUR", "100000"))
+CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
+
+def send_public(text: str):
+    """Send a message to the public channel."""
+    if not PUBLIC_CHAT_ID:
+        return
+    try:
+        import requests as _req
+        _req.post(
+            f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN', '')}/sendMessage",
+            json={"chat_id": PUBLIC_CHAT_ID, "text": text, "parse_mode": "Markdown",
+                  "disable_web_page_preview": True},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[send_public] Error: {e}", flush=True)
+
 # ─── PositionWatch state ─────────────────────────────────────────────────────
 # Tracks last known snapshot per symbol so we can detect changes.
 # Initialised as None — first poll just seeds the baseline, no alerts.
@@ -305,6 +326,82 @@ def _poll_positions():
 
 
 # ─── WeeklyPerf ──────────────────────────────────────────────────────────────
+
+def _fetch_account_balance_eur() -> float | None:
+    """
+    Fetch total futures account equity from Bitget in USDT.
+    Treated as EUR equivalent for the challenge.
+    """
+    from bot.datafeed_bitget import _signed_request, BITGET_PRODUCT_TYPE, BITGET_MARGIN_COIN
+    try:
+        res = _signed_request(
+            "GET",
+            "/api/v2/mix/account/accounts",
+            params={"productType": BITGET_PRODUCT_TYPE},
+        )
+        accounts = (res.get("data") or [])
+        if isinstance(accounts, list):
+            for acc in accounts:
+                if (acc.get("marginCoin") or "").upper() == BITGET_MARGIN_COIN.upper():
+                    equity = acc.get("usdtEquity") or acc.get("equity") or acc.get("available")
+                    return float(equity) if equity else None
+        return None
+    except Exception as e:
+        print(f"[ChallengeUpdate] Balance fetch failed: {e}", flush=True)
+        return None
+
+
+def _job_challenge_update():
+    try:
+        _send_challenge_update()
+    except Exception as e:
+        _err("ChallengeUpdate", e)
+
+
+def _send_challenge_update():
+    """Monday 09:15 — post challenge progress to public channel."""
+    balance = _fetch_account_balance_eur()
+
+    start  = CHALLENGE_START_EUR
+    target = CHALLENGE_TARGET_EUR
+    now    = datetime.now(timezone.utc)
+
+    if balance is None:
+        send_public(
+            f"🎯 *Challenge Update — {now.strftime('%b %d')}*\n\n"
+            f"Could not fetch balance — check back soon."
+        )
+        return
+
+    gain_eur = balance - start
+    gain_pct = (balance - start) / start * 100
+    progress = (balance - start) / (target - start) * 100
+    progress = min(progress, 100)
+
+    # Emoji based on performance
+    trend = "📈" if gain_eur >= 0 else "📉"
+    sign  = "+" if gain_eur >= 0 else ""
+
+    # Progress bar (10 blocks)
+    filled = int(progress / 10)
+    bar    = "█" * filled + "░" * (10 - filled)
+
+    # Next milestone
+    next_ms = next((m for m in CHALLENGE_MILESTONES if m > balance), None)
+    ms_line = f"Next milestone: €{next_ms:,.0f}" if next_ms else "🏆 TARGET REACHED!"
+
+    send_public(
+        f"🎯 *Challenge Update — {now.strftime('%b %d, %Y')}*\n\n"
+        f"€1,000 → €100,000\n\n"
+        f"Balance: *€{balance:,.2f}*\n"
+        f"{trend} {sign}€{abs(gain_eur):,.2f} ({sign}{gain_pct:.1f}%) since start\n\n"
+        f"Progress: {progress:.1f}%\n"
+        f"`{bar}`\n\n"
+        f"{ms_line}\n\n"
+        f"🤖 Copy trading live on Bitget\n"
+        f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
+    )
+
 
 def _job_weekly_perf():
     try:
@@ -657,6 +754,14 @@ def start_scheduler():
         print("🐋 WhaleWatch scheduled (5min) ✅", flush=True)
     else:
         print("🐋 WhaleWatch disabled (ETHERSCAN_API_KEY not set)", flush=True)
+
+    # ── Challenge update — Monday 09:15 (public channel)
+    if os.getenv("PUBLIC_CHAT_ID"):
+        SCHED.add_job(
+            _job_challenge_update, "cron", day_of_week="mon", hour=9, minute=15,
+            id="challenge_update", max_instances=1,
+        )
+        print("🎯 Challenge Update scheduled (Mon 09:15) ✅", flush=True)
 
     # ── FedWatch Monday rate probability push — Monday 08:00
     SCHED.add_job(
