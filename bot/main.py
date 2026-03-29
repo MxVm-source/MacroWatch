@@ -39,7 +39,6 @@ import bot.modules.cryptowatch     as cryptowatch
 import bot.modules.cryptowatch_daily as cryptowatch_daily
 import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.correlwatch     as correlwatch
-import bot.modules.tariffwatch     as tariffwatch
 from bot.modules.pnlcard import send_card as send_pnl_card
 from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
@@ -722,13 +721,6 @@ def _job_fedwatch_monday():
         _err("FedWatch Monday", e)
 
 
-def _job_tariffwatch():
-    try:
-        tariffwatch.poll_once()
-    except Exception as e:
-        _err("TariffWatch", e)
-
-
 def _job_correlwatch():
     try:
         correlwatch.poll_once()
@@ -801,14 +793,6 @@ def start_scheduler():
         id="monthly_perf", max_instances=1,
     )
     print("📊 MonthlyPerf scheduled (1st Mon 09:30) ✅", flush=True)
-
-    # ── TariffWatch — every 15 min
-    if os.getenv("ENABLE_TARIFFWATCH", "true").lower() in ("1", "true", "yes", "on"):
-        SCHED.add_job(
-            _job_tariffwatch, "interval", minutes=15,
-            id="tariffwatch", max_instances=1, misfire_grace_time=30,
-        )
-        print("🌐 TariffWatch scheduled (15min) ✅", flush=True)
 
     # ── CorrelWatch — every 30 minutes
     SCHED.add_job(
@@ -1011,7 +995,6 @@ def _handle_command(text: str, text_raw: str):
             "/tw_diag — Source health + dedup stats\n"
             "/tw_clear — Clear dedup cache (re-enables old posts)\n\n"
             "🌐 *TariffWatch*\n"
-            "/tariffwatch — Last trade war alerts\n"
             "/tariff_diag — Source health\n\n"
             "🏦 *FedWatch*\n"
             "/fedwatch — Next Fed event\n"
@@ -1094,21 +1077,6 @@ def _handle_command(text: str, text_raw: str):
             trumpwatch_live.show_sentiment()
         except Exception as e:
             send_text(f"🍊 [TrumpWatch] Sentiment error: {e}")
-        return
-
-    # ── /tariffwatch ─────────────────────────────────────────────────────────
-    if text.startswith("/tariffwatch"):
-        try:
-            tariffwatch.show_recent()
-        except Exception as e:
-            send_text(f"🌐 [TariffWatch] Error: {e}")
-        return
-
-    if text.startswith("/tariff_diag"):
-        try:
-            tariffwatch.show_diag()
-        except Exception as e:
-            send_text(f"🌐 [TariffWatch] Diag error: {e}")
         return
 
     # ── /fedwatch ─────────────────────────────────────────────────────────────
