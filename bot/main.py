@@ -81,6 +81,53 @@ from bot.datafeed_bitget import (
 _POS_SNAPSHOT: dict = {}   # { "BTCUSDT": { has_position, side, size, entry, tp, sl }, ... }
 _POS_INITIALISED = False
 
+# ─── Milestone tracker ───────────────────────────────────────────────────────
+# Tracks which milestones have already fired so they never repeat.
+_MILESTONES_HIT: set = set()
+
+def _check_milestones(balance: float):
+    """Check if any milestone has been crossed and fire once."""
+    for ms in CHALLENGE_MILESTONES:
+        if ms in _MILESTONES_HIT:
+            continue
+        if balance >= ms:
+            _MILESTONES_HIT.add(ms)
+            _fire_milestone(ms, balance)
+
+def _fire_milestone(ms: float, balance: float):
+    gain_pct = (balance - CHALLENGE_START_EUR) / CHALLENGE_START_EUR * 100
+    is_target = ms >= CHALLENGE_TARGET_EUR
+
+    if is_target:
+        msg = (
+            f"🏆 *CHALLENGE COMPLETE!*\n\n"
+            f"€1,000 → €100,000 ✅\n\n"
+            f"Balance: €{balance:,.2f}\n"
+            f"Total gain: +{gain_pct:.1f}%\n\n"
+            f"The machine did it.\n"
+            f"Zero emotion. Pure execution.\n\n"
+            f"🤖 Copy trading live on Bitget\n"
+            f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
+        )
+    else:
+        # Milestone emoji per level
+        emojis = {2500: "🔥", 5000: "🚀", 10000: "💎", 25000: "⚡", 50000: "🌙"}
+        emoji  = emojis.get(int(ms), "📈")
+        msg = (
+            f"{emoji} *Milestone Hit — €{ms:,.0f}*\n\n"
+            f"€1,000 → €100,000\n"
+            f"Current: €{balance:,.2f} (+{gain_pct:.1f}%)\n\n"
+            f"Next target: €{next((m for m in CHALLENGE_MILESTONES if m > ms), 100000):,.0f}\n\n"
+            f"🤖 Copy trading live on Bitget\n"
+            f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
+        )
+
+    # Fire to both private group and public channel
+    send_text(msg)
+    send_public(msg)
+    print(f"[Milestone] EUR {ms:,.0f} hit — balance EUR {balance:,.2f}", flush=True)
+
+
 # ─── Trade streak tracker ─────────────────────────────────────────────────────
 _STREAK: dict = {
     "count":     0,      # positive = win streak, negative = loss streak
@@ -323,6 +370,15 @@ def _poll_positions():
     if not _POS_INITIALISED:
         _POS_INITIALISED = True
         print("📘 PositionWatch baseline set ✅", flush=True)
+
+    # ── Milestone check — runs every 10s alongside position watch ────────────
+    if _POS_INITIALISED:
+        try:
+            bal = _fetch_account_balance_eur()
+            if bal is not None:
+                _check_milestones(bal)
+        except Exception as _me:
+            pass
 
 
 # ─── WeeklyPerf ──────────────────────────────────────────────────────────────
