@@ -473,7 +473,7 @@ def _send_weekly_perf():
     Falls back to ETH price change if no API credentials.
     """
     from bot.datafeed_bitget import (
-        _signed_request, _public_get, _to_float,
+        _signed_request, _to_float,
         BITGET_PRODUCT_TYPE, BITGET_API_KEY
     )
 
@@ -486,13 +486,14 @@ def _send_weekly_perf():
     # ── ETH 7D price context ─────────────────────────────────────────────────
     eth_line = ""
     try:
-        raw = _public_get(
-            "/api/v2/mix/market/candles",
-            {"symbol": sym, "granularity": "4H", "limit": "42",
-             "productType": BITGET_PRODUCT_TYPE}
+        r = requests.get(
+            "https://api.bitget.com/api/v2/mix/market/candles",
+            params={"symbol": sym, "granularity": "4H", "limit": "42",
+                    "productType": BITGET_PRODUCT_TYPE},
+            timeout=8,
         )
-        data   = (raw or {}).get("data") or []
-        closes = [float(r[4]) for r in data if isinstance(r, (list,tuple)) and len(r) >= 5]
+        data   = (r.json().get("data") or []) if r.ok else []
+        closes = [float(row[4]) for row in data if isinstance(row, (list,tuple)) and len(row) >= 5]
         if closes:
             chg = (closes[-1] - closes[0]) / closes[0] * 100
             e   = "📈" if chg >= 0 else "📉"
@@ -613,7 +614,7 @@ def _send_monthly_perf():
     Personal trading performance only — no strategy names or links.
     """
     from bot.datafeed_bitget import (
-        _signed_request, _public_get, _to_float,
+        _signed_request, _to_float,
         BITGET_PRODUCT_TYPE, BITGET_API_KEY
     )
 
@@ -626,13 +627,14 @@ def _send_monthly_perf():
     # ── ETH 30D price context ────────────────────────────────────────────────
     eth_line = ""
     try:
-        raw = _public_get(
-            "/api/v2/mix/market/candles",
-            {"symbol": sym, "granularity": "4H", "limit": "180",
-             "productType": BITGET_PRODUCT_TYPE}
+        r = requests.get(
+            "https://api.bitget.com/api/v2/mix/market/candles",
+            params={"symbol": sym, "granularity": "4H", "limit": "180",
+                    "productType": BITGET_PRODUCT_TYPE},
+            timeout=8,
         )
-        data   = (raw or {}).get("data") or []
-        closes = [float(r[4]) for r in data if isinstance(r, (list,tuple)) and len(r) >= 5]
+        data   = (r.json().get("data") or []) if r.ok else []
+        closes = [float(row[4]) for row in data if isinstance(row, (list,tuple)) and len(row) >= 5]
         if closes:
             chg = (closes[-1] - closes[0]) / closes[0] * 100
             e   = "📈" if chg >= 0 else "📉"
@@ -744,14 +746,16 @@ def _job_market_open():
 
 def _send_market_open():
     """Mon–Fri 14:30 CET — US market open snapshot."""
-    from bot.datafeed_bitget import _public_get, BITGET_PRODUCT_TYPE
+    from bot.datafeed_bitget import BITGET_PRODUCT_TYPE
 
     def _ticker(sym):
         try:
-            raw = _public_get(
-                "/api/v2/mix/market/ticker",
-                {"symbol": sym, "productType": BITGET_PRODUCT_TYPE}
+            r = requests.get(
+                "https://api.bitget.com/api/v2/mix/market/ticker",
+                params={"symbol": sym, "productType": BITGET_PRODUCT_TYPE},
+                timeout=6,
             )
+            raw   = r.json() if r.ok else {}
             items = (raw or {}).get("data") or {}
             if isinstance(items, list):
                 items = items[0] if items else {}
