@@ -528,3 +528,103 @@ def build_positions_and_orders_message(symbols: list[str] | None = None) -> str:
         return f"ℹ️ No open positions or pending TP/SL orders for: {', '.join(symbols)}."
 
     return "\n\n────────────\n\n".join(blocks)
+
+# ─── ADD THIS TO datafeed_bitget.py ──────────────────────────────────────────
+# Paste this block at the bottom of datafeed_bitget.py
+# It fetches the ELITE account (scalper) USDT balance for the challenge tracker
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Elite account credentials (scalper — challenge account)
+# Add these to Render env vars:
+#   ELITE_API_KEY        = your elite Bitget API key
+#   ELITE_API_SECRET     = your elite Bitget API secret
+#   ELITE_API_PASSPHRASE = your elite Bitget passphrase
+
+ELITE_API_KEY        = os.environ.get("ELITE_API_KEY", "")
+ELITE_API_SECRET     = os.environ.get("ELITE_API_SECRET", "")
+ELITE_API_PASSPHRASE = os.environ.get("ELITE_API_PASSPHRASE", "")
+
+
+def _signed_request_elite(method: str, request_path: str,
+                           params: dict | None = None,
+                           body: dict | None = None):
+    """Same as _signed_request but uses ELITE account credentials."""
+    if not (ELITE_API_KEY and ELITE_API_SECRET and ELITE_API_PASSPHRASE):
+        raise RuntimeError("Elite API credentials not set")
+
+    method    = method.upper()
+    timestamp = str(int(time.time() * 1000))
+    query     = ""
+
+    if params:
+        from urllib.parse import urlencode
+        query = urlencode(params)
+
+    body_str = json.dumps(body, separators=(",", ":")) if body else ""
+
+    if query:
+        prehash = timestamp + method + request_path + "?" + query + body_str
+        url     = f"{BITGET_BASE_URL}{request_path}?{query}"
+    else:
+        prehash = timestamp + method + request_path + body_str
+        url     = f"{BITGET_BASE_URL}{request_path}"
+
+    sign = hmac.new(
+        ELITE_API_SECRET.encode(),
+        prehash.encode(),
+        hashlib.sha256
+    ).digest()
+
+    headers = {
+        "ACCESS-KEY":        ELITE_API_KEY,
+        "ACCESS-SIGN":       base64.b64encode(sign).decode(),
+        "ACCESS-TIMESTAMP":  timestamp,
+        "ACCESS-PASSPHRASE": ELITE_API_PASSPHRASE,
+        "Content-Type":      "application/json",
+    }
+
+    if method == "GET":
+        r = requests.get(url, headers=headers, timeout=10)
+    else:
+        r = requests.post(url, headers=headers, data=body_str, timeout=10)
+
+    if r.status_code != 200:
+        raise RuntimeError(f"Elite Bitget HTTP {r.status_code}: {r.text}")
+
+    data = r.json()
+    if data.get("code") != "00000":
+        raise RuntimeError(f"Elite Bitget API error {data.get('code')}: {data.get('msg')}")
+
+    return data
+
+
+def get_elite_usdt_balance() -> float | None:
+    """
+    Fetch total USDT balance on the ELITE account (scalper / challenge account).
+    Returns the available + frozen USDT as a float, or None on error.
+    Used by the challenge milestone tracker in main.py.
+    """
+    try:
+        res = _signed_request_elite(
+            "GET",
+            "/api/v2/mix/account/accounts",
+            params={
+                "productType": BITGET_PRODUCT_TYPE,
+                "marginCoin":  "USDT",
+            }
+        )
+        accounts = res.get("data") or []
+        if isinstance(accounts, dict):
+            accounts = [accounts]
+
+        for acc in accounts:
+            coin = (acc.get("marginCoin") or acc.get("coin") or "").upper()
+            if coin == "USDT":
+                # usdtEquity = total account value including unrealized PnL
+                equity = acc.get("usdtEquity") or acc.get("available") or "0"
+                return round(float(equity), 2)
+
+        return None
+    except Exception as e:
+        print(f"[Elite] Balance fetch error: {e}", flush=True)
+        return None
