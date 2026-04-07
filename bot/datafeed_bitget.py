@@ -529,16 +529,14 @@ def build_positions_and_orders_message(symbols: list[str] | None = None) -> str:
 
     return "\n\n────────────\n\n".join(blocks)
 
-# ─── ADD THIS TO datafeed_bitget.py ──────────────────────────────────────────
-# Paste this block at the bottom of datafeed_bitget.py
-# It fetches the ELITE account (scalper) USDT balance for the challenge tracker
-# ─────────────────────────────────────────────────────────────────────────────
 
-# Elite account credentials (scalper — challenge account)
+# ======================
+# Elite Account (Scalper — Challenge Tracker)
+# ======================
 # Add these to Render env vars:
-#   ELITE_API_KEY        = your elite Bitget API key
-#   ELITE_API_SECRET     = your elite Bitget API secret
-#   ELITE_API_PASSPHRASE = your elite Bitget passphrase
+#   ELITE_API_KEY        = elite Bitget API key
+#   ELITE_API_SECRET     = elite Bitget API secret
+#   ELITE_API_PASSPHRASE = elite Bitget passphrase
 
 ELITE_API_KEY        = os.environ.get("ELITE_API_KEY", "")
 ELITE_API_SECRET     = os.environ.get("ELITE_API_SECRET", "")
@@ -601,7 +599,7 @@ def _signed_request_elite(method: str, request_path: str,
 def get_elite_usdt_balance() -> float | None:
     """
     Fetch total USDT balance on the ELITE account (scalper / challenge account).
-    Returns the available + frozen USDT as a float, or None on error.
+    Returns usdtEquity as float, or None on error.
     Used by the challenge milestone tracker in main.py.
     """
     try:
@@ -620,7 +618,6 @@ def get_elite_usdt_balance() -> float | None:
         for acc in accounts:
             coin = (acc.get("marginCoin") or acc.get("coin") or "").upper()
             if coin == "USDT":
-                # usdtEquity = total account value including unrealized PnL
                 equity = acc.get("usdtEquity") or acc.get("available") or "0"
                 return round(float(equity), 2)
 

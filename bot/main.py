@@ -49,7 +49,7 @@ STARTED_AT_UTC = datetime.now(timezone.utc)
 
 # ─── Public channel + Challenge config ───────────────────────────────────────
 PUBLIC_CHAT_ID       = os.getenv("PUBLIC_CHAT_ID", "")
-CHALLENGE_START_USD  = float(os.getenv("CHALLENGE_START_USD", "1032.80"))
+CHALLENGE_START_USD  = float(os.getenv("CHALLENGE_START_USD", "1000.00"))
 CHALLENGE_TARGET_USD = float(os.getenv("CHALLENGE_TARGET_USD", "100000"))
 CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
 
@@ -78,6 +78,7 @@ from bot.datafeed_bitget import (
     _to_float,
     iso_utc_now,
     BITGET_SYMBOLS,
+    get_elite_usdt_balance,
 )
 
 _POS_SNAPSHOT: dict = {}   # { "BTCUSDT": { has_position, side, size, entry, tp, sl }, ... }
@@ -106,9 +107,9 @@ def _fire_milestone(ms: float, balance: float):
             f"$1,000 → $100,000 ✅\n\n"
             f"Balance: ${balance:,.2f}\n"
             f"Total gain: +{gain_pct:.1f}%\n\n"
-            f"The machine did it.\n"
+            f"Built it. Turned it on. Let it compound.\n"
             f"Zero emotion. Pure execution.\n\n"
-            f"🤖 Copy trading live on Bitget\n"
+            f"💎 Copy trading live on Bitget\n"
             f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
         )
     else:
@@ -393,25 +394,15 @@ def _poll_positions():
 
 def _fetch_account_balance_eur() -> float | None:
     """
-    Fetch total futures account equity from Bitget in USDT.
-    Treated as EUR equivalent for the challenge.
+    Fetch ELITE account (scalper) USDT balance for the challenge tracker.
+    The challenge tracks the scalper account — AVAX · LIT · PENDLE.
+    Uses ELITE_API_KEY / ELITE_API_SECRET / ELITE_API_PASSPHRASE env vars.
     """
-    from bot.datafeed_bitget import _signed_request, BITGET_PRODUCT_TYPE, BITGET_MARGIN_COIN
     try:
-        res = _signed_request(
-            "GET",
-            "/api/v2/mix/account/accounts",
-            params={"productType": BITGET_PRODUCT_TYPE},
-        )
-        accounts = (res.get("data") or [])
-        if isinstance(accounts, list):
-            for acc in accounts:
-                if (acc.get("marginCoin") or "").upper() == BITGET_MARGIN_COIN.upper():
-                    equity = acc.get("usdtEquity") or acc.get("equity") or acc.get("available")
-                    return float(equity) if equity else None
-        return None
+        balance = get_elite_usdt_balance()
+        return balance
     except Exception as e:
-        print(f"[ChallengeUpdate] Balance fetch failed: {e}", flush=True)
+        print(f"[ChallengeUpdate] Elite balance fetch failed: {e}", flush=True)
         return None
 
 
