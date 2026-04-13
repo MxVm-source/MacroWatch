@@ -8,7 +8,6 @@ Polling architecture (all via APScheduler, no raw threads for polling):
   CryptoWatch  → weekly cron (Sunday 18:00)
   CryptoDaily  → daily cron  (15:28)
   PositionWatch → every 10s (open/close/TP/SL detection)
-  VolWatch     → weekly cron (Monday 08:05 UTC)
 
 Command loop runs in a single daemon thread.
 All poll functions are wrapped so one crash never kills the scheduler.
@@ -43,7 +42,8 @@ import bot.modules.correlwatch     as correlwatch
 from bot.modules.pnlcard import send_card as send_pnl_card
 from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
-import bot.modules.volwatch        as volwatch
+
+log = logging.getLogger("main")
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
 
@@ -193,12 +193,6 @@ def _job_cryptowatch_weekly():
             cryptowatch.main()
     except Exception as e:
         _err("CryptoWatch Weekly", e)
-
-def _job_volwatch():
-    try:
-        volwatch.main()
-    except Exception as e:
-        _err("VolWatch", e)
 
 def _err(module: str, exc: Exception):
     msg = f"⚠️ [{module}] Job error: {str(exc)[:200]}"
@@ -503,6 +497,7 @@ def _send_weekly_perf():
 
     # ── Closed trades (authenticated) ────────────────────────────────────────
     trades_section = ""
+    closed = []
     if BITGET_API_KEY:
         try:
             start_ms = int(week_start_dt.timestamp() * 1000)
@@ -924,14 +919,6 @@ def start_scheduler():
     )
     print("🏦 FedWatch Monday push scheduled (Mon 08:00) ✅", flush=True)
 
-    # ── VolWatch — Monday 08:05 UTC (just after FedWatch Monday push)
-    if os.getenv("ENABLE_VOLWATCH", "true").lower() in ("1", "true", "yes", "on"):
-        SCHED.add_job(
-            _job_volwatch, "cron", day_of_week="mon", hour=8, minute=5,
-            id="volwatch_weekly", max_instances=1,
-        )
-        print("📊 VolWatch scheduled (Mon 08:05 UTC) ✅", flush=True)
-
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
 
@@ -1023,20 +1010,6 @@ def _build_health_msg() -> str:
         f"  Last alert: {cw_alert.strftime('%Y-%m-%d %H:%M UTC') if cw_alert else 'None yet'}",
     ]
 
-    # VolWatch state
-    vw_last  = volwatch.STATE.get("last_scan_utc")
-    vw_scans = volwatch.STATE.get("total_scans", 0)
-    vw_rem   = len(volwatch.STATE.get("remove_signals", []))
-    vw_add   = len(volwatch.STATE.get("add_signals", []))
-    lines += [
-        "",
-        "📊 *VolWatch*",
-        f"  Last scan: {vw_last.strftime('%Y-%m-%d %H:%M UTC') if vw_last else '—'}",
-        f"  Total scans: {vw_scans}",
-        f"  Remove signals: {vw_rem}",
-        f"  Add signals: {vw_add}",
-    ]
-
     # FedWatch state
     fw_events = len(fedwatch.STATE.get("events", []))
     fw_alerts = len(fedwatch.STATE.get("alert_queue", []))
@@ -1122,9 +1095,6 @@ def _handle_command(text: str, text_raw: str):
             "📊 *CryptoWatch*\n"
             "/cw_daily — Daily market brief\n"
             "/cw_weekly — Weekly sentiment\n\n"
-            "📊 *VolWatch*\n"
-            "/volwatch — Trigger weekly vol scan\n"
-            "/vol_diag — Last scan + rotation signals\n\n"
             "🩺 *System*\n"
             "/health — Full system status\n"
             "/restart — Trigger clean poll of all modules\n"
@@ -1223,23 +1193,6 @@ def _handle_command(text: str, text_raw: str):
         else:
             send_text("📊 [CryptoWatch] Weekly disabled (main() not found).")
         return
-
-    # ── /volwatch / /vol_diag ────────────────────────────────────────────────
-    if text.startswith("/volwatch"):
-        try:
-            send_text("📊 [VolWatch] Scan started — takes ~2 min...")
-            volwatch.main()
-        except Exception as e:
-            send_text(f"📊 [VolWatch] Error: {e}")
-        return
-
-    if text.startswith("/vol_diag"):
-        try:
-            volwatch.show_diag()
-        except Exception as e:
-            send_text(f"📊 [VolWatch] Diag error: {e}")
-        return
-
 
 
 
