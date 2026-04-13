@@ -38,7 +38,6 @@ import bot.modules.fedwatch        as fedwatch
 import bot.modules.cryptowatch     as cryptowatch
 import bot.modules.cryptowatch_daily as cryptowatch_daily
 import bot.modules.trumpwatch_live as trumpwatch_live
-import bot.modules.correlwatch     as correlwatch
 from bot.modules.pnlcard import send_card as send_pnl_card
 from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
@@ -717,13 +716,6 @@ def _job_fedwatch_monday():
         _err("FedWatch Monday", e)
 
 
-def _job_correlwatch():
-    try:
-        correlwatch.poll_once()
-    except Exception as e:
-        _err("CorrelWatch", e)
-
-
 def _job_whalewatch():
     try:
         whalewatch.poll_once()
@@ -887,13 +879,6 @@ def start_scheduler():
         )
         print("🔔 Market Open Alert scheduled (Mon–Fri 13:30 UTC) ✅", flush=True)
 
-    # ── CorrelWatch — every 30 minutes
-    SCHED.add_job(
-        _job_correlwatch, "interval", minutes=30,
-        id="correlwatch", max_instances=1, misfire_grace_time=60,
-    )
-    print("📡 CorrelWatch scheduled (30min) ✅", flush=True)
-
     # ── WhaleWatch — every 5 min
     if os.getenv("ETHERSCAN_API_KEY"):
         SCHED.add_job(
@@ -995,19 +980,6 @@ def _build_health_msg() -> str:
         f"  Last check: {ww_check.strftime('%H:%M UTC') if ww_check else '—'}",
         f"  Alerts fired: {ww_fired}",
         f"  Last alert: {ww_last.strftime('%Y-%m-%d %H:%M UTC') if ww_last else 'None yet'}",
-    ]
-
-    # CorrelWatch state
-    cw_last  = correlwatch.STATE.get("last_check_utc")
-    cw_dxy   = correlwatch.STATE.get("last_dxy")
-    cw_btc   = correlwatch.STATE.get("last_btc")
-    cw_alert = correlwatch.STATE.get("last_alert_utc")
-    lines += [
-        "",
-        "📡 *CorrelWatch*",
-        f"  Last check: {cw_last.strftime('%H:%M UTC') if cw_last else '—'}",
-        f"  DXY: {f'{cw_dxy:+.2f}%' if cw_dxy is not None else '—'} | BTC: {f'{cw_btc:+.2f}%' if cw_btc is not None else '—'}",
-        f"  Last alert: {cw_alert.strftime('%Y-%m-%d %H:%M UTC') if cw_alert else 'None yet'}",
     ]
 
     # FedWatch state
