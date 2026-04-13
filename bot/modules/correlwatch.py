@@ -49,23 +49,41 @@ STATE = {
 # ─── Data fetchers ────────────────────────────────────────────────────────────
 
 def _fetch_dxy_change() -> float | None:
-    """Fetch DXY 1D change % from Finnhub."""
-    if not FINNHUB_KEY:
-        return None
+    """Fetch DXY 1D change % — tries Finnhub first, falls back to stooq."""
+    # Finnhub path
+    if FINNHUB_KEY:
+        try:
+            r = requests.get(
+                f"{FINNHUB_BASE}/quote",
+                params={"symbol": "INDEX:DXY", "token": FINNHUB_KEY},
+                timeout=6,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                dp = data.get("dp")
+                if dp is not None:
+                    return float(dp)
+        except Exception as e:
+            log.warning(f"DXY Finnhub fetch failed: {e}")
+
+    # Fallback: stooq (no key needed)
     try:
         r = requests.get(
-            f"{FINNHUB_BASE}/quote",
-            params={"symbol": "FOREX:USDX", "token": FINNHUB_KEY},
-            timeout=6,
+            "https://stooq.com/q/l/?s=dx.f&f=sd2t2ohlcv&h&e=csv",
+            timeout=8,
         )
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        dp = data.get("dp")
-        return float(dp) if dp is not None else None
+        lines = r.text.strip().splitlines()
+        if len(lines) >= 2:
+            parts = lines[1].split(",")
+            # columns: Symbol,Date,Time,Open,High,Low,Close,Volume
+            close = float(parts[6])
+            open_ = float(parts[3])
+            if open_ > 0:
+                return round((close - open_) / open_ * 100, 3)
     except Exception as e:
-        log.warning(f"DXY fetch failed: {e}")
-        return None
+        log.warning(f"DXY stooq fallback failed: {e}")
+
+    return None
 
 
 def _fetch_btc_change() -> float | None:
@@ -150,7 +168,33 @@ def _classify(dxy_chg: float, btc_chg: float) -> dict | None:
     return None
 
 
-# ─── Poll ────────────────────────────────────────────────────────────────────
+
+# ─── Diag ────────────────────────────────────────────────────────────────────
+
+def show_diag():
+    last_check = STATE["last_check_utc"]
+    last_alert = STATE["last_alert_utc"]
+    dxy = STATE["last_dxy"]
+    btc = STATE["last_btc"]
+
+    dxy_str = f"{dxy:+.2f}%" if dxy is not None else "—"
+    btc_str = f"{btc:+.2f}%" if btc is not None else "—"
+
+    lines = [
+        "📡 *CorrelWatch Diagnostics*",
+        "",
+        f"Last check: {last_check.strftime('%Y-%m-%d %H:%M UTC') if last_check else 'Never'}",
+        f"Last alert: {last_alert.strftime('%Y-%m-%d %H:%M UTC') if last_alert else 'None yet'}",
+        "",
+        f"DXY (24h): `{dxy_str}`  _(threshold: ±{DXY_THRESHOLD}%)_",
+        f"BTC (24h): `{btc_str}`  _(threshold: ±{BTC_THRESHOLD}%)_",
+        "",
+        f"Finnhub key: {'✅ set' if FINNHUB_KEY else '⚠️ missing — using stooq fallback'}",
+        f"Cooldown: {COOLDOWN_MIN}min",
+    ]
+    send_text("\n".join(lines))
+
+
 
 def poll_once():
     now = datetime.now(timezone.utc)
