@@ -38,9 +38,11 @@ import bot.modules.fedwatch        as fedwatch
 import bot.modules.cryptowatch     as cryptowatch
 import bot.modules.cryptowatch_daily as cryptowatch_daily
 import bot.modules.trumpwatch_live as trumpwatch_live
+import bot.modules.correlwatch     as correlwatch
 from bot.modules.pnlcard import send_card as send_pnl_card
 from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
+import bot.modules.stratwatch      as stratwatch
 
 log = logging.getLogger("main")
 
@@ -496,7 +498,6 @@ def _send_weekly_perf():
 
     # ── Closed trades (authenticated) ────────────────────────────────────────
     trades_section = ""
-    closed = []
     if BITGET_API_KEY:
         try:
             start_ms = int(week_start_dt.timestamp() * 1000)
@@ -716,6 +717,13 @@ def _job_fedwatch_monday():
         _err("FedWatch Monday", e)
 
 
+def _job_correlwatch():
+    try:
+        correlwatch.poll_once()
+    except Exception as e:
+        _err("CorrelWatch", e)
+
+
 def _job_whalewatch():
     try:
         whalewatch.poll_once()
@@ -879,6 +887,13 @@ def start_scheduler():
         )
         print("🔔 Market Open Alert scheduled (Mon–Fri 13:30 UTC) ✅", flush=True)
 
+    # ── CorrelWatch — every 30 minutes
+    SCHED.add_job(
+        _job_correlwatch, "interval", minutes=30,
+        id="correlwatch", max_instances=1, misfire_grace_time=60,
+    )
+    print("📡 CorrelWatch scheduled (30min) ✅", flush=True)
+
     # ── WhaleWatch — every 5 min
     if os.getenv("ETHERSCAN_API_KEY"):
         SCHED.add_job(
@@ -906,6 +921,7 @@ def start_scheduler():
 
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
+    print("🤖 StratWatch ready — /status command live ✅", flush=True)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -980,6 +996,19 @@ def _build_health_msg() -> str:
         f"  Last check: {ww_check.strftime('%H:%M UTC') if ww_check else '—'}",
         f"  Alerts fired: {ww_fired}",
         f"  Last alert: {ww_last.strftime('%Y-%m-%d %H:%M UTC') if ww_last else 'None yet'}",
+    ]
+
+    # CorrelWatch state
+    cw_last  = correlwatch.STATE.get("last_check_utc")
+    cw_dxy   = correlwatch.STATE.get("last_dxy")
+    cw_btc   = correlwatch.STATE.get("last_btc")
+    cw_alert = correlwatch.STATE.get("last_alert_utc")
+    lines += [
+        "",
+        "📡 *CorrelWatch*",
+        f"  Last check: {cw_last.strftime('%H:%M UTC') if cw_last else '—'}",
+        f"  DXY: {f'{cw_dxy:+.2f}%' if cw_dxy is not None else '—'} | BTC: {f'{cw_btc:+.2f}%' if cw_btc is not None else '—'}",
+        f"  Last alert: {cw_alert.strftime('%Y-%m-%d %H:%M UTC') if cw_alert else 'None yet'}",
     ]
 
     # FedWatch state
@@ -1067,9 +1096,12 @@ def _handle_command(text: str, text_raw: str):
             "📊 *CryptoWatch*\n"
             "/cw_daily — Daily market brief\n"
             "/cw_weekly — Weekly sentiment\n\n"
+            "📡 *CorrelWatch*\n"
+            "/correl_diag — DXY vs BTC last reading\n\n"
             "🩺 *System*\n"
             "/health — Full system status\n"
             "/restart — Trigger clean poll of all modules\n"
+            "/status — ATRb Multi live strategy status\n"
         )
         return
 
@@ -1166,6 +1198,22 @@ def _handle_command(text: str, text_raw: str):
             send_text("📊 [CryptoWatch] Weekly disabled (main() not found).")
         return
 
+    # ── /correl_diag ─────────────────────────────────────────────────────────
+    if text.startswith("/correl_diag"):
+        try:
+            correlwatch.show_diag()
+        except Exception as e:
+            send_text(f"📡 [CorrelWatch] Diag error: {e}")
+        return
+
+    # ── /status ───────────────────────────────────────────────────────────────
+    if text.startswith("/status"):
+        try:
+            send_text("🤖 Fetching strategy status...")
+            stratwatch.show_status()
+        except Exception as e:
+            send_text(f"🤖 [StratWatch] Error: {e}")
+        return
 
 
 # ─── Entrypoint ──────────────────────────────────────────────────────────────
