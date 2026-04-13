@@ -145,13 +145,13 @@ def _compute_atr(candles: list, period: int = ATR_PERIOD) -> dict | None:
 
 # ─── Next 4H cycle ────────────────────────────────────────────────────────────
 
-def _next_4h_utc() -> str:
-    now  = datetime.now(timezone.utc)
-    hour = (now.hour // 4 + 1) * 4 % 24
-    next_cycle = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if next_cycle <= now:
-        next_cycle += timedelta(hours=4)
-    mins_left = int((next_cycle - now).total_seconds() / 60)
+def _next_4h_utc() -> tuple[str, int]:
+    now        = datetime.now(timezone.utc)
+    # Round down to current 4H block, then add 4H
+    current_block = (now.hour // 4) * 4
+    next_cycle = now.replace(hour=current_block, minute=0, second=0, microsecond=0) \
+                 + timedelta(hours=4)
+    mins_left  = max(0, int((next_cycle - now).total_seconds() / 60))
     return next_cycle.strftime("%H:%M UTC"), mins_left
 
 
@@ -248,11 +248,27 @@ def build_status() -> str:
     now              = datetime.now(timezone.utc)
     next_cycle, mins = _next_4h_utc()
 
-    # Account balance
+    # Account balance — try elite first, fall back to main account
     balance_str = "—"
     try:
-        bal = get_elite_usdt_balance()
-        if bal is not None:
+        from bot.datafeed_bitget import ELITE_API_KEY as _ELITE_KEY
+        if _ELITE_KEY:
+            bal = get_elite_usdt_balance()
+        else:
+            # Fall back to main account balance
+            from bot.datafeed_bitget import _signed_request, BITGET_PRODUCT_TYPE as _PT
+            res = _signed_request("GET", "/api/v2/mix/account/accounts",
+                                  params={"productType": _PT, "marginCoin": "USDT"})
+            accounts = res.get("data") or []
+            if isinstance(accounts, dict):
+                accounts = [accounts]
+            bal = None
+            for acc in accounts:
+                coin = (acc.get("marginCoin") or acc.get("coin") or "").upper()
+                if coin == "USDT":
+                    bal = round(float(acc.get("usdtEquity") or acc.get("available") or 0), 2)
+                    break
+        if bal is not None and bal > 0:
             balance_str = f"${bal:,.2f}"
     except Exception:
         pass
@@ -286,8 +302,15 @@ def build_status() -> str:
         if macd:
             hist    = macd["histogram"]
             rising  = hist > macd["prev_hist"]
-            m_emoji = "📈" if (macd["macd"] > macd["signal"] and rising) else \
-                      "📉" if macd["macd"] < macd["signal"] else "➡️"
+            bull    = macd["macd"] > macd["signal"]
+            if bull and rising:
+                m_emoji = "📈"
+            elif bull and not rising:
+                m_emoji = "🟡"   # bullish but momentum fading
+            elif not bull and not rising:
+                m_emoji = "📉"
+            else:
+                m_emoji = "🟡"   # bearish but momentum recovering
             macd_str = f"`{macd['macd']:+.4f}`  {m_emoji}"
         else:
             macd_str = "`—`"
