@@ -44,6 +44,7 @@ from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
 import bot.modules.stratwatch      as stratwatch
 import bot.modules.challengewatch  as challengewatch
+import bot.modules.reportwatch     as reportwatch
 
 log = logging.getLogger("main")
 
@@ -256,13 +257,15 @@ def _poll_positions():
             if not prev["has_position"] and cur["has_position"]:
                 cur["opened_at"] = datetime.now(timezone.utc)
                 send_text(
-                    f"📘 *Position Opened*\n"
+                    f"🔱 *PrimeWatch — Position Opened*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"Pair: {sym}\n"
                     f"Side: {side_emoji} {cur['side']}\n"
                     f"Entry: {cur['entry']:.2f}\n"
                     f"Size: {cur['size']}\n"
                     f"Leverage: {cur['lev']}x\n"
-                    f"Time (UTC): {iso_utc_now()}"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🕐 {iso_utc_now()}"
                 )
 
             # Position closed
@@ -328,13 +331,28 @@ def _poll_positions():
                 if not card_sent:
                     streak_line = f"\n{streak_str}" if streak_str else ""
                     send_text(
-                        f"🏁 *Position Closed*\n"
+                        f"🔱 *PrimeWatch — Position Closed*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"Pair: {sym}\n"
                         f"Side: {prev_emoji} {prev_side}"
                         f"{pnl_pct}"
                         f"{duration}"
                         f"{streak_line}\n"
-                        f"Time (UTC): {iso_utc_now()}"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🕐 {iso_utc_now()}"
+                    )
+
+                # ── Public channel post ───────────────────────────────────
+                if PUBLIC_CHAT_ID and entry and last_px:
+                    sign      = "+" if leveraged >= 0 else ""
+                    pub_emoji = "🟢" if leveraged >= 0 else "🔴"
+                    send_public(
+                        f"🔱 PrimeWatch — Trade Closed\n\n"
+                        f"Pair: {sym}\n"
+                        f"Side: {prev_side}\n"
+                        f"Est. PnL: {pub_emoji} {sign}{leveraged:.1f}%\n"
+                        f"{streak_str + chr(10) if streak_str else ''}"
+                        f"\n$1k → $100k Challenge — /challenge"
                     )
 
             elif cur["has_position"] and prev["has_position"]:
@@ -347,11 +365,12 @@ def _poll_positions():
                 for tp in prev_tps:
                     if tp not in cur_tps:
                         send_text(
-                            f"✅ *TP Hit*\n"
+                            f"✅ *PrimeWatch — TP Hit*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Pair: {sym}\n"
                             f"Side: {side_emoji} {cur['side']}\n"
                             f"TP: {tp}\n"
-                            f"Time (UTC): {iso_utc_now()}"
+                            f"🕐 {iso_utc_now()}"
                         )
 
                 # SL hit — SL price disappeared and position still open (partial fill)
@@ -359,11 +378,12 @@ def _poll_positions():
                 for sl in prev_sls:
                     if sl not in cur_sls and not cur["has_position"]:
                         send_text(
-                            f"❌ *SL Hit*\n"
+                            f"❌ *PrimeWatch — SL Hit*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Pair: {sym}\n"
                             f"Side was: {side_emoji} {prev['side']}\n"
                             f"SL: {sl}\n"
-                            f"Time (UTC): {iso_utc_now()}"
+                            f"🕐 {iso_utc_now()}"
                         )
 
             _POS_SNAPSHOT[sym] = cur
@@ -590,7 +610,9 @@ def _send_weekly_perf():
 
     if not _img_sent:
         send_text(
-            f"📊 *Weekly Recap — {week_start_str} → {week_end_str}*\n\n"
+            f"🔱 *PrimeWatch — Weekly Recap*\n"
+            f"📅 {week_start_str} → {week_end_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"{eth_line}"
             f"{trades_section}"
         )
@@ -701,7 +723,9 @@ def _send_monthly_perf():
             trades_section = f"\nTrade history unavailable: {str(e)[:80]}"
 
     send_text(
-        f"📊 *Monthly Recap — {month_start_str} → {month_end_str}*\n\n"
+        f"🔱 *PrimeWatch — Monthly Recap*\n"
+        f"📅 {month_start_str} → {month_end_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{eth_line}"
         f"{trades_section}"
     )
@@ -1055,13 +1079,21 @@ def command_loop():
                     first    = member.get("first_name", "")
                     mention  = f"@{username}" if username else first
                     send_text(
-                        f"🔥 {mention} just entered the HQ.\n\n"
-                        f"No hype. No calls. No noise.\n"
-                        f"Just real-time intelligence and live execution.\n\n"
-                        f"Read the pinned message.\n"
-                        f"Activate copy trading.\n"
-                        f"Let the system do the rest.\n\n"
-                        f"🚀 https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
+                        f"🔱 Welcome {mention}!\n\n"
+                        f"You just joined the DEGEN MACRO HQ —\n"
+                        f"home of PrimeWatch, a fully automated trading strategy\n"
+                        f"running 24/7 on ETH · BNB · SOL.\n\n"
+                        f"No charts. No noise. No emotion.\n"
+                        f"Just the system doing its work.\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Here's what to do:\n\n"
+                        f"1. Read the pinned message\n"
+                        f"2. Type /status to see the strategy live\n"
+                        f"3. Type /challenge to follow the $1k → $100k journey\n"
+                        f"4. Activate copy trading on Bitget to mirror every trade\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🚀 Copy trading live May 1, 2026\n"
+                        f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
                     )
 
                 if not text:
@@ -1104,6 +1136,7 @@ def _handle_command(text: str, text_raw: str):
             "/restart — Trigger clean poll of all modules\n"
             "/status — ATRb Multi live strategy status\n"
             "/challenge — $1k → $100k challenge progress\n"
+            "/report — Last 7 days trades + P&L\n"
         )
         return
 
@@ -1223,6 +1256,14 @@ def _handle_command(text: str, text_raw: str):
             challengewatch.show_challenge()
         except Exception as e:
             send_text(f"🎯 [Challenge] Error: {e}")
+        return
+
+    # ── /report ───────────────────────────────────────────────────────────────
+    if text.startswith("/report"):
+        try:
+            reportwatch.show_report()
+        except Exception as e:
+            send_text(f"🔱 [Report] Error: {e}")
         return
 
 
