@@ -43,6 +43,7 @@ from bot.modules.pnlcard import send_card as send_pnl_card
 from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
 import bot.modules.stratwatch      as stratwatch
+import bot.modules.challengewatch  as challengewatch
 
 log = logging.getLogger("main")
 
@@ -1102,6 +1103,7 @@ def _handle_command(text: str, text_raw: str):
             "/health — Full system status\n"
             "/restart — Trigger clean poll of all modules\n"
             "/status — ATRb Multi live strategy status\n"
+            "/challenge — $1k → $100k challenge progress\n"
         )
         return
 
@@ -1213,6 +1215,14 @@ def _handle_command(text: str, text_raw: str):
             stratwatch.show_status()
         except Exception as e:
             send_text(f"🤖 [StratWatch] Error: {e}")
+        return
+
+    # ── /challenge ────────────────────────────────────────────────────────────
+    if text.startswith("/challenge"):
+        try:
+            challengewatch.show_challenge()
+        except Exception as e:
+            send_text(f"🎯 [Challenge] Error: {e}")
         return
 
 
