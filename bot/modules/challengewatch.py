@@ -1,9 +1,16 @@
 # bot/modules/challengewatch.py
 """
-ChallengeWatch — $1k → $100k Challenge Status
+ChallengeWatch — $1k → $100k Challenge
+
+Tracks strategy performance using real closed trade P&L from Bitget,
+compounded from a virtual starting capital of $1,000.
+
+- Does NOT use account balance (avoids capital injection distortion)
+- Fees already deducted in Bitget's realizedPL field
+- Compounds each closed trade from CHALLENGE_START_DATE onward
+- Works across ETH, BNB, SOL
 
 Command: /challenge
-Shows full challenge progress, milestone tracker, pace stats, and ETA.
 """
 
 import logging
@@ -12,9 +19,8 @@ from datetime import datetime, timezone, timedelta
 
 from bot.utils import send_text
 from bot.datafeed_bitget import (
-    get_elite_usdt_balance,
-    ELITE_API_KEY,
     _signed_request,
+    _to_float,
     BITGET_PRODUCT_TYPE,
 )
 
@@ -22,51 +28,105 @@ log = logging.getLogger("challengewatch")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-CHALLENGE_START_USD  = float(os.getenv("CHALLENGE_START_USD", "1000.00"))
-CHALLENGE_TARGET_USD = float(os.getenv("CHALLENGE_TARGET_USD", "100000.00"))
-CHALLENGE_START_DATE = os.getenv("CHALLENGE_START_DATE", "2026-03-01")  # set in Render env
+VIRTUAL_START        = float(os.getenv("CHALLENGE_START_USD",  "1000.00"))
+CHALLENGE_TARGET     = float(os.getenv("CHALLENGE_TARGET_USD", "100000.00"))
+CHALLENGE_START_DATE = os.getenv("CHALLENGE_START_DATE",       "2026-05-01")
 CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
+SYMBOLS              = ["ETHUSDT", "BNBUSDT", "SOLUSDT"]
 
-BITGET_URL = "https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
-
-# ─── Balance fetch ────────────────────────────────────────────────────────────
-
-def _fetch_balance() -> float | None:
-    try:
-        if ELITE_API_KEY:
-            return get_elite_usdt_balance()
-        # Fallback to main account
-        res = _signed_request(
-            "GET", "/api/v2/mix/account/accounts",
-            params={"productType": BITGET_PRODUCT_TYPE, "marginCoin": "USDT"}
-        )
-        accounts = res.get("data") or []
-        if isinstance(accounts, dict):
-            accounts = [accounts]
-        for acc in accounts:
-            if (acc.get("marginCoin") or acc.get("coin") or "").upper() == "USDT":
-                return round(float(acc.get("usdtEquity") or acc.get("available") or 0), 2)
-    except Exception as e:
-        log.warning(f"Balance fetch failed: {e}")
-    return None
+BITGET_URL = (
+    "https://www.bitget.com/copy-trading/futures-trader-v1/"
+    "bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
+)
 
 
-# ─── Progress bar ────────────────────────────────────────────────────────────
+# ─── Trade fetcher ────────────────────────────────────────────────────────────
+
+def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
+    """
+    Fetch all filled closing orders across all strategy symbols
+    from start_dt to end_dt. Returns list of {pnl, date, symbol}.
+    """
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms   = int(end_dt.timestamp() * 1000)
+    trades   = []
+
+    for sym in SYMBOLS:
+        try:
+            res = _signed_request(
+                "GET",
+                "/api/v2/mix/order/history",
+                params={
+                    "symbol":      sym,
+                    "productType": BITGET_PRODUCT_TYPE,
+                    "startTime":   str(start_ms),
+                    "endTime":     str(end_ms),
+                    "limit":       "100",
+                }
+            )
+            orders = ((res.get("data") or {}).get("orderList") or [])
+
+            for o in orders:
+                state      = (o.get("state") or "").lower()
+                trade_side = (o.get("tradeSide") or o.get("side") or "").lower()
+                pnl_raw    = o.get("pnl") or o.get("realizedPL") or o.get("profit") or ""
+
+                if state != "filled":
+                    continue
+                if "close" not in trade_side and "reduce" not in trade_side:
+                    continue
+                try:
+                    pnl = float(pnl_raw)
+                except Exception:
+                    continue
+
+                try:
+                    ctime    = int(o.get("cTime") or o.get("uTime") or 0)
+                    dt       = datetime.fromtimestamp(ctime / 1000, tz=timezone.utc)
+                    date_str = dt.strftime("%b %d")
+                    ts       = ctime
+                except Exception:
+                    date_str = "—"
+                    ts       = 0
+
+                trades.append({
+                    "pnl":    pnl,
+                    "date":   date_str,
+                    "symbol": sym.replace("USDT", ""),
+                    "ts":     ts,
+                })
+
+        except Exception as e:
+            log.warning(f"Trade fetch failed for {sym}: {e}")
+
+    # Sort chronologically by timestamp
+    trades.sort(key=lambda x: x.get("ts", 0))
+    return trades
+
+
+# ─── Equity compounding ───────────────────────────────────────────────────────
+
+def _compound(trades: list) -> float:
+    equity = VIRTUAL_START
+    for t in trades:
+        equity += t["pnl"]
+    return round(equity, 2)
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _progress_bar(pct: float, width: int = 10) -> str:
-    filled = int(min(pct, 100) / 100 * width)
+    filled = int(min(max(pct, 0), 100) / 100 * width)
     return "▓" * filled + "░" * (width - filled)
 
 
-# ─── ETA calculation ─────────────────────────────────────────────────────────
-
-def _calc_eta(balance: float, days_running: int) -> str:
-    if days_running <= 0 or balance <= CHALLENGE_START_USD:
+def _calc_eta(equity: float, days_running: int) -> str:
+    if days_running <= 0 or equity <= VIRTUAL_START:
         return "—"
-    gain_per_day = (balance - CHALLENGE_START_USD) / days_running
+    gain_per_day = (equity - VIRTUAL_START) / days_running
     if gain_per_day <= 0:
         return "—"
-    days_remaining = (CHALLENGE_TARGET_USD - balance) / gain_per_day
+    days_remaining = (CHALLENGE_TARGET - equity) / gain_per_day
     eta_date = datetime.now(timezone.utc) + timedelta(days=days_remaining)
     return eta_date.strftime("%b %Y")
 
@@ -76,60 +136,93 @@ def _calc_eta(balance: float, days_running: int) -> str:
 def build_challenge() -> str:
     now = datetime.now(timezone.utc)
 
-    # Days running
+    # Parse start date
     try:
-        start_dt   = datetime.strptime(CHALLENGE_START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        days_running = max(1, (now - start_dt).days)
-        start_str  = start_dt.strftime("%b %d, %Y")
+        start_dt     = datetime.strptime(CHALLENGE_START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        days_running = (now - start_dt).days
+        start_str    = start_dt.strftime("%b %d, %Y")
     except Exception:
-        days_running = 1
-        start_str  = "—"
+        start_dt     = now
+        days_running = 0
+        start_str    = "—"
 
-    balance = _fetch_balance()
-    if balance is None:
-        send_text("🎯 [Challenge] ⚠️ Could not fetch balance — check API credentials.")
-        return ""
+    # ── Pre-start mode ────────────────────────────────────────────────────────
+    if days_running < 0:
+        days_to_go = abs(days_running)
+        lines = [
+            "🎯 *$1k → $100k Challenge*",
+            f"⏳ Starts in *{days_to_go} days* — {start_str}",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"💰 Virtual capital:  `${VIRTUAL_START:,.0f}`",
+            f"🏁 Target:           `${CHALLENGE_TARGET:,.0f}`",
+            f"📈 Required:         `×{CHALLENGE_TARGET / VIRTUAL_START:,.0f}`",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "🏆 *Milestones*",
+            f"⬜ ${VIRTUAL_START:,.0f} — Start 🚀",
+        ]
+        for ms in CHALLENGE_MILESTONES:
+            lines.append(f"⬜ ${ms:,.0f}")
+        lines += [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "_Capital loaded. Strategy armed._",
+            f"_Clock starts {start_str}._",
+            "",
+            f"🔗 [Copy on Bitget]({BITGET_URL})",
+        ]
+        return "\n".join(lines)
 
-    gain_usd = balance - CHALLENGE_START_USD
-    gain_pct = (gain_usd / CHALLENGE_START_USD) * 100
-    progress = min((balance - CHALLENGE_START_USD) / (CHALLENGE_TARGET_USD - CHALLENGE_START_USD) * 100, 100)
+    # ── Live mode ─────────────────────────────────────────────────────────────
+    try:
+        trades = _fetch_closed_trades(start_dt, now)
+    except Exception as e:
+        log.warning(f"Trade fetch error: {e}")
+        trades = []
+
+    equity   = _compound(trades)
+    gain_usd = equity - VIRTUAL_START
+    gain_pct = (gain_usd / VIRTUAL_START) * 100
+    progress = min(max((equity - VIRTUAL_START) / (CHALLENGE_TARGET - VIRTUAL_START) * 100, 0), 100)
     bar      = _progress_bar(progress)
 
-    gain_sign = "+" if gain_usd >= 0 else ""
+    gain_sign  = "+" if gain_usd >= 0 else ""
     gain_emoji = "📈" if gain_usd >= 0 else "📉"
 
-    # Weekly avg (based on daily avg × 7)
-    daily_avg  = gain_usd / days_running
-    weekly_avg = daily_avg * 7
+    wins      = sum(1 for t in trades if t["pnl"] > 0)
+    losses    = sum(1 for t in trades if t["pnl"] <= 0)
+    win_rate  = round(wins / len(trades) * 100) if trades else 0
 
-    # ETA
-    eta = _calc_eta(balance, days_running)
+    daily_avg  = gain_usd / max(days_running, 1)
+    weekly_avg = daily_avg * 7
+    eta        = _calc_eta(equity, max(days_running, 1))
 
     # Milestones
-    milestone_lines = [f"✅ ${CHALLENGE_START_USD:,.0f} — Start 🚀"]
+    milestone_lines = [f"✅ ${VIRTUAL_START:,.0f} — Start 🚀"]
     next_milestone  = None
     for ms in CHALLENGE_MILESTONES:
-        if balance >= ms:
+        if equity >= ms:
             milestone_lines.append(f"✅ ${ms:,.0f}")
         else:
             if next_milestone is None:
                 next_milestone = ms
-                milestone_lines.append(f"⬜ ${ms:,.0f}  ← next  (${ms - balance:,.0f} away)")
+                milestone_lines.append(f"⬜ ${ms:,.0f}  ← next  (${ms - equity:,.0f} away)")
             else:
                 milestone_lines.append(f"⬜ ${ms:,.0f}")
 
     lines = [
         "🎯 *$1k → $100k Challenge*",
-        f"📅 Day {days_running} — Started {start_str}",
+        f"📅 Day {max(days_running, 1)} — Started {start_str}",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"💰 Balance:   `${balance:,.2f}`",
+        f"💰 Equity:    `${equity:,.2f}`",
         f"{gain_emoji} Gain:      `{gain_sign}${gain_usd:,.2f}` ({gain_sign}{gain_pct:.1f}%)",
-        f"🏁 Target:    `${CHALLENGE_TARGET_USD:,.0f}`",
+        f"🏁 Target:    `${CHALLENGE_TARGET:,.0f}`",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        f"Progress: {progress:.1f}%",
-        f"`{bar}`  ${balance:,.0f} / ${CHALLENGE_TARGET_USD:,.0f}",
+        f"Progress: {progress:.2f}%",
+        f"`{bar}`  ${equity:,.0f} / ${CHALLENGE_TARGET:,.0f}",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "🏆 *Milestones*",
@@ -138,7 +231,9 @@ def build_challenge() -> str:
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "📊 *At current pace*",
+        "📊 *Performance*",
+        f"Trades:       `{len(trades)}` ({wins}W / {losses}L)",
+        f"Win rate:     `{win_rate}%`",
         f"Daily avg:    `{gain_sign}${daily_avg:,.2f}`",
         f"Weekly avg:   `{gain_sign}${weekly_avg:,.2f}`",
         f"Est. target:  `{eta}`",
