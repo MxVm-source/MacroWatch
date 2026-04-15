@@ -235,11 +235,13 @@ def _entry_conditions(analysis: dict) -> tuple[str, str]:
     if score == 4:
         return "🟢", "All conditions met — entry possible"
     elif score == 3:
-        return "🟡", "Near entry — 1 condition missing"
-    elif score <= 1:
-        return "⚪", "Cooling — waiting for setup"
-    else:
+        return "🟡", "Near entry — 1 condition pending"
+    elif score == 2:
         return "🟡", "Watching — 2 conditions pending"
+    elif score == 1:
+        return "⚪", "Early setup — 3 conditions pending"
+    else:
+        return "⚪", "No setup — waiting for conditions"
 
 
 # ─── Message builder ─────────────────────────────────────────────────────────
@@ -274,7 +276,7 @@ def build_status() -> str:
         pass
 
     lines = [
-        "🤖 *ATRb Multi — Status*",
+        "🤖 *ATRb Multi — Live Status*",
         f"🕐 {now.strftime('%Y-%m-%d %H:%M UTC')}",
         "",
         f"Bot: 🟢 Live  |  Balance: `{balance_str}`",
