@@ -44,6 +44,7 @@ from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
 import bot.modules.stratwatch      as stratwatch
 import bot.modules.challengewatch  as challengewatch
+import bot.modules.vixwatch        as vixwatch
 import bot.modules.reportwatch     as reportwatch
 
 log = logging.getLogger("main")
@@ -748,6 +749,12 @@ def _job_correlwatch():
     except Exception as e:
         _err("CorrelWatch", e)
 
+def _job_vixwatch():
+    try:
+        vixwatch.poll_once()
+    except Exception as e:
+        _err("VixWatch", e)
+
 
 def _job_whalewatch():
     try:
@@ -919,6 +926,13 @@ def start_scheduler():
     )
     print("📡 CorrelWatch scheduled (30min) ✅", flush=True)
 
+    # ── VixWatch — every 30 minutes
+    SCHED.add_job(
+        _job_vixwatch, "interval", minutes=30,
+        id="vixwatch", max_instances=1, misfire_grace_time=60,
+    )
+    print("😱 VixWatch scheduled (30min) ✅", flush=True)
+
     # ── WhaleWatch — every 5 min
     if os.getenv("ETHERSCAN_API_KEY"):
         SCHED.add_job(
@@ -947,6 +961,7 @@ def start_scheduler():
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
+    print("😱 VixWatch ready — /vix command live ✅", flush=True)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1131,6 +1146,9 @@ def _handle_command(text: str, text_raw: str):
             "/cw_weekly — Weekly sentiment\n\n"
             "📡 *CorrelWatch*\n"
             "/correl_diag — DXY vs BTC last reading\n\n"
+            "😱 *VixWatch*\n"
+            "/vix — Current VIX reading + market context\n"
+            "/vix_diag — Last value + alert state\n\n"
             "🩺 *System*\n"
             "/health — Full system status\n"
             "/restart — Trigger clean poll of all modules\n"
@@ -1239,6 +1257,21 @@ def _handle_command(text: str, text_raw: str):
             correlwatch.show_diag()
         except Exception as e:
             send_text(f"📡 [CorrelWatch] Diag error: {e}")
+        return
+
+    # ── /vix / /vix_diag ─────────────────────────────────────────────────────
+    if text.startswith("/vix_diag"):
+        try:
+            vixwatch.show_diag()
+        except Exception as e:
+            send_text(f"😱 [VixWatch] Diag error: {e}")
+        return
+
+    if text.startswith("/vix"):
+        try:
+            vixwatch.show_vix()
+        except Exception as e:
+            send_text(f"😱 [VixWatch] Error: {e}")
         return
 
     # ── /status ───────────────────────────────────────────────────────────────
