@@ -1,19 +1,20 @@
 # bot/modules/srwatch.py
 """
-S&RWatch — Support & Resistance Level Monitor
+S&RWatch — Support & Resistance Monitor (Daily / Weekly / Monthly)
 
-Computes key S/R levels from 4H OHLCV (Bitget public API):
-  - Pivot points (classic + weekly)
-  - Recent swing highs/lows (last 50 candles)
-  - Psychological round numbers
-  - Weekly and monthly open
+Computes pivot points from daily, weekly, and monthly candles.
+Three signal types:
+  - APPROACHING — price within 0.5% of level (heads up, once per 24h per level)
+  - HIT         — price within 0.1% of level (potential entry, cooldown 4h)
+  - BREAKOUT    — 4H candle CLOSED beyond the level (invalidates reversal bias)
 
-Fires an alert when price enters within X% of a key level.
-Cooldown per level to avoid spam.
+Anti-spam:
+  - Approaching: 24h cooldown per level
+  - Hit: 4h cooldown per level
+  - Breakout: fires once per level per direction
 
-Commands:
-  /sr       — Show current S/R levels for ETH/BNB/SOL
-  /sr_diag  — Show last check + alert history
+Polls every 15 minutes.
+Commands: /sr, /sr_diag
 """
 
 import logging
@@ -27,36 +28,33 @@ from bot.datafeed_bitget import BITGET_BASE_URL, BITGET_PRODUCT_TYPE
 
 log = logging.getLogger("srwatch")
 
-ASSETS = [
-    {"symbol": "BTCUSDT", "ticker": "BTC"},
-    # {"symbol": "ETHUSDT", "ticker": "ETH"},  # uncomment to add ETH
-]
+SYMBOL = "BTCUSDT"
+TICKER = "BTC"
 
-PROXIMITY_PCT  = 0.8   # % distance to trigger alert
-COOLDOWN_MIN   = 120   # 2h per level
-CANDLE_LIMIT   = 100   # 4H candles for swing detection
-SWING_LOOKBACK = 5     # bars each side for swing high/low detection
+APPROACH_PCT        = 0.5
+HIT_PCT             = 0.1
+APPROACH_COOLDOWN_H = 24
+HIT_COOLDOWN_H      = 4
 
 STATE = {
-    "last_check":  None,
-    "last_alert":  {},   # { "ETHUSDT_1580": datetime }
-    "levels":      {},   # { symbol: { "resistance": [...], "support": [...] } }
-    "prices":      {},   # { symbol: float }
+    "last_check":     None,
+    "daily_levels":   {},
+    "weekly_levels":  {},
+    "monthly_levels": {},
+    "last_price":     None,
+    "last_4h_close":  None,
+    "approaching":    {},
+    "hit":            {},
+    "breakout":       {},
 }
 
 
-# ─── Candle fetch ─────────────────────────────────────────────────────────────
-
-def _fetch_candles(symbol: str, limit: int = CANDLE_LIMIT) -> list:
+def _fetch_candles(granularity, limit):
     try:
         r = requests.get(
             f"{BITGET_BASE_URL}/api/v2/mix/market/candles",
-            params={
-                "symbol":      symbol,
-                "granularity": "4H",
-                "limit":       str(limit),
-                "productType": BITGET_PRODUCT_TYPE,
-            },
+            params={"symbol": SYMBOL, "granularity": granularity,
+                    "limit": str(limit), "productType": BITGET_PRODUCT_TYPE},
             timeout=8,
         )
         data = r.json()
@@ -64,297 +62,246 @@ def _fetch_candles(symbol: str, limit: int = CANDLE_LIMIT) -> list:
             return []
         return data.get("data") or []
     except Exception as e:
-        log.warning(f"Candle fetch failed for {symbol}: {e}")
+        log.warning(f"Candle fetch failed {granularity}: {e}")
         return []
 
 
-def _fetch_weekly_candles(symbol: str) -> list:
-    try:
-        r = requests.get(
-            f"{BITGET_BASE_URL}/api/v2/mix/market/candles",
-            params={
-                "symbol":      symbol,
-                "granularity": "1W",
-                "limit":       "10",
-                "productType": BITGET_PRODUCT_TYPE,
-            },
-            timeout=8,
-        )
-        data = r.json()
-        if data.get("code") != "00000":
-            return []
-        return data.get("data") or []
-    except Exception as e:
-        log.warning(f"Weekly candle fetch failed for {symbol}: {e}")
-        return []
-
-
-# ─── Level computation ────────────────────────────────────────────────────────
-
-def _swing_highs_lows(candles: list, lookback: int = SWING_LOOKBACK) -> tuple[list, list]:
-    """Find swing highs and lows with touch count."""
-    highs_raw = [float(c[2]) for c in candles]
-    lows_raw  = [float(c[3]) for c in candles]
-
-    swing_highs = []
-    swing_lows  = []
-
-    for i in range(lookback, len(candles) - lookback):
-        # Swing high: highest point in window
-        if highs_raw[i] == max(highs_raw[i - lookback:i + lookback + 1]):
-            swing_highs.append(round(highs_raw[i], 2))
-        # Swing low: lowest point in window
-        if lows_raw[i] == min(lows_raw[i - lookback:i + lookback + 1]):
-            swing_lows.append(round(lows_raw[i], 2))
-
-    return swing_highs, swing_lows
-
-
-def _pivot_points(candles: list) -> dict:
-    """Classic pivot points from last completed 4H candle."""
-    if not candles:
-        return {}
-    # Use second-to-last candle (last completed)
-    c  = candles[-2] if len(candles) >= 2 else candles[-1]
-    h  = float(c[2])
-    l  = float(c[3])
-    cl = float(c[4])
-
+def _compute_pivots(candle, label):
+    h  = float(candle[2])
+    l  = float(candle[3])
+    cl = float(candle[4])
     pp = (h + l + cl) / 3
-    r1 = 2 * pp - l
-    r2 = pp + (h - l)
-    r3 = h + 2 * (pp - l)
-    s1 = 2 * pp - h
-    s2 = pp - (h - l)
-    s3 = l - 2 * (h - pp)
-
     return {
-        "pp": round(pp, 2),
-        "r1": round(r1, 2), "r2": round(r2, 2), "r3": round(r3, 2),
-        "s1": round(s1, 2), "s2": round(s2, 2), "s3": round(s3, 2),
+        f"{label}_R3": round(h + 2 * (pp - l), 2),
+        f"{label}_R2": round(pp + (h - l), 2),
+        f"{label}_R1": round(2 * pp - l, 2),
+        f"{label}_PP": round(pp, 2),
+        f"{label}_S1": round(2 * pp - h, 2),
+        f"{label}_S2": round(pp - (h - l), 2),
+        f"{label}_S3": round(l - 2 * (h - pp), 2),
     }
 
 
-def _psychological_levels(price: float) -> list:
-    """Round number levels near current price."""
-    if price >= 1000:
-        step = 100
-    elif price >= 100:
-        step = 10
-    else:
-        step = 5
+def refresh_levels():
+    daily = _fetch_candles("1D", 3)
+    if len(daily) >= 2:
+        STATE["daily_levels"] = _compute_pivots(daily[-2], "D")
 
-    base   = int(price / step) * step
-    levels = []
-    for mult in range(-5, 6):
-        lvl = base + mult * step
-        if lvl > 0:
-            levels.append(float(lvl))
+    weekly = _fetch_candles("1W", 3)
+    if len(weekly) >= 2:
+        STATE["weekly_levels"] = _compute_pivots(weekly[-2], "W")
+
+    monthly = _fetch_candles("1M", 3)
+    if len(monthly) >= 2:
+        STATE["monthly_levels"] = _compute_pivots(monthly[-2], "M")
+
+    log.info(f"S&RWatch: levels refreshed — D:{len(STATE['daily_levels'])} W:{len(STATE['weekly_levels'])} M:{len(STATE['monthly_levels'])}")
+
+
+def _all_levels():
+    levels = {}
+    levels.update(STATE["daily_levels"])
+    levels.update(STATE["weekly_levels"])
+    levels.update(STATE["monthly_levels"])
     return levels
 
 
-def _cluster_levels(levels: list, tolerance_pct: float = 0.5) -> list:
-    """Merge levels that are within tolerance% of each other."""
-    if not levels:
-        return []
-    sorted_lvls = sorted(set(levels))
-    clusters    = []
-    current     = [sorted_lvls[0]]
-
-    for lvl in sorted_lvls[1:]:
-        if abs(lvl - current[-1]) / current[-1] * 100 <= tolerance_pct:
-            current.append(lvl)
-        else:
-            clusters.append(round(sum(current) / len(current), 2))
-            current = [lvl]
-    clusters.append(round(sum(current) / len(current), 2))
-    return clusters
+def _level_label(key):
+    tf_map   = {"D": "Daily", "W": "Weekly", "M": "Monthly"}
+    type_map = {"PP": "Pivot", "R1": "R1", "R2": "R2", "R3": "R3",
+                "S1": "S1", "S2": "S2", "S3": "S3"}
+    parts = key.split("_")
+    if len(parts) == 2:
+        return f"{tf_map.get(parts[0], parts[0])} {type_map.get(parts[1], parts[1])}"
+    return key
 
 
-def compute_levels(symbol: str) -> dict:
-    """Compute full S/R level set for a symbol."""
-    candles = _fetch_candles(symbol)
-    if not candles:
-        return {}
-
-    price = float(candles[-1][4])
-
-    swing_highs, swing_lows = _swing_highs_lows(candles)
-    pivots   = _pivot_points(candles)
-    psych    = _psychological_levels(price)
-
-    # Weekly open
-    weekly   = _fetch_weekly_candles(symbol)
-    week_open = float(weekly[-1][1]) if weekly else None
-    week_high = float(weekly[-1][2]) if weekly else None
-    week_low  = float(weekly[-1][3]) if weekly else None
-
-    # Aggregate all resistance (above price) and support (below price)
-    all_above = [l for l in swing_highs + psych +
-                 list(pivots.values()) + ([week_high] if week_high else [])
-                 if l > price * 1.001]
-
-    all_below = [l for l in swing_lows + psych +
-                 list(pivots.values()) + ([week_low] if week_low else []) +
-                 ([week_open] if week_open and week_open < price else [])
-                 if l < price * 0.999]
-
-    resistance = sorted(_cluster_levels(all_above))[:5]
-    support    = sorted(_cluster_levels(all_below), reverse=True)[:5]
-
-    return {
-        "price":      price,
-        "resistance": resistance,
-        "support":    support,
-        "pivots":     pivots,
-        "week_open":  week_open,
-    }
-
-
-# ─── Proximity alert ─────────────────────────────────────────────────────────
-
-def _level_key(symbol: str, level: float) -> str:
-    return f"{symbol}_{int(level)}"
-
-
-def _cooldown_ok(key: str) -> bool:
-    last = STATE["last_alert"].get(key)
+def _approach_ok(key):
+    last = STATE["approaching"].get(key)
     if not last:
         return True
-    return datetime.now(timezone.utc) - last > timedelta(minutes=COOLDOWN_MIN)
+    return datetime.now(timezone.utc) - last > timedelta(hours=APPROACH_COOLDOWN_H)
 
 
-def _check_proximity(symbol: str, ticker: str, levels_data: dict) -> None:
+def _hit_ok(key):
+    last = STATE["hit"].get(key)
+    if not last:
+        return True
+    return datetime.now(timezone.utc) - last > timedelta(hours=HIT_COOLDOWN_H)
+
+
+def _breakout_ok(key, direction):
+    return STATE["breakout"].get(key) != direction
+
+
+def _send_signal(signal_type, key, level, price, prev_close=None):
     now   = datetime.now(timezone.utc)
-    price = levels_data.get("price")
-    if not price:
-        return
+    label = _level_label(key)
+    is_res = level > price
+    color  = "🔴" if is_res else "🟢"
+    dist   = abs(level - price) / level * 100
+    sign   = "+" if is_res else "-"
 
-    alerts = []
-
-    for lvl in levels_data.get("resistance", []):
-        dist_pct = (lvl - price) / price * 100
-        if 0 < dist_pct <= PROXIMITY_PCT:
-            key = _level_key(symbol, lvl)
-            if _cooldown_ok(key):
-                alerts.append({"level": lvl, "type": "RESISTANCE", "dist": dist_pct})
-                STATE["last_alert"][key] = now
-
-    for lvl in levels_data.get("support", []):
-        dist_pct = (price - lvl) / price * 100
-        if 0 < dist_pct <= PROXIMITY_PCT:
-            key = _level_key(symbol, lvl)
-            if _cooldown_ok(key):
-                alerts.append({"level": lvl, "type": "SUPPORT", "dist": dist_pct})
-                STATE["last_alert"][key] = now
-
-    for alert in alerts:
-        lvl_type = alert["type"]
-        emoji    = "🔴" if lvl_type == "RESISTANCE" else "🟢"
-        implication = (
-            "Price approaching resistance. Watch for rejection or breakout."
-            if lvl_type == "RESISTANCE"
-            else "Price approaching support. Watch for bounce or breakdown."
+    if signal_type == "APPROACHING":
+        header = f"{color} *{'RESISTANCE' if is_res else 'SUPPORT'} APPROACHING*"
+        detail = (f"_Price closing in on {label}. Get ready._\n"
+                  f"_Watch for reaction — reversal or breakout._ ⚡")
+    elif signal_type == "HIT":
+        header = f"{color} *{'RESISTANCE' if is_res else 'SUPPORT'} HIT*"
+        detail = (f"_Price is testing {label}. Potential reversal zone._\n"
+                  f"_Watch for rejection candle or volume spike._ 🎯")
+    else:
+        up = price > level
+        color  = "🟢" if up else "🔴"
+        header = f"{color} *BREAKOUT {'ABOVE' if up else 'BELOW'} {label.upper()}*"
+        detail = (
+            f"_4H candle closed above {label}._\n_Reversal bias invalidated — momentum trade in play._ 🚀"
+            if up else
+            f"_4H candle closed below {label}._\n_Support broken — next level down in play._ 📉"
         )
+        dist = abs(price - level) / level * 100
+        sign = "+" if up else "-"
 
-        lines = [
-            f"📐 *S&RWatch — {ticker}*",
-            f"{emoji} *{lvl_type} APPROACHING*",
-            "",
-            f"Level:    `${alert['level']:,.2f}`",
-            f"Price:    `${price:,.2f}`",
-            f"Distance: `{alert['dist']:.2f}%` away ⚠️",
-            "",
-            f"_{implication}_",
-            "",
-            f"_Time (UTC): {now.strftime('%Y-%m-%d %H:%M')}_",
-        ]
-        send_text("\n".join(lines))
-        log.info(f"S&RWatch: {ticker} approaching {lvl_type} at ${alert['level']:,.2f}")
+    lines = [
+        f"📐 *S&RWatch — {TICKER}*",
+        header,
+        "",
+        f"Level:    `${level:,.2f}`  ({label})",
+        f"Price:    `${price:,.2f}`",
+        f"Distance: `{sign}{dist:.2f}%`",
+        "",
+        detail,
+        "",
+        f"_Time (UTC): {now.strftime('%Y-%m-%d %H:%M')}_",
+    ]
+    send_text("\n".join(lines))
+    log.info(f"S&RWatch: {signal_type} — {key} @ ${level:,.2f} (price ${price:,.2f})")
 
-
-# ─── Poll ─────────────────────────────────────────────────────────────────────
 
 def poll_once():
     now = datetime.now(timezone.utc)
     STATE["last_check"] = now
 
-    for asset in ASSETS:
-        sym    = asset["symbol"]
-        ticker = asset["ticker"]
-        try:
-            levels = compute_levels(sym)
-            if levels:
-                STATE["levels"][sym]  = levels
-                STATE["prices"][sym]  = levels["price"]
-                _check_proximity(sym, ticker, levels)
-        except Exception as e:
-            log.warning(f"S&RWatch error for {sym}: {e}")
+    if not STATE["daily_levels"]:
+        refresh_levels()
 
+    # Refresh daily at 00:05 UTC
+    if now.hour == 0 and now.minute < 20:
+        refresh_levels()
 
-# ─── /sr command — show all levels ───────────────────────────────────────────
+    # Refresh weekly on Monday
+    if now.weekday() == 0 and now.hour == 0 and now.minute < 20:
+        refresh_levels()
+
+    # Refresh monthly on 1st
+    if now.day == 1 and now.hour == 0 and now.minute < 20:
+        refresh_levels()
+
+    candles_4h = _fetch_candles("4H", 3)
+    if not candles_4h:
+        return
+
+    price      = float(candles_4h[-1][4])
+    prev_close = float(candles_4h[-2][4])
+    STATE["last_price"]   = price
+    STATE["last_4h_close"] = prev_close
+
+    levels = _all_levels()
+    if not levels:
+        return
+
+    for key, level in levels.items():
+        if level <= 0:
+            continue
+
+        dist_pct = abs(price - level) / level * 100
+
+        # BREAKOUT — 4H candle closed across level
+        crossed_up   = prev_close < level <= price
+        crossed_down = prev_close > level >= price
+        if crossed_up and _breakout_ok(key, "UP"):
+            STATE["breakout"][key] = "UP"
+            _send_signal("BREAKOUT", key, level, price, prev_close)
+            continue
+        if crossed_down and _breakout_ok(key, "DOWN"):
+            STATE["breakout"][key] = "DOWN"
+            _send_signal("BREAKOUT", key, level, price, prev_close)
+            continue
+
+        # HIT — within 0.1%
+        if dist_pct <= HIT_PCT and _hit_ok(key):
+            STATE["hit"][key] = now
+            _send_signal("HIT", key, level, price)
+            continue
+
+        # APPROACHING — within 0.5%
+        if dist_pct <= APPROACH_PCT and _approach_ok(key):
+            STATE["approaching"][key] = now
+            _send_signal("APPROACHING", key, level, price)
+
 
 def show_levels():
-    now   = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if not STATE["daily_levels"]:
+        refresh_levels()
+
+    price = STATE["last_price"]
+    if not price:
+        candles = _fetch_candles("4H", 2)
+        price = float(candles[-1][4]) if candles else None
+
     lines = [
-        "📐 *S&RWatch — Key Levels*",
+        f"📐 *S&RWatch — {TICKER}*",
         f"🕐 {now.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"Price: `${price:,.2f}`" if price else "",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    for asset in ASSETS:
-        sym    = asset["symbol"]
-        ticker = asset["ticker"]
-
-        lvls  = STATE["levels"].get(sym)
-        if not lvls:
-            try:
-                lvls = compute_levels(sym)
-                STATE["levels"][sym] = lvls
-            except Exception:
-                pass
-
-        if not lvls:
-            lines += ["", f"*{ticker}*: ⚠️ Data unavailable"]
+    for tf_label, tf_levels in [
+        ("📅 Daily",   STATE["daily_levels"]),
+        ("📆 Weekly",  STATE["weekly_levels"]),
+        ("🗓 Monthly", STATE["monthly_levels"]),
+    ]:
+        if not tf_levels:
             continue
+        lines.append(f"\n{tf_label}")
 
-        price = lvls["price"]
-        res   = lvls.get("resistance", [])
-        sup   = lvls.get("support", [])
+        res = {k: v for k, v in tf_levels.items() if "_R" in k and price and v > price}
+        pp  = {k: v for k, v in tf_levels.items() if "_PP" in k}
+        sup = {k: v for k, v in tf_levels.items() if "_S" in k and price and v < price}
 
-        lines += ["", f"*{ticker}*  `${price:,.2f}`", ""]
+        for k, v in sorted(res.items(), key=lambda x: x[1]):
+            dist = (v - price) / price * 100 if price else 0
+            lines.append(f"  🔴 `${v:,.2f}`  +{dist:.1f}%  ({_level_label(k)})")
+        for k, v in pp.items():
+            dist = (v - price) / price * 100 if price else 0
+            sign = "+" if dist >= 0 else ""
+            lines.append(f"  ⚪ `${v:,.2f}`  {sign}{dist:.1f}%  (Pivot)")
+        for k, v in sorted(sup.items(), key=lambda x: -x[1]):
+            dist = (price - v) / price * 100 if price else 0
+            lines.append(f"  🟢 `${v:,.2f}`  -{dist:.1f}%  ({_level_label(k)})")
 
-        lines.append("  🔴 *Resistance:*")
-        for r in res[:4]:
-            dist = (r - price) / price * 100
-            lines.append(f"    `${r:,.2f}`  (+{dist:.1f}%)")
-
-        lines.append("")
-        lines.append("  🟢 *Support:*")
-        for s in sup[:4]:
-            dist = (price - s) / price * 100
-            lines.append(f"    `${s:,.2f}`  (-{dist:.1f}%)")
-
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-
-    lines.append("_Levels from 4H swing highs/lows + pivots + round numbers_")
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "_Approaching (0.5%) · Hit (0.1%) · Breakout (4H close)_",
+    ]
     send_text("\n".join(lines))
 
 
-# ─── /sr_diag ────────────────────────────────────────────────────────────────
-
 def show_diag():
     lines = ["📐 *S&RWatch Diagnostics*", ""]
-    last = STATE["last_check"]
-    lines.append(f"Last check: {last.strftime('%Y-%m-%d %H:%M UTC') if last else 'Never'}")
-    lines.append(f"Proximity threshold: {PROXIMITY_PCT}%")
-    lines.append(f"Cooldown: {COOLDOWN_MIN}min per level")
-    lines.append("")
-    lines.append("*Current prices:*")
-    for asset in ASSETS:
-        sym    = asset["symbol"]
-        ticker = asset["ticker"]
-        price  = STATE["prices"].get(sym)
-        lines.append(f"  {ticker}: {'${:,.2f}'.format(price) if price else '—'}")
+    last  = STATE["last_check"]
+    price = STATE["last_price"]
+    lines += [
+        f"Last check: {last.strftime('%Y-%m-%d %H:%M UTC') if last else 'Never'}",
+        f"Price: {'${:,.2f}'.format(price) if price else '—'}",
+        f"Daily levels: {len(STATE['daily_levels'])}",
+        f"Weekly levels: {len(STATE['weekly_levels'])}",
+        f"Monthly levels: {len(STATE['monthly_levels'])}",
+        "",
+        f"Approach cooldown: {APPROACH_COOLDOWN_H}h  |  Hit cooldown: {HIT_COOLDOWN_H}h",
+        f"Active breakouts: {len(STATE['breakout'])}",
+    ]
     send_text("\n".join(lines))
