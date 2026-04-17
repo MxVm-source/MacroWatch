@@ -54,6 +54,8 @@ STATE = {
     "hit":            {},   # { key: datetime }
     "breakout":       {},   # { key: "UP" or "DOWN" }
     "breakout_time":  {},   # { key: datetime } — 24h silence after breakout
+
+    "initialized":    False,  # First run flag — seeds historical state silently
 }
 
 
@@ -260,6 +262,22 @@ def poll_once():
     # Filter to major levels only (R1/R2/S1/S2)
     major_levels = {k: v for k, v in levels.items() if any(k.endswith(f"_{t}") for t in MAJOR_TYPES)}
     if not major_levels:
+        return
+
+    # ── First run: seed historical state silently (no alerts fired) ───────────
+    if not STATE["initialized"]:
+        seeded = 0
+        for key, level in major_levels.items():
+            if level <= 0:
+                continue
+            direction = _confirm_breakout(level, candles_4h)
+            if direction:
+                # Mark as already broken — silence for 24h
+                STATE["breakout"][key]      = direction
+                STATE["breakout_time"][key] = now
+                seeded += 1
+        STATE["initialized"] = True
+        log.info(f"S&RWatch: initialized — silently seeded {seeded} historical breakouts")
         return
 
     # ── Pass 1: confirmed breakouts (sustained 4 closes) ──────────────────────
