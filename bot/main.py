@@ -47,6 +47,8 @@ import bot.modules.challengewatch  as challengewatch
 import bot.modules.fundingwatch    as fundingwatch
 import bot.modules.oiwatch         as oiwatch
 import bot.modules.optionswatch    as optionswatch
+import bot.modules.liquidationwatch as liquidationwatch
+import bot.modules.srwatch         as srwatch
 import bot.modules.vixwatch        as vixwatch
 import bot.modules.reportwatch     as reportwatch
 
@@ -794,6 +796,20 @@ def _job_optionswatch_friday():
         _err("OptionsWatch", e)
 
 
+def _job_liquidationwatch():
+    try:
+        liquidationwatch.poll_once()
+    except Exception as e:
+        _err("LiquidationWatch", e)
+
+
+def _job_srwatch():
+    try:
+        srwatch.poll_once()
+    except Exception as e:
+        _err("S&RWatch", e)
+
+
 def _job_market_open():
     try:
         _send_market_open()
@@ -1014,10 +1030,25 @@ def start_scheduler():
     )
     print("⚙️ OptionsWatch scheduled (Thu 18:00 + Fri 07:00 UTC) ✅", flush=True)
 
+    # ── LiquidationWatch — every 2 minutes
+    SCHED.add_job(
+        _job_liquidationwatch, "interval", minutes=2,
+        id="liquidationwatch", max_instances=1, misfire_grace_time=30,
+    )
+    print("🔥 LiquidationWatch scheduled (2min) ✅", flush=True)
+
+    # ── S&RWatch — every 15 minutes
+    SCHED.add_job(
+        _job_srwatch, "interval", minutes=15,
+        id="srwatch", max_instances=1, misfire_grace_time=60,
+    )
+    print("📐 S&RWatch scheduled (15min) ✅", flush=True)
+
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
     print("💸 FundingWatch · 📊 OIWatch · ⚙️ OptionsWatch ready ✅", flush=True)
+    print("🔥 LiquidationWatch · 📐 S&RWatch ready ✅", flush=True)
     print("😱 VixWatch ready — /vix command live ✅", flush=True)
 
 
@@ -1150,6 +1181,27 @@ def _build_health_msg() -> str:
         f"  Expiry: {opt_exp or '—'}  Max pain: {'${:,.0f}'.format(opt_pain) if opt_pain else '—'}",
     ]
 
+    # LiquidationWatch state
+    liq_check = liquidationwatch.STATE.get("last_check")
+    liq_stats = liquidationwatch.STATE.get("stats", {})
+    total_liqs = sum(v.get("long_liqs", 0) + v.get("short_liqs", 0) for v in liq_stats.values())
+    lines += [
+        "",
+        "🔥 *LiquidationWatch*",
+        f"  Last check: {liq_check.strftime('%H:%M UTC') if liq_check else '—'}",
+        f"  Session liquidations: {total_liqs}",
+    ]
+
+    # S&RWatch state
+    sr_check = srwatch.STATE.get("last_check")
+    sr_prices = srwatch.STATE.get("prices", {})
+    lines += [
+        "",
+        "📐 *S&RWatch*",
+        f"  Last check: {sr_check.strftime('%H:%M UTC') if sr_check else '—'}",
+        f"  BTC: {'${:,.2f}'.format(sr_prices['BTCUSDT']) if sr_prices.get('BTCUSDT') else '—'}",
+    ]
+
     return "\n".join(lines)
 
 
@@ -1241,6 +1293,11 @@ def _handle_command(text: str, text_raw: str):
             "⚙️ *OptionsWatch*\n"
             "/options_diag — Last expiry analysis\n"
             "/options_now — Run analysis now\n\n"
+            "🔥 *LiquidationWatch*\n"
+            "/liq_diag — Session liquidation stats\n\n"
+            "📐 *S&RWatch*\n"
+            "/sr — Key S/R levels for ETH/BNB/SOL\n"
+            "/sr_diag — Last check + alert history\n\n"
             "😱 *VixWatch*\n"
             "/vix — Current VIX reading + market context\n"
             "/vix_diag — Last value + alert state\n\n"
@@ -1384,6 +1441,30 @@ def _handle_command(text: str, text_raw: str):
             optionswatch.show_diag()
         except Exception as e:
             send_text(f"⚙️ [OptionsWatch] Diag error: {e}")
+        return
+
+    # ── /liq_diag ────────────────────────────────────────────────────────────
+    if text.startswith("/liq_diag"):
+        try:
+            liquidationwatch.show_diag()
+        except Exception as e:
+            send_text(f"🔥 [LiquidationWatch] Diag error: {e}")
+        return
+
+    # ── /sr / /sr_diag ────────────────────────────────────────────────────────
+    if text.startswith("/sr_diag"):
+        try:
+            srwatch.show_diag()
+        except Exception as e:
+            send_text(f"📐 [S&RWatch] Diag error: {e}")
+        return
+
+    if text.startswith("/sr"):
+        try:
+            send_text("📐 Computing S/R levels...")
+            srwatch.show_levels()
+        except Exception as e:
+            send_text(f"📐 [S&RWatch] Error: {e}")
         return
 
     # ── /vix / /vix_diag ─────────────────────────────────────────────────────
