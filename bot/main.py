@@ -50,6 +50,7 @@ import bot.modules.optionswatch    as optionswatch
 import bot.modules.liquidationwatch as liquidationwatch
 import bot.modules.srwatch         as srwatch
 import bot.modules.vixwatch        as vixwatch
+import bot.modules.intelwatch      as intelwatch
 import bot.modules.reportwatch     as reportwatch
 
 log = logging.getLogger("main")
@@ -189,19 +190,12 @@ def _job_fedwatch():
     except Exception as e:
         _err("FedWatch", e)
 
-def _job_cryptowatch_daily():
+def _job_weekly_brief():
     try:
-        if hasattr(cryptowatch_daily, "main"):
-            cryptowatch_daily.main()
+        from bot.modules.weeklybrief import send_weekly_brief
+        send_weekly_brief(_get_modules())
     except Exception as e:
-        _err("CryptoWatch Daily", e)
-
-def _job_cryptowatch_weekly():
-    try:
-        if hasattr(cryptowatch, "main"):
-            cryptowatch.main()
-    except Exception as e:
-        _err("CryptoWatch Weekly", e)
+        _err("WeeklyBrief", e)
 
 def _err(module: str, exc: Exception):
     msg = f"⚠️ [{module}] Job error: {str(exc)[:200]}"
@@ -810,6 +804,28 @@ def _job_srwatch():
         _err("S&RWatch", e)
 
 
+def _get_modules():
+    """Bundle all module references for IntelWatch."""
+    return {
+        "fedwatch":        fedwatch,
+        "trumpwatch":      trumpwatch_live,
+        "vixwatch":        vixwatch,
+        "correlwatch":     correlwatch,
+        "fundingwatch":    fundingwatch,
+        "oiwatch":         oiwatch,
+        "optionswatch":    optionswatch,
+        "liquidationwatch": liquidationwatch,
+        "srwatch":         srwatch,
+    }
+
+
+def _job_intelwatch_auto():
+    try:
+        intelwatch.check_auto_trigger(_get_modules())
+    except Exception as e:
+        _err("IntelWatch", e)
+
+
 def _job_market_open():
     try:
         _send_market_open()
@@ -921,21 +937,12 @@ def start_scheduler():
         )
         print("🏦 FedWatch scheduled (5min) ✅", flush=True)
 
-    # ── CryptoWatch Daily — 13:00 weekdays only (Mon–Fri)
-    if os.getenv("ENABLE_CRYPTOWATCH_DAILY", "true").lower() in ("1", "true", "yes", "on"):
-        SCHED.add_job(
-            _job_cryptowatch_daily, "cron", day_of_week="mon-fri", hour=13, minute=0,
-            id="cryptowatch_daily", max_instances=1,
-        )
-        print("📊 CryptoWatch Daily scheduled (Mon–Fri 13:00) ✅", flush=True)
-
-    # ── CryptoWatch Weekly — Sunday 18:00
-    if os.getenv("ENABLE_CRYPTOWATCH_WEEKLY", "true").lower() in ("1", "true", "yes", "on"):
-        SCHED.add_job(
-            _job_cryptowatch_weekly, "cron", day_of_week="sun", hour=18, minute=0,
-            id="cryptowatch_weekly", max_instances=1,
-        )
-        print("📊 CryptoWatch Weekly scheduled (Sun 18:00) ✅", flush=True)
+    # ── MacroWatch Weekly — Sunday 18:00
+    SCHED.add_job(
+        _job_weekly_brief, "cron", day_of_week="sun", hour=18, minute=0,
+        id="weekly_brief", max_instances=1,
+    )
+    print("📊 MacroWatch Weekly scheduled (Sun 18:00) ✅", flush=True)
 
     # ── PositionWatch — every 10s
     SCHED.add_job(
@@ -1044,11 +1051,18 @@ def start_scheduler():
     )
     print("📐 S&RWatch scheduled (15min) ✅", flush=True)
 
+    # ── IntelWatch auto-trigger — every 30 minutes
+    SCHED.add_job(
+        _job_intelwatch_auto, "interval", minutes=30,
+        id="intelwatch_auto", max_instances=1, misfire_grace_time=60,
+    )
+    print("🧠 IntelWatch auto-trigger scheduled (30min) ✅", flush=True)
+
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
     print("💸 FundingWatch · 📊 OIWatch · ⚙️ OptionsWatch ready ✅", flush=True)
-    print("🔥 LiquidationWatch · 📐 S&RWatch ready ✅", flush=True)
+    print("🔥 LiquidationWatch · 📐 S&RWatch · 🧠 IntelWatch ready ✅", flush=True)
     print("😱 VixWatch ready — /vix command live ✅", flush=True)
 
 
@@ -1281,9 +1295,8 @@ def _handle_command(text: str, text_raw: str):
             "🏦 *FedWatch*\n"
             "/fedwatch — Next Fed event\n"
             "/fed_diag — Calendar + rate probability\n\n"
-            "📊 *CryptoWatch*\n"
-            "/cw_daily — Daily market brief\n"
-            "/cw_weekly — Weekly sentiment\n\n"
+            "📊 *MacroWatch Weekly*\n"
+            "/weekly — Full weekly market brief\n\n"
             "📡 *CorrelWatch*\n"
             "/correl_diag — DXY vs BTC last reading\n\n"
             "💸 *FundingWatch*\n"
@@ -1298,6 +1311,8 @@ def _handle_command(text: str, text_raw: str):
             "📐 *S&RWatch*\n"
             "/sr — Key S/R levels for ETH/BNB/SOL\n"
             "/sr_diag — Last check + alert history\n\n"
+            "🧠 *IntelWatch*\n"
+            "/intel — Full market intelligence briefing\n\n"
             "😱 *VixWatch*\n"
             "/vix — Current VIX reading + market context\n"
             "/vix_diag — Last value + alert state\n\n"
@@ -1388,19 +1403,14 @@ def _handle_command(text: str, text_raw: str):
         fedwatch.show_diag()
         return
 
-    # ── /cw_daily / /cw_weekly ───────────────────────────────────────────────
-    if text.startswith("/cw_daily"):
-        if hasattr(cryptowatch_daily, "main"):
-            cryptowatch_daily.main()
-        else:
-            send_text("📊 [CryptoWatch] Daily disabled (main() not found).")
-        return
-
-    if text.startswith("/cw_weekly"):
-        if hasattr(cryptowatch, "main"):
-            cryptowatch.main()
-        else:
-            send_text("📊 [CryptoWatch] Weekly disabled (main() not found).")
+    # ── /weekly ───────────────────────────────────────────────────────────────
+    if text.startswith("/weekly"):
+        try:
+            send_text("📊 Building weekly brief — takes ~15s...")
+            from bot.modules.weeklybrief import send_weekly_brief
+            send_weekly_brief(_get_modules())
+        except Exception as e:
+            send_text(f"📊 [WeeklyBrief] Error: {e}")
         return
 
     # ── /correl_diag ─────────────────────────────────────────────────────────
@@ -1465,6 +1475,15 @@ def _handle_command(text: str, text_raw: str):
             srwatch.show_levels()
         except Exception as e:
             send_text(f"📐 [S&RWatch] Error: {e}")
+        return
+
+    # ── /intel ────────────────────────────────────────────────────────────────
+    if text.startswith("/intel"):
+        try:
+            send_text("🧠 Compiling full market briefing...")
+            intelwatch.show_intel(_get_modules())
+        except Exception as e:
+            send_text(f"🧠 [IntelWatch] Error: {e}")
         return
 
     # ── /vix / /vix_diag ─────────────────────────────────────────────────────
