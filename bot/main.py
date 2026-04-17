@@ -1044,12 +1044,12 @@ def start_scheduler():
     )
     print("🔥 LiquidationWatch scheduled (2min) ✅", flush=True)
 
-    # ── S&RWatch — hourly (silent, levels for /intel and weekly brief)
+    # ── S&RWatch — every 15 minutes (alerts on Weekly/Monthly R1/R2/S1/S2)
     SCHED.add_job(
-        _job_srwatch, "interval", hours=1,
-        id="srwatch", max_instances=1, misfire_grace_time=120,
+        _job_srwatch, "interval", minutes=15,
+        id="srwatch", max_instances=1, misfire_grace_time=60,
     )
-    print("📐 S&RWatch scheduled (hourly, silent mode) ✅", flush=True)
+    print("📐 S&RWatch scheduled (15min, weekly/monthly majors only) ✅", flush=True)
 
     # ── IntelWatch auto-trigger — every 30 minutes
     SCHED.add_job(
