@@ -268,7 +268,8 @@ def build_weekly_brief(modules: dict) -> str:
         return "📈" if val >= 0 else "📉"
 
     lines = [
-        f"📊 *MacroWatch Weekly Brief*",
+        f"📊 *Infinex Capital — Weekly Market Brief*",
+        f"_Intelligence provided by MacroWatch 🧠_",
         f"📅 {week_start} → {week_end}",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
