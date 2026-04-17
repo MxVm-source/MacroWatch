@@ -113,7 +113,8 @@ def _fire_milestone(ms: float, balance: float):
 
     if is_target:
         msg = (
-            f"🏆 *CHALLENGE COMPLETE!*\n\n"
+            f"🏆 *Infinex Capital — CHALLENGE COMPLETE!*\n"
+            f"_Intelligence provided by MacroWatch 🧠_\n\n"
             f"$1,000 → $100,000 ✅\n\n"
             f"Balance: ${balance:,.2f}\n"
             f"Total gain: +{gain_pct:.1f}%\n\n"
@@ -127,7 +128,8 @@ def _fire_milestone(ms: float, balance: float):
         emojis = {2500: "🔥", 5000: "🚀", 10000: "💎", 25000: "⚡", 50000: "🌙"}
         emoji  = emojis.get(int(ms), "📈")
         msg = (
-            f"{emoji} *Milestone Hit — ${ms:,.0f}*\n\n"
+            f"{emoji} *Infinex Capital — Milestone Hit ${ms:,.0f}*\n"
+            f"_Intelligence provided by MacroWatch 🧠_\n\n"
             f"$1,000 → $100,000\n"
             f"Current: ${balance:,.2f} (+{gain_pct:.1f}%)\n\n"
             f"Next target: ${next((m for m in CHALLENGE_MILESTONES if m > ms), 100000):,.0f}\n\n"
@@ -196,6 +198,14 @@ def _job_weekly_brief():
         send_weekly_brief(_get_modules())
     except Exception as e:
         _err("WeeklyBrief", e)
+
+
+def _job_strategy_recap():
+    try:
+        from bot.modules.strategyrecap import send_strategy_recap
+        send_strategy_recap()
+    except Exception as e:
+        _err("StrategyRecap", e)
 
 def _err(module: str, exc: Exception):
     msg = f"⚠️ [{module}] Job error: {str(exc)[:200]}"
@@ -346,13 +356,17 @@ def _poll_positions():
                 if PUBLIC_CHAT_ID and entry and last_px:
                     sign      = "+" if leveraged >= 0 else ""
                     pub_emoji = "🟢" if leveraged >= 0 else "🔴"
+                    side_icon = "📈" if prev_side == "LONG" else "📉"
                     send_public(
-                        f"🔱 PrimeWatch — Trade Closed\n\n"
+                        f"🤖 *Infinex Capital — Ascent Trade Closed*\n"
+                        f"_Intelligence provided by MacroWatch 🧠_\n\n"
                         f"Pair: {sym}\n"
-                        f"Side: {prev_side}\n"
+                        f"Side: {side_icon} {prev_side}\n"
+                        f"Entry: ${entry:,.2f}\n"
+                        f"Exit: ${last_px:,.2f}\n"
                         f"Est. PnL: {pub_emoji} {sign}{leveraged:.1f}%\n"
                         f"{streak_str + chr(10) if streak_str else ''}"
-                        f"\n$1k → $100k Challenge — /challenge"
+                        f"\n🎯 $1k → $100k Challenge — /challenge"
                     )
 
             elif cur["has_position"] and prev["has_position"]:
@@ -937,12 +951,19 @@ def start_scheduler():
         )
         print("🏦 FedWatch scheduled (5min) ✅", flush=True)
 
-    # ── MacroWatch Weekly — Sunday 18:00
+    # ── MacroWatch Weekly Brief — Monday 09:00 (market report)
     SCHED.add_job(
-        _job_weekly_brief, "cron", day_of_week="sun", hour=18, minute=0,
+        _job_weekly_brief, "cron", day_of_week="mon", hour=9, minute=0,
         id="weekly_brief", max_instances=1,
     )
-    print("📊 MacroWatch Weekly scheduled (Sun 18:00) ✅", flush=True)
+    print("📊 MacroWatch Weekly Brief scheduled (Mon 09:00) ✅", flush=True)
+
+    # ── Strategy Recap — Friday 09:00 (trades + positioning)
+    SCHED.add_job(
+        _job_strategy_recap, "cron", day_of_week="fri", hour=9, minute=0,
+        id="strategy_recap", max_instances=1,
+    )
+    print("🤖 Strategy Recap scheduled (Fri 09:00) ✅", flush=True)
 
     # ── PositionWatch — every 10s
     SCHED.add_job(
@@ -1411,6 +1432,16 @@ def _handle_command(text: str, text_raw: str):
             send_weekly_brief(_get_modules())
         except Exception as e:
             send_text(f"📊 [WeeklyBrief] Error: {e}")
+        return
+
+    # ── /recap ────────────────────────────────────────────────────────────────
+    if text.startswith("/recap"):
+        try:
+            send_text("🤖 Building strategy recap...")
+            from bot.modules.strategyrecap import send_strategy_recap
+            send_strategy_recap()
+        except Exception as e:
+            send_text(f"🤖 [StrategyRecap] Error: {e}")
         return
 
     # ── /correl_diag ─────────────────────────────────────────────────────────
