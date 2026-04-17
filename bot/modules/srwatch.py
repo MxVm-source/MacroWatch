@@ -237,10 +237,9 @@ def poll_once():
             _send_signal("BREAKOUT", key, level, price, prev_close)
             breakout_fired.add(key)
 
-    # ── Pass 2: HIT / APPROACHING — only the single closest eligible level ────
+    # ── Pass 2: HIT only — single closest eligible level ────────────────────
     best_key   = None
     best_dist  = float("inf")
-    best_type  = None
 
     for key, level in levels.items():
         if level <= 0:
@@ -256,21 +255,11 @@ def poll_once():
             if dist_pct < best_dist:
                 best_dist = dist_pct
                 best_key  = key
-                best_type = "HIT"
-
-        elif dist_pct <= APPROACH_PCT and _approach_ok(key):
-            if dist_pct < best_dist:
-                best_dist = dist_pct
-                best_key  = key
-                best_type = "APPROACHING"
 
     if best_key:
         level = levels[best_key]
-        if best_type == "HIT":
-            STATE["hit"][best_key] = now
-        else:
-            STATE["approaching"][best_key] = now
-        _send_signal(best_type, best_key, level, price)
+        STATE["hit"][best_key] = now
+        _send_signal("HIT", best_key, level, price)
 
 
 def show_levels():

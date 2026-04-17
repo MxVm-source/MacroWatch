@@ -89,7 +89,7 @@ def _event_id(ev: dict) -> str:
 
 # ─── Rate Probability via ZQ Futures (CME FedWatch methodology) ──────────────
 
-CURRENT_RATE_PCT = float(os.getenv("FW_CURRENT_RATE", "5.25"))  # update if Fed changes rates
+CURRENT_RATE_PCT = float(os.getenv("FW_CURRENT_RATE", "3.50"))  # Fed funds rate as of Apr 2026
 
 def _fetch_zq_price() -> float | None:
     """Fetch front-month ZQ (30-Day Fed Funds Futures) price from Yahoo Finance."""
@@ -302,8 +302,8 @@ def _fetch_bls_dates(release_type: str) -> list:
 # All decisions published at 14:15 CET (13:15 UTC).
 
 _ECB_2026 = [
-    (1, 30), (3, 6),  (4, 17), (6, 5),
-    (7, 24), (9, 11), (10, 23),(12, 11),
+    (1, 30), (3, 19), (4, 30), (6, 11),
+    (7, 23), (9, 10), (10, 29), (12, 17),
 ]
 
 def _fetch_ecb_events() -> list:

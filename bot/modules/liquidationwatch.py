@@ -29,10 +29,10 @@ ASSETS = [
 ]
 
 # Thresholds
-LIQ_LARGE_USD   = float(os.getenv("LIQ_LARGE_USD",   "1000000"))  # $1M single liq
-LIQ_MASSIVE_USD = float(os.getenv("LIQ_MASSIVE_USD", "5000000"))  # $5M+ = massive
+LIQ_LARGE_USD   = float(os.getenv("LIQ_LARGE_USD",   "3000000"))  # $3M single liq
+LIQ_MASSIVE_USD = float(os.getenv("LIQ_MASSIVE_USD", "10000000")) # $10M+ = massive
 
-COOLDOWN_MIN = 15  # per asset per side
+COOLDOWN_MIN = 30  # per asset per side
 
 STATE = {
     "last_check":    None,

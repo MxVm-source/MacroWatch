@@ -30,7 +30,7 @@ log = logging.getLogger("trumpwatch")
 
 OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL    = os.getenv("TW_OPENAI_MODEL", "gpt-4o-mini")   # fast + cheap
-AI_SCORE_MIN    = int(os.getenv("TW_AI_SCORE_MIN", "6"))         # 0-10, fire if >=
+AI_SCORE_MIN    = int(os.getenv("TW_AI_SCORE_MIN", "7"))         # 0-10, fire if >=
 AI_TIMEOUT      = int(os.getenv("TW_AI_TIMEOUT", "12"))
 
 SRC_RSS         = os.getenv("TW_SOURCE_RSS",  "https://www.trumpstruth.org/feed")
@@ -224,16 +224,39 @@ JSON schema:
   "reason": <one concise sentence explaining the market impact>
 }
 
-Scoring guide:
-  9-10  Immediate, severe market impact (war declaration, emergency Fed action, crypto ban/embrace)
-  7-8   High impact — tariffs, major sanctions, key appointments, crypto/AI policy shifts
-  6     Moderate impact — geopolitical tensions, indirect fiscal signals
-  4-5   Low impact — general economic commentary, vague statements
-  1-3   No real market impact (endorsements, culture war, personal attacks, rallies)
+CRITICAL SCORING RULES:
 
-Be strict. A post praising a local politician = 1-2.
-A post announcing tariffs on China = 8-9.
-A post mentioning bitcoin/crypto policy = 7-9 depending on specifics."""
+Supply-chain / commodity shocks are ALWAYS high impact (7-10):
+  - Strait of Hormuz news (open/closed/threatened) = 8-10 (20% of global oil flows through)
+  - Oil embargo, pipeline attack, refinery strike = 8-10
+  - OPEC output decisions, Saudi/UAE/Iran announcements = 7-9
+  - Major shipping lane disruptions (Suez, Red Sea) = 7-9
+  - Grain/food commodity shocks, export bans = 7-8
+
+Geopolitical escalation/de-escalation = 7-10:
+  - Ceasefire, peace deal, military withdrawal = 8-10 (major risk-on/off trigger)
+  - New military strike, invasion, blockade = 8-10
+  - Nuclear threats, WMD mentions = 9-10
+  - Major sanctions, counter-sanctions = 7-9
+
+Monetary / fiscal policy = 7-10:
+  - Tariff announcements (any level, any country) = 7-9
+  - Fed criticism, rate demands, Powell attacks = 7-9
+  - Crypto/BTC policy (reserve, ban, strategic) = 8-10
+  - Tax/spending bills, debt ceiling = 6-8
+
+Lower impact (1-5):
+  - Endorsements, rallies, cultural commentary = 1-3
+  - Vague economic commentary without specifics = 3-5
+  - Personal attacks, domestic politics = 1-3
+
+IMPORTANT: Even "neutral" phrasing of a high-impact event deserves a high score.
+Example: "Strait of Hormuz is fully open" = SCORE 8+ (bullish oil supply news regardless of tone).
+Example: "Iran ceasefire agreed" = SCORE 8+ (major risk-on catalyst).
+Example: "China tariffs increased to 50%" = SCORE 8+ (market moving regardless of sentiment).
+
+Score based on MARKET IMPACT POTENTIAL, not emotional tone of the post.
+A calm factual post about oil supply can move markets more than an angry rally post."""
 
 
 def _ai_score(text: str) -> dict | None:
