@@ -46,6 +46,7 @@ STATE = {
     "approaching":    {},
     "hit":            {},
     "breakout":       {},
+    "breakout_time":  {},  # { key: datetime } — silence level for 24h after breakout
 }
 
 
@@ -178,6 +179,14 @@ def _send_signal(signal_type, key, level, price, prev_close=None):
     log.info(f"S&RWatch: {signal_type} — {key} @ ${level:,.2f} (price ${price:,.2f})")
 
 
+def _breakout_silenced(key: str) -> bool:
+    """Returns True if level was broken out recently — silence for 24h."""
+    t = STATE["breakout_time"].get(key)
+    if not t:
+        return False
+    return datetime.now(timezone.utc) - t < timedelta(hours=24)
+
+
 def poll_once():
     now = datetime.now(timezone.utc)
     STATE["last_check"] = now
@@ -203,41 +212,65 @@ def poll_once():
 
     price      = float(candles_4h[-1][4])
     prev_close = float(candles_4h[-2][4])
-    STATE["last_price"]   = price
+    STATE["last_price"]    = price
     STATE["last_4h_close"] = prev_close
 
     levels = _all_levels()
     if not levels:
         return
 
+    # ── Pass 1: check for breakouts first (highest priority, no limit) ────────
+    breakout_fired = set()
     for key, level in levels.items():
         if level <= 0:
             continue
-
-        dist_pct = abs(price - level) / level * 100
-
-        # BREAKOUT — 4H candle closed across level
         crossed_up   = prev_close < level <= price
         crossed_down = prev_close > level >= price
         if crossed_up and _breakout_ok(key, "UP"):
-            STATE["breakout"][key] = "UP"
+            STATE["breakout"][key]      = "UP"
+            STATE["breakout_time"][key] = now
             _send_signal("BREAKOUT", key, level, price, prev_close)
-            continue
-        if crossed_down and _breakout_ok(key, "DOWN"):
-            STATE["breakout"][key] = "DOWN"
+            breakout_fired.add(key)
+        elif crossed_down and _breakout_ok(key, "DOWN"):
+            STATE["breakout"][key]      = "DOWN"
+            STATE["breakout_time"][key] = now
             _send_signal("BREAKOUT", key, level, price, prev_close)
-            continue
+            breakout_fired.add(key)
 
-        # HIT — within 0.1%
+    # ── Pass 2: HIT / APPROACHING — only the single closest eligible level ────
+    best_key   = None
+    best_dist  = float("inf")
+    best_type  = None
+
+    for key, level in levels.items():
+        if level <= 0:
+            continue
+        if key in breakout_fired:
+            continue
+        if _breakout_silenced(key):
+            continue  # silenced for 24h after breakout
+
+        dist_pct = abs(price - level) / level * 100
+
         if dist_pct <= HIT_PCT and _hit_ok(key):
-            STATE["hit"][key] = now
-            _send_signal("HIT", key, level, price)
-            continue
+            if dist_pct < best_dist:
+                best_dist = dist_pct
+                best_key  = key
+                best_type = "HIT"
 
-        # APPROACHING — within 0.5%
-        if dist_pct <= APPROACH_PCT and _approach_ok(key):
-            STATE["approaching"][key] = now
-            _send_signal("APPROACHING", key, level, price)
+        elif dist_pct <= APPROACH_PCT and _approach_ok(key):
+            if dist_pct < best_dist:
+                best_dist = dist_pct
+                best_key  = key
+                best_type = "APPROACHING"
+
+    if best_key:
+        level = levels[best_key]
+        if best_type == "HIT":
+            STATE["hit"][best_key] = now
+        else:
+            STATE["approaching"][best_key] = now
+        _send_signal(best_type, best_key, level, price)
 
 
 def show_levels():
@@ -294,6 +327,7 @@ def show_diag():
     lines = ["📐 *S&RWatch Diagnostics*", ""]
     last  = STATE["last_check"]
     price = STATE["last_price"]
+    silenced = sum(1 for k in STATE["breakout_time"] if _breakout_silenced(k))
     lines += [
         f"Last check: {last.strftime('%Y-%m-%d %H:%M UTC') if last else 'Never'}",
         f"Price: {'${:,.2f}'.format(price) if price else '—'}",
@@ -303,5 +337,8 @@ def show_diag():
         "",
         f"Approach cooldown: {APPROACH_COOLDOWN_H}h  |  Hit cooldown: {HIT_COOLDOWN_H}h",
         f"Active breakouts: {len(STATE['breakout'])}",
+        f"Silenced levels (post-breakout): {silenced}",
+        "",
+        "_Only closest eligible level fires per poll cycle_",
     ]
     send_text("\n".join(lines))
