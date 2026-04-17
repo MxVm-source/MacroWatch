@@ -269,38 +269,6 @@ def _evaluate_signals(modules: dict) -> dict:
     except Exception as e:
         signals["liqs"] = {"text": "🔥 Liqs: unavailable", "bias": "neutral"}
 
-    # ── S&RWatch — nearest levels only
-    try:
-        sr_levels = {}
-        sr_levels.update(modules["srwatch"].STATE.get("daily_levels", {}))
-        sr_levels.update(modules["srwatch"].STATE.get("weekly_levels", {}))
-        sr_levels.update(modules["srwatch"].STATE.get("monthly_levels", {}))
-        price = modules["srwatch"].STATE.get("last_price")
-
-        if price and sr_levels:
-            above = sorted([(k, v) for k, v in sr_levels.items() if v > price], key=lambda x: x[1])
-            below = sorted([(k, v) for k, v in sr_levels.items() if v < price], key=lambda x: -x[1])
-
-            sr_lines = []
-            if above:
-                k, v = above[0]
-                dist = (v - price) / price * 100
-                tf   = k.split("_")[0]
-                tf_l = {"D": "Daily", "W": "Weekly", "M": "Monthly"}.get(tf, tf)
-                sr_lines.append(f"  🔴 R: `${v:,.0f}` +{dist:.1f}% ({tf_l} {k.split('_')[1]})")
-            if below:
-                k, v = below[0]
-                dist = (price - v) / price * 100
-                tf   = k.split("_")[0]
-                tf_l = {"D": "Daily", "W": "Weekly", "M": "Monthly"}.get(tf, tf)
-                sr_lines.append(f"  🟢 S: `${v:,.0f}` -{dist:.1f}% ({tf_l} {k.split('_')[1]})")
-
-            signals["sr"] = {"text": "\n".join(sr_lines), "bias": "neutral", "multiline": True}
-        else:
-            signals["sr"] = {"text": "  📐 S/R: no levels computed", "bias": "neutral"}
-    except Exception as e:
-        signals["sr"] = {"text": "  📐 S/R: unavailable", "bias": "neutral"}
-
     return {"signals": signals, "score": score}
 
 
@@ -358,10 +326,6 @@ def build_intel(modules: dict, is_auto: bool = False) -> str:
         signals["fedwatch"]["text"],
         signals["trump"]["text"],
         signals["vix"]["text"],
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "📐 *BTC STRUCTURE*",
-        signals["sr"]["text"],
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "🔬 *MARKET INTERNALS*",
