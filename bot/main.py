@@ -48,7 +48,6 @@ import bot.modules.fundingwatch    as fundingwatch
 import bot.modules.oiwatch         as oiwatch
 import bot.modules.optionswatch    as optionswatch
 import bot.modules.liquidationwatch as liquidationwatch
-import bot.modules.srwatch         as srwatch
 import bot.modules.vixwatch        as vixwatch
 import bot.modules.intelwatch      as intelwatch
 import bot.modules.reportwatch     as reportwatch
@@ -811,13 +810,6 @@ def _job_liquidationwatch():
         _err("LiquidationWatch", e)
 
 
-def _job_srwatch():
-    try:
-        srwatch.poll_once()
-    except Exception as e:
-        _err("S&RWatch", e)
-
-
 def _get_modules():
     """Bundle all module references for IntelWatch."""
     return {
@@ -829,7 +821,6 @@ def _get_modules():
         "oiwatch":         oiwatch,
         "optionswatch":    optionswatch,
         "liquidationwatch": liquidationwatch,
-        "srwatch":         srwatch,
     }
 
 
@@ -1065,13 +1056,6 @@ def start_scheduler():
     )
     print("🔥 LiquidationWatch scheduled (2min) ✅", flush=True)
 
-    # ── S&RWatch — every 15 minutes (alerts on Weekly/Monthly R1/R2/S1/S2)
-    SCHED.add_job(
-        _job_srwatch, "interval", minutes=15,
-        id="srwatch", max_instances=1, misfire_grace_time=60,
-    )
-    print("📐 S&RWatch scheduled (15min, weekly/monthly majors only) ✅", flush=True)
-
     # ── IntelWatch auto-trigger — every 30 minutes
     SCHED.add_job(
         _job_intelwatch_auto, "interval", minutes=30,
@@ -1083,7 +1067,7 @@ def start_scheduler():
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
     print("💸 FundingWatch · 📊 OIWatch · ⚙️ OptionsWatch ready ✅", flush=True)
-    print("🔥 LiquidationWatch · 📐 S&RWatch · 🧠 IntelWatch ready ✅", flush=True)
+    print("🔥 LiquidationWatch · 🧠 IntelWatch ready ✅", flush=True)
     print("😱 VixWatch ready — /vix command live ✅", flush=True)
 
 
@@ -1227,16 +1211,6 @@ def _build_health_msg() -> str:
         f"  Session liquidations: {total_liqs}",
     ]
 
-    # S&RWatch state
-    sr_check = srwatch.STATE.get("last_check")
-    sr_prices = srwatch.STATE.get("prices", {})
-    lines += [
-        "",
-        "📐 *S&RWatch*",
-        f"  Last check: {sr_check.strftime('%H:%M UTC') if sr_check else '—'}",
-        f"  BTC: {'${:,.2f}'.format(sr_prices['BTCUSDT']) if sr_prices.get('BTCUSDT') else '—'}",
-    ]
-
     return "\n".join(lines)
 
 
@@ -1329,9 +1303,6 @@ def _handle_command(text: str, text_raw: str):
             "/options_now — Run analysis now\n\n"
             "🔥 *LiquidationWatch*\n"
             "/liq_diag — Session liquidation stats\n\n"
-            "📐 *S&RWatch*\n"
-            "/sr — Key S/R levels for ETH/BNB/SOL\n"
-            "/sr_diag — Last check + alert history\n\n"
             "🧠 *IntelWatch*\n"
             "/intel — Full market intelligence briefing\n\n"
             "😱 *VixWatch*\n"
@@ -1490,22 +1461,6 @@ def _handle_command(text: str, text_raw: str):
             liquidationwatch.show_diag()
         except Exception as e:
             send_text(f"🔥 [LiquidationWatch] Diag error: {e}")
-        return
-
-    # ── /sr / /sr_diag ────────────────────────────────────────────────────────
-    if text.startswith("/sr_diag"):
-        try:
-            srwatch.show_diag()
-        except Exception as e:
-            send_text(f"📐 [S&RWatch] Diag error: {e}")
-        return
-
-    if text.startswith("/sr"):
-        try:
-            send_text("📐 Computing S/R levels...")
-            srwatch.show_levels()
-        except Exception as e:
-            send_text(f"📐 [S&RWatch] Error: {e}")
         return
 
     # ── /intel ────────────────────────────────────────────────────────────────
