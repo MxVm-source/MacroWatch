@@ -44,6 +44,9 @@ from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
 import bot.modules.stratwatch      as stratwatch
 import bot.modules.challengewatch  as challengewatch
+import bot.modules.fundingwatch    as fundingwatch
+import bot.modules.oiwatch         as oiwatch
+import bot.modules.optionswatch    as optionswatch
 import bot.modules.vixwatch        as vixwatch
 import bot.modules.reportwatch     as reportwatch
 
@@ -763,6 +766,34 @@ def _job_whalewatch():
         _err("WhaleWatch", e)
 
 
+def _job_fundingwatch():
+    try:
+        fundingwatch.poll_once()
+    except Exception as e:
+        _err("FundingWatch", e)
+
+
+def _job_oiwatch():
+    try:
+        oiwatch.poll_once()
+    except Exception as e:
+        _err("OIWatch", e)
+
+
+def _job_optionswatch_thursday():
+    try:
+        optionswatch.run_thursday()
+    except Exception as e:
+        _err("OptionsWatch", e)
+
+
+def _job_optionswatch_friday():
+    try:
+        optionswatch.run_friday()
+    except Exception as e:
+        _err("OptionsWatch", e)
+
+
 def _job_market_open():
     try:
         _send_market_open()
@@ -958,9 +989,35 @@ def start_scheduler():
     )
     print("🏦 FedWatch Monday push scheduled (Mon 08:00) ✅", flush=True)
 
+    # ── FundingWatch — every 30 minutes
+    SCHED.add_job(
+        _job_fundingwatch, "interval", minutes=30,
+        id="fundingwatch", max_instances=1, misfire_grace_time=60,
+    )
+    print("💸 FundingWatch scheduled (30min) ✅", flush=True)
+
+    # ── OIWatch — every 30 minutes
+    SCHED.add_job(
+        _job_oiwatch, "interval", minutes=30,
+        id="oiwatch", max_instances=1, misfire_grace_time=60,
+    )
+    print("📊 OIWatch scheduled (30min) ✅", flush=True)
+
+    # ── OptionsWatch — Thursday 18:00 + Friday 07:00 UTC
+    SCHED.add_job(
+        _job_optionswatch_thursday, "cron", day_of_week="thu", hour=18, minute=0,
+        id="optionswatch_thursday", max_instances=1,
+    )
+    SCHED.add_job(
+        _job_optionswatch_friday, "cron", day_of_week="fri", hour=7, minute=0,
+        id="optionswatch_friday", max_instances=1,
+    )
+    print("⚙️ OptionsWatch scheduled (Thu 18:00 + Fri 07:00 UTC) ✅", flush=True)
+
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
+    print("💸 FundingWatch · 📊 OIWatch · ⚙️ OptionsWatch ready ✅", flush=True)
     print("😱 VixWatch ready — /vix command live ✅", flush=True)
 
 
@@ -1062,6 +1119,37 @@ def _build_health_msg() -> str:
         f"  Source: {'✅ OK' if fedwatch.STATE.get('source_ok') else '⚠️ Degraded'}",
     ]
 
+    # FundingWatch state
+    fw_check = fundingwatch.STATE.get("last_check")
+    fw_rates = fundingwatch.STATE.get("last_rates", {})
+    lines += [
+        "",
+        "💸 *FundingWatch*",
+        f"  Last check: {fw_check.strftime('%H:%M UTC') if fw_check else '—'}",
+        f"  ETH: {fw_rates.get('ETHUSDT', '—')}%  BNB: {fw_rates.get('BNBUSDT', '—')}%  SOL: {fw_rates.get('SOLUSDT', '—')}%",
+    ]
+
+    # OIWatch state
+    oi_check = oiwatch.STATE.get("last_check")
+    oi_data  = oiwatch.STATE.get("last_oi", {})
+    lines += [
+        "",
+        "📊 *OIWatch*",
+        f"  Last check: {oi_check.strftime('%H:%M UTC') if oi_check else '—'}",
+        f"  ETH OI: {'${:.2f}B'.format(oi_data['ETHUSDT']/1e9) if oi_data.get('ETHUSDT') else '—'}",
+    ]
+
+    # OptionsWatch state
+    opt_last = optionswatch.STATE.get("last_alert_utc")
+    opt_exp  = optionswatch.STATE.get("last_expiry_str")
+    opt_pain = optionswatch.STATE.get("last_max_pain")
+    lines += [
+        "",
+        "⚙️ *OptionsWatch*",
+        f"  Last alert: {opt_last.strftime('%Y-%m-%d %H:%M UTC') if opt_last else '—'}",
+        f"  Expiry: {opt_exp or '—'}  Max pain: {'${:,.0f}'.format(opt_pain) if opt_pain else '—'}",
+    ]
+
     return "\n".join(lines)
 
 
@@ -1146,6 +1234,13 @@ def _handle_command(text: str, text_raw: str):
             "/cw_weekly — Weekly sentiment\n\n"
             "📡 *CorrelWatch*\n"
             "/correl_diag — DXY vs BTC last reading\n\n"
+            "💸 *FundingWatch*\n"
+            "/funding_diag — Current funding rates\n\n"
+            "📊 *OIWatch*\n"
+            "/oi_diag — Current open interest\n\n"
+            "⚙️ *OptionsWatch*\n"
+            "/options_diag — Last expiry analysis\n"
+            "/options_now — Run analysis now\n\n"
             "😱 *VixWatch*\n"
             "/vix — Current VIX reading + market context\n"
             "/vix_diag — Last value + alert state\n\n"
@@ -1257,6 +1352,38 @@ def _handle_command(text: str, text_raw: str):
             correlwatch.show_diag()
         except Exception as e:
             send_text(f"📡 [CorrelWatch] Diag error: {e}")
+        return
+
+    # ── /funding_diag ─────────────────────────────────────────────────────────
+    if text.startswith("/funding_diag"):
+        try:
+            fundingwatch.show_diag()
+        except Exception as e:
+            send_text(f"💸 [FundingWatch] Diag error: {e}")
+        return
+
+    # ── /oi_diag ──────────────────────────────────────────────────────────────
+    if text.startswith("/oi_diag"):
+        try:
+            oiwatch.show_diag()
+        except Exception as e:
+            send_text(f"📊 [OIWatch] Diag error: {e}")
+        return
+
+    # ── /options_diag / /options_now ─────────────────────────────────────────
+    if text.startswith("/options_now"):
+        try:
+            send_text("⚙️ Running options analysis — takes ~30s...")
+            optionswatch.run_thursday()
+        except Exception as e:
+            send_text(f"⚙️ [OptionsWatch] Error: {e}")
+        return
+
+    if text.startswith("/options_diag"):
+        try:
+            optionswatch.show_diag()
+        except Exception as e:
+            send_text(f"⚙️ [OptionsWatch] Diag error: {e}")
         return
 
     # ── /vix / /vix_diag ─────────────────────────────────────────────────────
