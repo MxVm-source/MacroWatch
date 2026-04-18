@@ -249,26 +249,6 @@ def _evaluate_signals(modules: dict) -> dict:
     except Exception as e:
         signals["options"] = {"text": "⚙️ Options: unavailable", "bias": "neutral"}
 
-    # ── LiquidationWatch
-    try:
-        liq_stats = modules["liquidationwatch"].STATE.get("stats", {})
-        total_long  = sum(v.get("long_liqs", 0) for v in liq_stats.values())
-        total_short = sum(v.get("short_liqs", 0) for v in liq_stats.values())
-        total_usd   = sum(v.get("total_usd", 0) for v in liq_stats.values())
-        usd_m       = total_usd / 1e6
-        if total_long + total_short > 0:
-            dom = "LONGS" if total_long > total_short else "SHORTS"
-            b   = "bear" if total_long > total_short else "bull"
-            signals["liqs"] = {
-                "text": f"🔥 Liqs: ${usd_m:.1f}M — {dom} dominant ({total_long}L / {total_short}S)",
-                "bias": b
-            }
-            score[b] += 1
-        else:
-            signals["liqs"] = {"text": "🔥 Liqs: no events this session", "bias": "neutral"}
-    except Exception as e:
-        signals["liqs"] = {"text": "🔥 Liqs: unavailable", "bias": "neutral"}
-
     return {"signals": signals, "score": score}
 
 
@@ -341,7 +321,6 @@ def build_intel(modules: dict, is_auto: bool = False) -> str:
         signals["funding"]["text"],
         signals["oi"]["text"],
         signals["options"]["text"],
-        signals["liqs"]["text"],
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🤖 *BIAS: {bias_emoji} {bias_label}*",
@@ -431,16 +410,6 @@ def check_auto_trigger(modules: dict) -> bool:
         btc_c = cw.get("last_btc")
         if dxy and btc_c and ((dxy > 0.4 and btc_c < -2) or (dxy < -0.4 and btc_c > 2)):
             conditions.append("correl_diverge")
-    except Exception:
-        pass
-
-    # 8. Large liquidation in last hour
-    try:
-        liq_alerts = modules["liquidationwatch"].STATE.get("last_alert", {})
-        for key, t in liq_alerts.items():
-            if (now - t).total_seconds() < 3600:
-                conditions.append("liq_large")
-                break
     except Exception:
         pass
 
