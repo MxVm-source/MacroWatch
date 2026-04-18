@@ -37,10 +37,14 @@ COOLDOWN_DAYS = 7
 _last_ondemand_call: dict = {}   # { coin: datetime }
 
 
-def _fetch_heatmap(coin: str = "BTC") -> dict | None:
+def _fetch_heatmap(coin: str = "BTC", timeframe: str = "24h") -> dict | None:
     """
     Run the Apify actor synchronously and return dataset items.
     Returns dict with {image_url, metadata} or None on failure.
+
+    timeframe: one of "12h", "24h", "3d", "7d", "30d", "90d", "180d", "1y"
+               (Note: actor's timeframe support is best-effort — passes multiple
+                param name variants to maximize chance of respect)
     """
     if not APIFY_TOKEN:
         log.error("APIFY_API_TOKEN not set")
@@ -57,6 +61,11 @@ def _fetch_heatmap(coin: str = "BTC") -> dict | None:
         "height":    1080,
         "waitTime":  5,
         "headless":  True,
+        # Pass timeframe under multiple common parameter names
+        "timeframe": timeframe,
+        "time":      timeframe,
+        "range":     timeframe,
+        "period":    timeframe,
     }
 
     try:
@@ -124,10 +133,11 @@ def _send_photo(chat_id: str, image_url: str, caption: str) -> bool:
 
 # ─── Public API ──────────────────────────────────────────────────────────────
 
-def send_heatmap(coin: str = "BTC", target: str = "private") -> bool:
+def send_heatmap(coin: str = "BTC", target: str = "private", timeframe: str = "24h") -> bool:
     """
     Fetch and send heatmap to specified target.
     target: 'private' or 'public'
+    timeframe: '12h','24h','3d','7d','30d','90d','180d','1y'
     Returns True on success.
 
     On-demand private calls have a 7-day cooldown per coin to prevent spend blowout.
@@ -155,7 +165,7 @@ def send_heatmap(coin: str = "BTC", target: str = "private") -> bool:
         # Notify user that we're working on it
         send_text(f"🔥 Fetching {coin} liquidation heatmap from CoinGlass — takes ~30s...")
 
-    result = _fetch_heatmap(coin)
+    result = _fetch_heatmap(coin, timeframe=timeframe)
     if not result:
         if target == "private":
             send_text(f"🔥 [HeatmapWatch] Could not fetch {coin} heatmap. Check APIFY_API_TOKEN.")
@@ -164,9 +174,16 @@ def send_heatmap(coin: str = "BTC", target: str = "private") -> bool:
     now = datetime.now(timezone.utc)
 
     # Build caption based on target
+    # Map timeframe to human label
+    tf_label = {
+        "12h": "12-hour", "24h": "24-hour", "3d": "3-day",
+        "7d":  "7-day",   "30d": "30-day",  "90d": "90-day",
+        "180d":"180-day", "1y":  "1-year",
+    }.get(timeframe, timeframe)
+
     if target == "public":
         caption = (
-            f"🔥 *Infinex Capital — {coin} Liquidation Heatmap*\n"
+            f"🔥 *Infinex Capital — {coin} Liquidation Heatmap ({tf_label})*\n"
             f"_Intelligence provided by MacroWatch 🧠_\n\n"
             f"_Source: CoinGlass · {now.strftime('%b %d, %Y')}_\n\n"
             f"Yellow/red zones show where liquidation clusters sit. "
@@ -176,7 +193,7 @@ def send_heatmap(coin: str = "BTC", target: str = "private") -> bool:
         chat_id = PUBLIC_CHAT_ID
     else:
         caption = (
-            f"🔥 *{coin} Liquidation Heatmap*\n"
+            f"🔥 *{coin} Liquidation Heatmap ({tf_label})*\n"
             f"_Source: CoinGlass · {now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
             f"Yellow/red = large liquidation clusters.\n"
             f"Price often sweeps these zones."
@@ -198,5 +215,5 @@ def send_heatmap(coin: str = "BTC", target: str = "private") -> bool:
 
 
 def send_weekly_heatmap():
-    """Called from weekly brief — sends BTC heatmap to public channel."""
-    send_heatmap("BTC", target="public")
+    """Called from weekly brief — sends BTC 7-day heatmap to public channel."""
+    send_heatmap("BTC", target="public", timeframe="7d")
