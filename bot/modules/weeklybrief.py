@@ -416,4 +416,11 @@ def send_weekly_brief(modules: dict):
         except Exception as e:
             log.warning(f"WeeklyBrief public send failed: {e}")
 
+    # Append BTC liquidation heatmap (best-effort, non-blocking on failure)
+    try:
+        from bot.modules.heatmapwatch import send_weekly_heatmap
+        send_weekly_heatmap()
+    except Exception as e:
+        log.warning(f"WeeklyBrief heatmap append failed: {e}")
+
     log.info("WeeklyBrief sent ✅")
