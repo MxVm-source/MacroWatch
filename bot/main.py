@@ -1277,7 +1277,8 @@ def _handle_command(text: str, text_raw: str):
             "/options_now — Run analysis now\n\n"
             "🧠 *IntelWatch*\n"
             "/intel — Full market intelligence briefing\n"
-            "/heatmap [coin] — Liquidation heatmap (default BTC)\n\n"
+            "/heatmap [coin] [timeframe] — Liquidation heatmap\n"
+            "   (default BTC 24h, tfs: 12h/24h/3d/7d/30d/90d/180d/1y)\n\n"
             "😱 *VixWatch*\n"
             "/vix — Current VIX reading + market context\n"
             "/vix_diag — Last value + alert state\n\n"
@@ -1437,12 +1438,18 @@ def _handle_command(text: str, text_raw: str):
             send_text(f"🧠 [IntelWatch] Error: {e}")
         return
 
-    # ── /heatmap [coin] ──────────────────────────────────────────────────────
+    # ── /heatmap [coin] [timeframe] ──────────────────────────────────────────
     if text.startswith("/heatmap"):
         try:
-            parts = text.split()
-            coin  = parts[1] if len(parts) > 1 else "BTC"
-            heatmapwatch.send_heatmap(coin, target="private")
+            parts     = text.split()
+            coin      = parts[1] if len(parts) > 1 else "BTC"
+            timeframe = parts[2] if len(parts) > 2 else "24h"
+            # Validate timeframe
+            valid_tfs = {"12h", "24h", "3d", "7d", "30d", "90d", "180d", "1y"}
+            if timeframe not in valid_tfs:
+                send_text(f"🔥 Invalid timeframe. Use: {', '.join(sorted(valid_tfs))}")
+                return
+            heatmapwatch.send_heatmap(coin, target="private", timeframe=timeframe)
         except Exception as e:
             send_text(f"🔥 [HeatmapWatch] Error: {e}")
         return
