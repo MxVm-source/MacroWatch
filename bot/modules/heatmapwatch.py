@@ -6,17 +6,18 @@ Fetches liquidation heatmap screenshots from CoinGlass via Apify
 (hamdo/coinglass-liquidation-heatmap actor).
 
 Usage:
-  - /heatmap [coin]           — on-demand (private group)
+  - /heatmap [coin]           — on-demand (private group, 7d cooldown per coin)
   - send_weekly_heatmap()     — called from Monday Weekly Brief (public)
 
-Cost: ~$0.006 per heatmap. Very cheap.
+Cost: ~$0.06 per heatmap on free tier ($0.006 on Business tier).
+On-demand calls have a 7-day cooldown per coin to cap spend.
 
 Env: APIFY_API_TOKEN
 """
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 
@@ -30,6 +31,10 @@ APIFY_BASE        = "https://api.apify.com/v2"
 TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.getenv("CHAT_ID", "")
 PUBLIC_CHAT_ID    = os.getenv("PUBLIC_CHAT_ID", "")
+
+# Cooldown for on-demand /heatmap calls (prevents spend blowout)
+COOLDOWN_DAYS = 7
+_last_ondemand_call: dict = {}   # { coin: datetime }
 
 
 def _fetch_heatmap(coin: str = "BTC") -> dict | None:
@@ -124,11 +129,30 @@ def send_heatmap(coin: str = "BTC", target: str = "private") -> bool:
     Fetch and send heatmap to specified target.
     target: 'private' or 'public'
     Returns True on success.
+
+    On-demand private calls have a 7-day cooldown per coin to prevent spend blowout.
+    Weekly auto-post (target='public') bypasses the cooldown.
     """
     coin = coin.upper().strip()
+    now  = datetime.now(timezone.utc)
 
-    # Notify user that we're working on it
+    # Cooldown enforcement for on-demand private calls
     if target == "private":
+        last = _last_ondemand_call.get(coin)
+        if last:
+            elapsed = now - last
+            if elapsed < timedelta(days=COOLDOWN_DAYS):
+                remaining = timedelta(days=COOLDOWN_DAYS) - elapsed
+                days  = remaining.days
+                hours = remaining.seconds // 3600
+                send_text(
+                    f"🔥 {coin} heatmap on cooldown.\n"
+                    f"Available again in {days}d {hours}h.\n\n"
+                    f"_Cooldown: {COOLDOWN_DAYS} days per coin to cap Apify spend._"
+                )
+                return False
+
+        # Notify user that we're working on it
         send_text(f"🔥 Fetching {coin} liquidation heatmap from CoinGlass — takes ~30s...")
 
     result = _fetch_heatmap(coin)
@@ -163,7 +187,11 @@ def send_heatmap(coin: str = "BTC", target: str = "private") -> bool:
     if not ok and target == "private":
         # Fallback: send URL as text if photo send fails
         send_text(f"🔥 {coin} Heatmap: {result['image_url']}")
-        return True
+        ok = True
+
+    # Record successful on-demand call for cooldown
+    if ok and target == "private":
+        _last_ondemand_call[coin] = now
 
     log.info(f"HeatmapWatch: sent {coin} heatmap to {target}")
     return ok
