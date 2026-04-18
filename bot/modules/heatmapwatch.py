@@ -57,7 +57,8 @@ def _fetch_heatmap(coin: str = "BTC") -> dict | None:
     try:
         log.info(f"HeatmapWatch: requesting {coin} heatmap from Apify...")
         r = requests.post(url, json=payload, timeout=90)
-        if r.status_code != 200:
+        # Apify returns 200 or 201 on success
+        if r.status_code not in (200, 201):
             log.warning(f"Apify returned HTTP {r.status_code}: {r.text[:200]}")
             return None
 
@@ -68,10 +69,10 @@ def _fetch_heatmap(coin: str = "BTC") -> dict | None:
 
         item = items[0]
 
-        # Actor returns image URL in key-value store
-        image_url = (item.get("imageUrl")
-                     or item.get("image_url")
-                     or item.get("url"))
+        # Actor returns screenshotUrl (Apify's key-value store URL)
+        image_url = (item.get("screenshotUrl")
+                     or item.get("imageUrl")
+                     or item.get("image_url"))
         if not image_url:
             log.warning(f"No image URL in Apify response. Keys: {list(item.keys())}")
             return None
