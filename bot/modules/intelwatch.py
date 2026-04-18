@@ -278,16 +278,24 @@ def _bias_verdict(score: dict) -> tuple[str, str]:
     bull = score["bull"]
     bear = score["bear"]
     total = bull + bear
-    if total == 0:
-        return "⚪", "NEUTRAL"
-    ratio = bear / total if total > 0 else 0
-    if ratio >= 0.75:
-        return "🔴", "STRONGLY BEARISH"
-    elif ratio >= 0.55:
+
+    # Require minimum signal count for any verdict
+    if total < 2:
+        return "⚪", "INSUFFICIENT DATA"
+
+    ratio = bear / total
+
+    # Strong verdicts require 4+ directional signals
+    if total >= 4:
+        if ratio >= 0.75:
+            return "🔴", "STRONGLY BEARISH"
+        elif ratio <= 0.25:
+            return "🟢", "STRONGLY BULLISH"
+
+    # Moderate verdicts for 2+ signals
+    if ratio >= 0.65:
         return "🟠", "BEARISH"
-    elif ratio <= 0.25:
-        return "🟢", "STRONGLY BULLISH"
-    elif ratio <= 0.45:
+    elif ratio <= 0.35:
         return "🟡", "BULLISH"
     else:
         return "⚪", "NEUTRAL — Mixed signals"

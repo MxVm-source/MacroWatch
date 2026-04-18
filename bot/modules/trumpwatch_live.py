@@ -136,7 +136,7 @@ def _dedup_check(key: str) -> bool:
     return True
 
 RECENT_ALERTS: deque = deque(maxlen=RECENT_MAX)
-STATE = {"seen": _MEM_SEEN, "source_health": {}}
+STATE = {"seen": _MEM_SEEN, "source_health": {}, "last_score": None, "last_sentiment": None, "last_assets": [], "last_reason": "", "last_text": "", "last_alert_utc": None}
 
 if _redis_available():
     log.info("Upstash Redis connected ✅ — dedup is fully persistent")
@@ -616,6 +616,16 @@ def poll_once():
         msg = _format_alert(txt, url, src, ai)
         RECENT_ALERTS.appendleft(f"🕒 {now_iso} UTC\n{msg}")
         _log_sentiment(ai.get("sentiment", "neutral"), ai.get("score", 0))
+
+        # Track in STATE for IntelWatch consumption
+        from datetime import datetime, timezone
+        STATE["last_score"]      = ai.get("score")
+        STATE["last_sentiment"]  = ai.get("sentiment", "neutral")
+        STATE["last_assets"]     = ai.get("assets", [])
+        STATE["last_reason"]     = ai.get("reason", "")
+        STATE["last_text"]       = txt[:100]
+        STATE["last_alert_utc"]  = datetime.now(timezone.utc)
+
         send_text(msg)
         fired += 1
 
