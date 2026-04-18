@@ -325,9 +325,6 @@ def build_intel(modules: dict, is_auto: bool = False) -> str:
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🤖 *BIAS: {bias_emoji} {bias_label}*",
         f"_{bias_count} — {total_signals} signals evaluated_",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "_Not financial advice. Trade your own plan._ ⚡",
     ]
 
     return "\n".join([l for l in lines if l is not None])

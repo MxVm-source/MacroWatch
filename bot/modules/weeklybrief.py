@@ -173,10 +173,42 @@ def _fetch_funding_summary(modules: dict) -> dict:
 
 # ─── AI narrative ────────────────────────────────────────────────────────────
 
-def _generate_narrative(data: dict) -> str:
-    """Use Claude API to generate a 3-line market narrative."""
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def _call_openai(prompt: str, max_tokens: int = 120) -> str:
+    """Shared OpenAI caller. Returns text or empty string on failure."""
+    if not OPENAI_API_KEY:
+        log.warning("OPENAI_API_KEY not set")
+        return ""
     try:
-        prompt = f"""You are a crypto market analyst writing a weekly brief for traders.
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+            },
+            json={
+                "model":       OPENAI_MODEL,
+                "temperature": 0.3,
+                "max_tokens":  max_tokens,
+                "messages":    [{"role": "user", "content": prompt}],
+            },
+            timeout=15,
+        )
+        data    = response.json()
+        choices = data.get("choices") or []
+        if choices:
+            return (choices[0].get("message") or {}).get("content", "").strip()
+    except Exception as e:
+        log.warning(f"OpenAI call failed: {e}")
+    return ""
+
+
+def _generate_narrative(data: dict) -> str:
+    """Short 3-sentence weekly market narrative."""
+    prompt = f"""You are a crypto market analyst writing a weekly brief for traders.
 Based on this week's data, write exactly 3 short punchy sentences explaining:
 1. The dominant market theme this week
 2. What drove price action
@@ -189,27 +221,27 @@ Data:
 - S&P 500: {data.get('sp500', 'N/A')}% | Nasdaq: {data.get('nasdaq', 'N/A')}%
 - Fear & Greed: {data.get('fg_value', 'N/A')} ({data.get('fg_label', 'N/A')})
 - BTC dominance: {data.get('btc_dom', 'N/A')}%
-- Liq dominant: {'SHORTS' if (data.get('short_liqs', 0) > data.get('long_liqs', 0)) else 'LONGS'}
 
 Be direct, no fluff. Max 40 words total. No emojis."""
+    return _call_openai(prompt, max_tokens=120)
 
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"Content-Type": "application/json"},
-            json={
-                "model":      "claude-sonnet-4-20250514",
-                "max_tokens": 120,
-                "messages":   [{"role": "user", "content": prompt}],
-            },
-            timeout=15,
-        )
-        content = response.json().get("content", [])
-        for block in content:
-            if block.get("type") == "text":
-                return block["text"].strip()
-    except Exception as e:
-        log.warning(f"AI narrative failed: {e}")
-    return ""
+
+def _generate_ascent_commentary(data: dict) -> str:
+    """1-2 sentences on current market conditions for Ascent strategy context."""
+    prompt = f"""You are a quant analyst briefing copy traders on the Ascent strategy.
+Write exactly 1-2 short sentences describing current market conditions relevant to a
+4H momentum strategy trading ETH/BNB/SOL. Focus on: volatility regime, trend strength,
+and whether conditions favor or hurt a breakout strategy.
+
+This week's data:
+- ETH: {data.get('eth_chg', 'N/A')}%
+- BNB: {data.get('bnb_chg', 'N/A')}%
+- SOL: {data.get('sol_chg', 'N/A')}%
+- BTC: {data.get('btc_chg', 'N/A')}%
+- Fear & Greed: {data.get('fg_value', 'N/A')} ({data.get('fg_label', 'N/A')})
+
+Be direct. Max 30 words total. No emojis. No disclaimers."""
+    return _call_openai(prompt, max_tokens=80)
 
 
 # ─── Message builder ──────────────────────────────────────────────────────────
@@ -224,7 +256,6 @@ def build_weekly_brief(modules: dict) -> str:
     global_  = _fetch_global_mcap()
     equities = _fetch_equity_weekly()
     fg       = _fetch_fear_greed()
-    trending = _fetch_trending()
     liqs     = _fetch_liq_summary(modules)
     funding  = _fetch_funding_summary(modules)
 
@@ -355,35 +386,79 @@ def build_weekly_brief(modules: dict) -> str:
                 lines.append(f"  {e} {asset}: `{rate:+.4f}%`")
         lines.append("")
 
-    # Trending
-    if trending:
-        lines += [
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "🚀 *TRENDING THIS WEEK*",
-            "",
-            "  " + " · ".join(f"*{t}*" for t in trending[:5]),
-            "",
-        ]
+    # Ascent strategy — real PnL from last 7 days closed trades
+    try:
+        from bot.modules.strategyrecap import _fetch_closed_trades
+        closed = _fetch_closed_trades()
+    except Exception as e:
+        log.warning(f"Closed trades fetch failed: {e}")
+        closed = []
 
-    # Ascent strategy
+    # Aggregate by asset
+    pnl_by_asset = {"ETHUSDT": 0.0, "BNBUSDT": 0.0, "SOLUSDT": 0.0}
+    trades_by_asset = {"ETHUSDT": 0,   "BNBUSDT": 0,   "SOLUSDT": 0}
+    for t in closed:
+        sym = t.get("symbol", "")
+        if sym in pnl_by_asset:
+            pnl_by_asset[sym]    += t.get("pnl", 0.0)
+            trades_by_asset[sym] += 1
+    total_pnl    = sum(pnl_by_asset.values())
+    total_trades = sum(trades_by_asset.values())
+
+    ascent_data = {
+        "eth_chg":  eth_w if eth_w is not None else "N/A",
+        "bnb_chg":  bnb_w if bnb_w is not None else "N/A",
+        "sol_chg":  sol_w if sol_w is not None else "N/A",
+        "btc_chg":  round(btc.get("chg7d", 0), 2) if btc.get("chg7d") else "N/A",
+        "fg_value": fg.get("value", "N/A"),
+        "fg_label": fg.get("label", "N/A"),
+    }
+    ascent_commentary = _generate_ascent_commentary(ascent_data)
+
     lines += [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "🤖 *ASCENT STRATEGY*",
         "",
     ]
+    if ascent_commentary:
+        lines += [f"_{ascent_commentary}_", ""]
+
+    # Weekly PnL summary
+    if total_trades > 0:
+        net_e    = "🟢" if total_pnl >= 0 else "🔴"
+        net_sign = "+" if total_pnl >= 0 else "-"
+        lines.append(f"📊 *Weekly PnL:* {net_e} `{net_sign}${abs(total_pnl):.2f}` ({total_trades} trades)")
+        lines.append("")
+        for sym, label in [("ETHUSDT", "ETH"), ("BNBUSDT", "BNB"), ("SOLUSDT", "SOL")]:
+            pnl    = pnl_by_asset[sym]
+            count  = trades_by_asset[sym]
+            if count == 0:
+                lines.append(f"  ⚪ {label}: no trades")
+            else:
+                e    = "🟢" if pnl >= 0 else "🔴"
+                sign = "+" if pnl >= 0 else "-"
+                lines.append(f"  {e} {label}: `{sign}${abs(pnl):.2f}` ({count} trade{'s' if count != 1 else ''})")
+    else:
+        lines.append("📊 *Weekly PnL:* no trades this week")
+        lines.append("_Strategy only fires when volatility + momentum align._")
+
+    # Market context (spot performance — clearly separated)
+    lines += [
+        "",
+        "_Market context (7D spot performance):_",
+    ]
+    parts = []
     for label, chg in [("ETH", eth_w), ("BNB", bnb_w), ("SOL", sol_w)]:
         if chg is not None:
-            e    = "📈" if chg >= 0 else "📉"
             sign = "+" if chg >= 0 else ""
-            lines.append(f"  {e} {label}:  `{sign}{chg:.2f}%` this week")
-        else:
-            lines.append(f"  {label}: N/A")
+            parts.append(f"{label} `{sign}{chg:.2f}%`")
+    if parts:
+        lines.append("  " + " · ".join(parts))
 
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"_Published {now.strftime('%A %d %B %Y, %H:%M UTC')}_",
-        "_Not financial advice. Trade your own plan._ ⚡",
     ]
 
     return "\n".join(lines)
