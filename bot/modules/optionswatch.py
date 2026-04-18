@@ -45,7 +45,8 @@ def _get_next_friday_expiry() -> str:
 
 
 def _fetch_instruments(expiry: str) -> list:
-    """Fetch all ETH option instruments for given expiry."""
+    """Fetch all ETH option instruments for given expiry.
+       Falls back to closest upcoming expiry if exact date not listed."""
     try:
         r = requests.get(
             f"{DERIBIT_BASE}/public/get_instruments",
@@ -54,7 +55,30 @@ def _fetch_instruments(expiry: str) -> list:
         )
         data = r.json()
         instruments = data.get("result") or []
-        return [i for i in instruments if expiry in i.get("instrument_name", "")]
+        if not instruments:
+            log.warning(f"Deribit returned 0 instruments")
+            return []
+
+        # Try exact match first
+        matched = [i for i in instruments if expiry in i.get("instrument_name", "")]
+        if matched:
+            return matched
+
+        # Fallback: find closest upcoming expiry
+        from datetime import datetime as dt, timezone as tz
+        now_ms = int(dt.now(tz.utc).timestamp() * 1000)
+        upcoming = [i for i in instruments if i.get("expiration_timestamp", 0) > now_ms]
+        if not upcoming:
+            log.warning("No upcoming expiries found on Deribit")
+            return []
+
+        # Sort by expiration, take closest
+        upcoming.sort(key=lambda i: i.get("expiration_timestamp", 0))
+        closest_expiry = upcoming[0].get("expiration_timestamp", 0)
+        closest_group = [i for i in upcoming if i.get("expiration_timestamp") == closest_expiry]
+        log.info(f"OptionsWatch: exact expiry '{expiry}' not found, using closest: {len(closest_group)} instruments")
+        return closest_group
+
     except Exception as e:
         log.warning(f"Deribit instruments fetch failed: {e}")
         return []

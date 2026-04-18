@@ -49,14 +49,49 @@ def _fetch_oi(symbol: str) -> tuple[float, float] | None:
         )
         data = r.json()
         if data.get("code") != "00000":
+            log.warning(f"OI API returned non-OK for {symbol}: code={data.get('code')} msg={data.get('msg')}")
             return None
         d = data.get("data") or {}
         if isinstance(d, list):
             d = d[0] if d else {}
 
-        oi    = float(d.get("openInterestValue") or d.get("openInterest") or 0)
-        price = float(d.get("markPrice") or d.get("lastPr") or 0)
-        return (oi, price) if oi > 0 else None
+        # Bitget V2 returns 'amount' (in base currency) and 'openInterestList' in some responses
+        oi_raw = (d.get("openInterestValue")
+                  or d.get("openInterest")
+                  or d.get("amount")
+                  or 0)
+        oi    = float(oi_raw) if oi_raw else 0.0
+
+        # Fetch price separately from ticker if not in OI response
+        price_raw = d.get("markPrice") or d.get("lastPr") or d.get("last") or 0
+        price     = float(price_raw) if price_raw else 0.0
+
+        if price == 0:
+            # Fallback: get price from ticker endpoint
+            try:
+                tr = requests.get(
+                    f"{BITGET_BASE}/api/v2/mix/market/ticker",
+                    params={"symbol": symbol, "productType": PRODUCT_TYPE},
+                    timeout=5,
+                )
+                tdata = tr.json()
+                if tdata.get("code") == "00000":
+                    td = tdata.get("data") or {}
+                    if isinstance(td, list):
+                        td = td[0] if td else {}
+                    price = float(td.get("lastPr") or td.get("last") or 0)
+            except Exception:
+                pass
+
+        # If OI is in base currency (ETH/BNB/SOL), convert to USDT
+        if 0 < oi < 1e6 and price > 0:
+            oi = oi * price
+
+        if oi <= 0:
+            log.warning(f"OI={oi} for {symbol} — raw data: {d}")
+            return None
+
+        return (oi, price)
     except Exception as e:
         log.warning(f"OI fetch failed for {symbol}: {e}")
         return None

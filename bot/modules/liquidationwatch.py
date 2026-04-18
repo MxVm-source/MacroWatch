@@ -51,8 +51,13 @@ def _fetch_liquidations(symbol: str) -> list:
             timeout=8,
         )
         if r.status_code != 200:
+            log.warning(f"Liq fetch for {symbol}: HTTP {r.status_code} — {r.text[:100]}")
             return []
-        return r.json() or []
+        data = r.json()
+        if not isinstance(data, list):
+            log.warning(f"Liq fetch for {symbol}: unexpected response type {type(data)}")
+            return []
+        return data
     except Exception as e:
         log.warning(f"Liquidation fetch failed for {symbol}: {e}")
         return []
