@@ -51,6 +51,7 @@ import bot.modules.liquidationwatch as liquidationwatch
 import bot.modules.vixwatch        as vixwatch
 import bot.modules.intelwatch      as intelwatch
 import bot.modules.reportwatch     as reportwatch
+import bot.modules.heatmapwatch    as heatmapwatch
 
 log = logging.getLogger("main")
 
@@ -1304,7 +1305,8 @@ def _handle_command(text: str, text_raw: str):
             "🔥 *LiquidationWatch*\n"
             "/liq_diag — Session liquidation stats\n\n"
             "🧠 *IntelWatch*\n"
-            "/intel — Full market intelligence briefing\n\n"
+            "/intel — Full market intelligence briefing\n"
+            "/heatmap [coin] — Liquidation heatmap (default BTC)\n\n"
             "😱 *VixWatch*\n"
             "/vix — Current VIX reading + market context\n"
             "/vix_diag — Last value + alert state\n\n"
@@ -1470,6 +1472,16 @@ def _handle_command(text: str, text_raw: str):
             intelwatch.show_intel(_get_modules())
         except Exception as e:
             send_text(f"🧠 [IntelWatch] Error: {e}")
+        return
+
+    # ── /heatmap [coin] ──────────────────────────────────────────────────────
+    if text.startswith("/heatmap"):
+        try:
+            parts = text.split()
+            coin  = parts[1] if len(parts) > 1 else "BTC"
+            heatmapwatch.send_heatmap(coin, target="private")
+        except Exception as e:
+            send_text(f"🔥 [HeatmapWatch] Error: {e}")
         return
 
     # ── /vix / /vix_diag ─────────────────────────────────────────────────────
