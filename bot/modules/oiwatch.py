@@ -55,43 +55,56 @@ def _fetch_oi(symbol: str) -> tuple[float, float] | None:
         if isinstance(d, list):
             d = d[0] if d else {}
 
-        # Bitget V2 returns 'amount' (in base currency) and 'openInterestList' in some responses
-        oi_raw = (d.get("openInterestValue")
-                  or d.get("openInterest")
-                  or d.get("amount")
-                  or 0)
-        oi    = float(oi_raw) if oi_raw else 0.0
-
-        # Fetch price separately from ticker if not in OI response
-        price_raw = d.get("markPrice") or d.get("lastPr") or d.get("last") or 0
-        price     = float(price_raw) if price_raw else 0.0
-
-        if price == 0:
-            # Fallback: get price from ticker endpoint
+        # Bitget V2 current structure: data.openInterestList[0].size (in base currency)
+        oi = 0.0
+        oi_list = d.get("openInterestList") or []
+        if isinstance(oi_list, list) and oi_list:
+            size_raw = oi_list[0].get("size") or oi_list[0].get("openInterest") or 0
             try:
-                tr = requests.get(
-                    f"{BITGET_BASE}/api/v2/mix/market/ticker",
-                    params={"symbol": symbol, "productType": PRODUCT_TYPE},
-                    timeout=5,
-                )
-                tdata = tr.json()
-                if tdata.get("code") == "00000":
-                    td = tdata.get("data") or {}
-                    if isinstance(td, list):
-                        td = td[0] if td else {}
-                    price = float(td.get("lastPr") or td.get("last") or 0)
+                oi = float(size_raw)
             except Exception:
-                pass
+                oi = 0.0
 
-        # If OI is in base currency (ETH/BNB/SOL), convert to USDT
-        if 0 < oi < 1e6 and price > 0:
-            oi = oi * price
+        # Fallback: legacy flat fields
+        if oi == 0.0:
+            oi_raw = (d.get("openInterestValue")
+                      or d.get("openInterest")
+                      or d.get("amount")
+                      or d.get("size")
+                      or 0)
+            try:
+                oi = float(oi_raw)
+            except Exception:
+                oi = 0.0
 
-        if oi <= 0:
-            log.warning(f"OI={oi} for {symbol} — raw data: {d}")
+        # Get price from ticker (not included in OI response)
+        price = 0.0
+        try:
+            tr = requests.get(
+                f"{BITGET_BASE}/api/v2/mix/market/ticker",
+                params={"symbol": symbol, "productType": PRODUCT_TYPE},
+                timeout=5,
+            )
+            tdata = tr.json()
+            if tdata.get("code") == "00000":
+                td = tdata.get("data") or {}
+                if isinstance(td, list):
+                    td = td[0] if td else {}
+                price = float(td.get("lastPr") or td.get("last") or td.get("markPrice") or 0)
+        except Exception as e:
+            log.warning(f"Ticker fetch failed for {symbol}: {e}")
+
+        # OI is in base currency — convert to USDT
+        if oi > 0 and price > 0:
+            oi_usdt = oi * price
+        else:
+            oi_usdt = 0.0
+
+        if oi_usdt <= 0:
+            log.warning(f"OI={oi_usdt} for {symbol} — base OI={oi}, price={price}")
             return None
 
-        return (oi, price)
+        return (oi_usdt, price)
     except Exception as e:
         log.warning(f"OI fetch failed for {symbol}: {e}")
         return None
