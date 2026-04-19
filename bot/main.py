@@ -206,6 +206,13 @@ def _job_strategy_recap():
     except Exception as e:
         _err("StrategyRecap", e)
 
+
+def _job_weekly_intel():
+    try:
+        intelwatch.send_weekly_intel(_get_modules())
+    except Exception as e:
+        _err("WeeklyIntel", e)
+
 def _err(module: str, exc: Exception):
     msg = f"⚠️ [{module}] Job error: {str(exc)[:200]}"
     print(msg, flush=True)
@@ -947,6 +954,13 @@ def start_scheduler():
         id="strategy_recap", max_instances=1,
     )
     print("🤖 Strategy Recap scheduled (Fri 09:00) ✅", flush=True)
+
+    # ── Weekly Intel Deep Dive — Wednesday 09:00 (intel + BTC heatmap)
+    SCHED.add_job(
+        _job_weekly_intel, "cron", day_of_week="wed", hour=9, minute=0,
+        id="weekly_intel", max_instances=1,
+    )
+    print("🧠 Weekly Intel Deep Dive scheduled (Wed 09:00) ✅", flush=True)
 
     # ── PositionWatch — every 10s
     SCHED.add_job(
