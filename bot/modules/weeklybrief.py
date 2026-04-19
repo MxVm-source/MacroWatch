@@ -171,6 +171,216 @@ def _fetch_funding_summary(modules: dict) -> dict:
         return {}
 
 
+# ─── New fetchers for private version ────────────────────────────────────────
+
+def _fetch_fear_greed_history() -> list:
+    """Fetch last 8 days of Fear & Greed for trajectory."""
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=8", timeout=6)
+        data = r.json().get("data", [])
+        return [{"value": int(d.get("value", 0)),
+                 "label": d.get("value_classification", "")} for d in data]
+    except Exception as e:
+        log.warning(f"F&G history fetch failed: {e}")
+        return []
+
+
+def _fetch_global_history() -> dict:
+    """Fetch BTC dominance trajectory using CoinGecko 'global' now + computation.
+       CoinGecko free tier doesn't expose historical global — we fetch current
+       and compute trajectory from BTC mcap vs total mcap approximation."""
+    try:
+        # Current dominance is in _fetch_global_mcap. For delta, use BTC 7d price
+        # change and total mcap 24h change as a proxy. Full historical requires paid.
+        r = requests.get(f"{COINGECKO_BASE}/global", timeout=8)
+        data = r.json().get("data", {})
+        return {
+            "btc_dominance":        data.get("market_cap_percentage", {}).get("btc"),
+            "mcap_chg_24h":         data.get("market_cap_change_percentage_24h_usd"),
+            "active_cryptos":       data.get("active_cryptocurrencies"),
+        }
+    except Exception as e:
+        log.warning(f"Global history fetch failed: {e}")
+        return {}
+
+
+def _fetch_upcoming_macro(modules: dict, days: int = 14) -> list:
+    """Get upcoming macro events from FedWatch for next N days."""
+    try:
+        events = modules["fedwatch"].STATE.get("events", [])
+        now    = datetime.now(timezone.utc)
+        cutoff = now + timedelta(days=days)
+        upcoming = [ev for ev in events
+                    if ev.get("start") and now < ev["start"] <= cutoff]
+        upcoming.sort(key=lambda e: e["start"])
+        return upcoming[:8]
+    except Exception as e:
+        log.warning(f"Upcoming macro fetch failed: {e}")
+        return []
+
+
+def _fetch_correl(modules: dict) -> dict:
+    """Pull DXY/BTC correlation snapshot from CorrelWatch."""
+    try:
+        state = modules["correlwatch"].STATE
+        return {
+            "dxy_chg_24h": state.get("dxy_chg_24h"),
+            "btc_chg_24h": state.get("btc_chg_24h"),
+            "divergence":  state.get("divergence", ""),
+        }
+    except Exception:
+        return {}
+
+
+def _fetch_asset_structure(symbol: str) -> dict | None:
+    """Fetch 50W/200W EMAs, RSI, and weekly range for an asset."""
+    try:
+        # Daily candles for range + RSI
+        r_daily = requests.get(
+            f"{BITGET_BASE}/api/v2/mix/market/candles",
+            params={"symbol": symbol, "granularity": "1D",
+                    "limit": "220", "productType": PRODUCT_TYPE},
+            timeout=10,
+        )
+        d_daily = r_daily.json()
+        if d_daily.get("code") != "00000":
+            return None
+        candles = d_daily.get("data") or []
+        if len(candles) < 100:
+            return None
+
+        closes = [float(c[4]) for c in candles]
+        highs  = [float(c[2]) for c in candles]
+        lows   = [float(c[3]) for c in candles]
+
+        price = closes[-1]
+
+        # Weekly range (last 7 days)
+        week_high = max(highs[-7:])
+        week_low  = min(lows[-7:])
+        range_pct = (week_high - week_low) / week_low * 100 if week_low > 0 else 0
+
+        # Simple EMA (close enough for a signal)
+        def _ema(vals, period):
+            if len(vals) < period:
+                return None
+            k   = 2 / (period + 1)
+            ema = sum(vals[:period]) / period
+            for v in vals[period:]:
+                ema = v * k + ema * (1 - k)
+            return ema
+
+        # 50-day and 200-day EMAs on daily closes (proxy for 50W/200W in crypto 24/7 market)
+        ema50  = _ema(closes, 50)
+        ema200 = _ema(closes, 200)
+
+        # RSI-14
+        gains, losses = 0.0, 0.0
+        for i in range(1, 15):
+            diff = closes[-i] - closes[-i - 1]
+            if diff >= 0: gains  += diff
+            else:         losses += -diff
+        avg_gain = gains / 14
+        avg_loss = losses / 14
+        rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss > 0 else 100
+
+        return {
+            "price":      price,
+            "week_high":  week_high,
+            "week_low":   week_low,
+            "range_pct":  range_pct,
+            "ema50":      ema50,
+            "ema200":     ema200,
+            "vs_ema50":   ((price - ema50) / ema50 * 100) if ema50 else None,
+            "vs_ema200": ((price - ema200) / ema200 * 100) if ema200 else None,
+            "rsi":        rsi,
+        }
+    except Exception as e:
+        log.warning(f"Structure fetch failed for {symbol}: {e}")
+        return None
+
+
+def _fetch_options_positioning(modules: dict) -> dict:
+    """Pull latest options snapshot from OptionsWatch."""
+    try:
+        state = modules["optionswatch"].STATE
+        return {
+            "expiry":    state.get("last_expiry_str"),
+            "max_pain":  state.get("last_max_pain"),
+            "pc_ratio":  state.get("last_pc_ratio"),
+            "calls_oi":  state.get("last_calls_oi"),
+            "puts_oi":   state.get("last_puts_oi"),
+        }
+    except Exception:
+        return {}
+
+
+def _fetch_stables_marketcap() -> dict:
+    """Fetch USDT and USDC current market cap."""
+    try:
+        r = requests.get(
+            f"{COINGECKO_BASE}/coins/markets",
+            params={
+                "vs_currency": "usd",
+                "ids":         "tether,usd-coin",
+                "sparkline":   False,
+            },
+            timeout=10,
+        )
+        data = r.json()
+        result = {}
+        for coin in data:
+            cid  = coin.get("id")
+            mcap = coin.get("market_cap")
+            chg  = coin.get("market_cap_change_percentage_24h")
+            if cid == "tether":   result["USDT"] = {"mcap": mcap, "chg_24h": chg}
+            if cid == "usd-coin": result["USDC"] = {"mcap": mcap, "chg_24h": chg}
+        return result
+    except Exception as e:
+        log.warning(f"Stables mcap fetch failed: {e}")
+        return {}
+
+
+# Sector → category ID mapping (CoinGecko categories)
+SECTOR_CATEGORIES = {
+    "DeFi":     "decentralized-finance-defi",
+    "AI":       "artificial-intelligence",
+    "L2":       "layer-2",
+    "Gaming":   "gaming",
+    "Meme":     "meme-token",
+    "RWA":      "real-world-assets-rwa",
+}
+
+
+def _fetch_sector_performance() -> dict:
+    """Fetch 7d performance for major sectors from CoinGecko."""
+    try:
+        r = requests.get(
+            f"{COINGECKO_BASE}/coins/categories",
+            timeout=10,
+        )
+        data = r.json()
+        if not isinstance(data, list):
+            return {}
+        # Build reverse lookup
+        id_to_name = {v: k for k, v in SECTOR_CATEGORIES.items()}
+        result = {}
+        for cat in data:
+            cid = cat.get("id")
+            if cid in id_to_name:
+                chg = cat.get("market_cap_change_24h")  # Percentage
+                # Some categories use 'market_cap_change_24h' as % in CoinGecko
+                result[id_to_name[cid]] = {
+                    "mcap":     cat.get("market_cap"),
+                    "chg_24h":  chg,
+                    "vol_24h":  cat.get("volume_24h"),
+                }
+        return result
+    except Exception as e:
+        log.warning(f"Sector fetch failed: {e}")
+        return {}
+
+
 # ─── AI narrative ────────────────────────────────────────────────────────────
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -246,7 +456,7 @@ Be direct. Max 30 words total. No emojis. No disclaimers."""
 
 # ─── Message builder ──────────────────────────────────────────────────────────
 
-def build_weekly_brief(modules: dict) -> str:
+def build_weekly_brief(modules: dict, private: bool = False) -> str:
     now        = datetime.now(timezone.utc)
     week_start = (now - timedelta(days=7)).strftime("%b %d")
     week_end   = now.strftime("%b %d, %Y")
@@ -323,9 +533,6 @@ def build_weekly_brief(modules: dict) -> str:
     # Market cap
     if mcap_t:
         lines.append(f"🌐 *Market Cap*  `${mcap_t}T`")
-    # BTC dominance
-    if global_.get("btc_dominance"):
-        lines.append(f"👑 *BTC Dom*  `{global_['btc_dominance']:.1f}%`")
 
     lines.append("")
 
@@ -385,6 +592,78 @@ def build_weekly_brief(modules: dict) -> str:
                 e = "🔴" if rate > 0.05 else "🟢" if rate < -0.03 else "⚪"
                 lines.append(f"  {e} {asset}: `{rate:+.4f}%`")
         lines.append("")
+
+    # ═══ SHARED SECTIONS (both public and private) ═══════════════════════════
+
+    # Next Macro Calendar
+    upcoming_macro = _fetch_upcoming_macro(modules, days=14)
+    if upcoming_macro:
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "📅 *NEXT MACRO CALENDAR*",
+            "",
+        ]
+        for ev in upcoming_macro[:6]:
+            try:
+                ts     = ev["start"].strftime("%a %b %d")
+                title  = ev.get("title", "Event")
+                impact = (ev.get("impact") or "").lower()
+                icon   = "🔥" if impact == "high" else "⚠️" if impact == "medium" else "📌"
+                lines.append(f"  {icon} {ts} — {title}")
+            except Exception:
+                continue
+        lines.append("")
+
+    # BTC Dominance trajectory (WoW delta — not duplicate of Market Overview)
+    global_hist = _fetch_global_history()
+    if global_hist.get("btc_dominance"):
+        cur_dom = global_hist["btc_dominance"]
+        # Approximate prior week dominance from 7d BTC change vs total mcap
+        # (simple proxy — CoinGecko free doesn't give true historical dominance)
+        btc_chg_7d   = btc.get("chg7d") or 0
+        mcap_chg_24h = global_hist.get("mcap_chg_24h") or 0
+        trend_arrow  = "↑" if btc_chg_7d > 0 else "↓" if btc_chg_7d < 0 else "→"
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "👑 *BTC DOMINANCE*",
+            "",
+            f"  Current: `{cur_dom:.1f}%`  {trend_arrow} _(7D BTC {_pct(btc_chg_7d)})_",
+            "",
+        ]
+
+    # CorrelWatch — DXY vs BTC
+    correl = _fetch_correl(modules)
+    if correl.get("dxy_chg_24h") is not None and correl.get("btc_chg_24h") is not None:
+        dxy_chg    = correl["dxy_chg_24h"]
+        btc_chg    = correl["btc_chg_24h"]
+        divergence = correl.get("divergence", "")
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "📡 *DXY vs BTC CORRELATION*",
+            "",
+            f"  DXY: `{_pct(dxy_chg)}`  |  BTC: `{_pct(btc_chg)}`",
+        ]
+        if divergence:
+            lines.append(f"  _{divergence}_")
+        lines.append("")
+
+    # Sentiment shift (F&G trajectory)
+    fg_hist = _fetch_fear_greed_history()
+    if len(fg_hist) >= 7:
+        cur_val  = fg_hist[0]["value"]
+        week_val = fg_hist[6]["value"] if len(fg_hist) > 6 else fg_hist[-1]["value"]
+        delta    = cur_val - week_val
+        trend    = "📈" if delta > 3 else "📉" if delta < -3 else "➡️"
+        sign     = "+" if delta >= 0 else ""
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "🎭 *SENTIMENT SHIFT (7D)*",
+            "",
+            f"  7 days ago: `{week_val}` → Today: `{cur_val}`  {trend} `{sign}{delta}`",
+            "",
+        ]
+
+    # ═══ END SHARED SECTIONS ════════════════════════════════════════════════
 
     # Ascent strategy — real PnL from last 7 days closed trades
     try:
@@ -455,8 +734,99 @@ def build_weekly_brief(modules: dict) -> str:
     if parts:
         lines.append("  " + " · ".join(parts))
 
+    # ═══ PRIVATE-ONLY SECTIONS ═══════════════════════════════════════════════
+    if private:
+        lines += [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "🔒 *TRADER DETAIL (private only)*",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+        ]
+
+        # Asset structure — BTC/ETH/BNB/SOL
+        lines += [
+            "📐 *TECHNICAL STRUCTURE*",
+            "",
+        ]
+        for label, symbol in [("BTC", "BTCUSDT"), ("ETH", "ETHUSDT"),
+                              ("BNB", "BNBUSDT"), ("SOL", "SOLUSDT")]:
+            s = _fetch_asset_structure(symbol)
+            if not s:
+                lines.append(f"  {label}: data unavailable")
+                continue
+            vs50  = f"{'+' if s['vs_ema50']  >= 0 else ''}{s['vs_ema50']:.1f}%"  if s['vs_ema50']  is not None else "N/A"
+            vs200 = f"{'+' if s['vs_ema200'] >= 0 else ''}{s['vs_ema200']:.1f}%" if s['vs_ema200'] is not None else "N/A"
+            rsi_emoji = "🔴" if s['rsi'] >= 70 else "🟢" if s['rsi'] <= 30 else "⚪"
+            lines.append(
+                f"  *{label}* `${s['price']:,.2f}` | "
+                f"Range `{s['range_pct']:.1f}%` | "
+                f"vs 50EMA `{vs50}` | vs 200EMA `{vs200}` | "
+                f"{rsi_emoji} RSI `{s['rsi']:.0f}`"
+            )
+        lines.append("")
+
+        # Options positioning
+        opt = _fetch_options_positioning(modules)
+        if opt.get("max_pain"):
+            lines += [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "⚙️ *OPTIONS POSITIONING (ETH)*",
+                "",
+            ]
+            lines.append(f"  Expiry: `{opt.get('expiry', 'N/A')}`")
+            lines.append(f"  Max Pain: `${opt['max_pain']:,.0f}`")
+            if opt.get("pc_ratio") is not None:
+                pc = opt["pc_ratio"]
+                pc_emoji = "🔴" if pc > 1.2 else "🟢" if pc < 0.8 else "⚪"
+                lines.append(f"  Put/Call Ratio: {pc_emoji} `{pc:.2f}`")
+            if opt.get("calls_oi") and opt.get("puts_oi"):
+                lines.append(f"  OI: Calls `${opt['calls_oi']/1e6:.0f}M` · Puts `${opt['puts_oi']/1e6:.0f}M`")
+            lines.append("")
+
+        # Stablecoin market cap
+        stables = _fetch_stables_marketcap()
+        if stables:
+            lines += [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "💰 *STABLECOIN MARKET CAP*",
+                "",
+            ]
+            for label in ["USDT", "USDC"]:
+                s = stables.get(label)
+                if not s:
+                    continue
+                mcap_b = s['mcap'] / 1e9 if s.get('mcap') else 0
+                chg    = s.get('chg_24h') or 0
+                e      = "🟢" if chg > 0 else "🔴" if chg < 0 else "⚪"
+                sign   = "+" if chg >= 0 else ""
+                lines.append(f"  {e} {label}: `${mcap_b:.1f}B`  24h: `{sign}{chg:.2f}%`")
+            lines.append("")
+
+        # Sector performance
+        sectors = _fetch_sector_performance()
+        if sectors:
+            lines += [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "🎯 *SECTOR PERFORMANCE (24H)*",
+                "",
+            ]
+            # Sort by 24h change
+            sorted_sectors = sorted(
+                [(k, v) for k, v in sectors.items() if v.get("chg_24h") is not None],
+                key=lambda x: x[1]["chg_24h"],
+                reverse=True,
+            )
+            for name, s in sorted_sectors:
+                chg  = s["chg_24h"]
+                e    = "📈" if chg > 1 else "📉" if chg < -1 else "➡️"
+                sign = "+" if chg >= 0 else ""
+                lines.append(f"  {e} {name}: `{sign}{chg:.2f}%`")
+            lines.append("")
+
+    # ═══ END PRIVATE SECTIONS ════════════════════════════════════════════════
+
     lines += [
-        "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"_Published {now.strftime('%A %d %B %Y, %H:%M UTC')}_",
     ]
@@ -468,34 +838,28 @@ def build_weekly_brief(modules: dict) -> str:
 
 def send_weekly_brief(modules: dict):
     try:
-        msg = build_weekly_brief(modules)
+        private_msg = build_weekly_brief(modules, private=True)
+        public_msg  = build_weekly_brief(modules, private=False)
     except Exception as e:
         log.exception(f"WeeklyBrief build failed: {e}")
         send_text(f"📊 [WeeklyBrief] ⚠️ Build failed: {str(e)[:200]}")
         return
 
-    # Send to private group
-    send_text(msg)
+    # Send FULL version to private group
+    send_text(private_msg)
 
-    # Send to public channel
+    # Send LITE version to public channel
     if PUBLIC_CHAT_ID:
         try:
             import os as _os
             requests.post(
                 f"https://api.telegram.org/bot{_os.getenv('TELEGRAM_TOKEN', '')}/sendMessage",
-                json={"chat_id": PUBLIC_CHAT_ID, "text": msg,
+                json={"chat_id": PUBLIC_CHAT_ID, "text": public_msg,
                       "parse_mode": "Markdown", "disable_web_page_preview": True},
                 timeout=10,
             )
             log.info("WeeklyBrief sent to public channel ✅")
         except Exception as e:
             log.warning(f"WeeklyBrief public send failed: {e}")
-
-    # Append BTC liquidation heatmap (best-effort, non-blocking on failure)
-    try:
-        from bot.modules.heatmapwatch import send_weekly_heatmap
-        send_weekly_heatmap()
-    except Exception as e:
-        log.warning(f"WeeklyBrief heatmap append failed: {e}")
 
     log.info("WeeklyBrief sent ✅")

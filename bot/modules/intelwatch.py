@@ -283,7 +283,7 @@ def _bias_verdict(score: dict) -> tuple[str, str]:
 
 # ─── Message builder ──────────────────────────────────────────────────────────
 
-def build_intel(modules: dict, is_auto: bool = False) -> str:
+def build_intel(modules: dict, is_auto: bool = False, custom_header: str | None = None, custom_label: str | None = None) -> str:
     now = datetime.now(timezone.utc)
     btc_price, btc_chg = _fetch_btc_price()
 
@@ -301,11 +301,18 @@ def build_intel(modules: dict, is_auto: bool = False) -> str:
         sign      = "+" if (btc_chg or 0) >= 0 else ""
         btc_line  = f"BTC: `${btc_price:,.2f}` {chg_emoji} `{sign}{btc_chg:.2f}%` (4H)"
 
-    trigger_label = "🤖 AUTO-TRIGGER" if is_auto else "on demand"
+    # Header variants
+    if custom_header:
+        header_line1 = custom_header
+        header_line2 = custom_label or now.strftime('%A %d %B %Y · %H:%M UTC')
+    else:
+        trigger_label = "🤖 AUTO-TRIGGER" if is_auto else "on demand"
+        header_line1  = "🧠 *MacroWatch Intel — Full Briefing*"
+        header_line2  = f"🕐 {now.strftime('%Y-%m-%d %H:%M UTC')}  _{trigger_label}_"
 
     lines = [
-        f"🧠 *MacroWatch Intel — Full Briefing*",
-        f"🕐 {now.strftime('%Y-%m-%d %H:%M UTC')}  _{trigger_label}_",
+        header_line1,
+        header_line2,
         "",
         btc_line,
         "",
@@ -447,3 +454,79 @@ def show_intel(modules: dict):
     except Exception as e:
         log.exception(f"IntelWatch show_intel failed: {e}")
         send_text(f"🧠 [IntelWatch] ⚠️ Error: {str(e)[:200]}")
+
+
+def send_weekly_intel(modules: dict):
+    """
+    Wednesday 09:00 UTC scheduled Intel Deep Dive.
+    Fires to BOTH private group and public channel, then appends BTC heatmap.
+    """
+    import os as _os
+    import requests as _req
+
+    now = datetime.now(timezone.utc)
+    PUBLIC_CHAT_ID = _os.getenv("PUBLIC_CHAT_ID", "")
+    TG_TOKEN       = _os.getenv("TELEGRAM_TOKEN", "")
+
+    try:
+        msg = build_intel(
+            modules,
+            is_auto=False,
+            custom_header="🧠 *MacroWatch Intel — Weekly Deep Dive*",
+            custom_label=f"📅 {now.strftime('%A, %b %d, %Y')} · {now.strftime('%H:%M UTC')}",
+        )
+    except Exception as e:
+        log.exception(f"WeeklyIntel build failed: {e}")
+        send_text(f"🧠 [IntelWatch] ⚠️ Weekly build failed: {str(e)[:200]}")
+        return
+
+    # Send text to private
+    send_text(msg)
+
+    # Send text to public
+    if PUBLIC_CHAT_ID and TG_TOKEN:
+        try:
+            _req.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                json={"chat_id": PUBLIC_CHAT_ID, "text": msg,
+                      "parse_mode": "Markdown", "disable_web_page_preview": True},
+                timeout=10,
+            )
+        except Exception as e:
+            log.warning(f"WeeklyIntel public send failed: {e}")
+
+    # Append BTC heatmap to BOTH channels — single Apify fetch, sent twice
+    try:
+        from bot.modules import heatmapwatch
+        result = heatmapwatch._fetch_heatmap("BTC", timeframe="7d")
+        if result:
+            # Send to private group
+            caption_priv = (
+                f"🔥 *BTC Liquidation Heatmap (7-day)*\n"
+                f"_Source: CoinGlass · {now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
+                f"Yellow/red = large liquidation clusters.\n"
+                f"Price often sweeps these zones."
+            )
+            heatmapwatch._send_photo(
+                heatmapwatch.TELEGRAM_CHAT_ID, result["image_url"], caption_priv
+            )
+
+            # Send to public channel
+            if PUBLIC_CHAT_ID:
+                caption_pub = (
+                    f"🔥 *Infinex Capital — BTC Liquidation Heatmap (7-day)*\n"
+                    f"_Intelligence provided by MacroWatch 🧠_\n\n"
+                    f"_Source: CoinGlass · {now.strftime('%b %d, %Y')}_\n\n"
+                    f"Yellow/red zones show where liquidation clusters sit. "
+                    f"Use this map alongside the intel above to plan your week's positioning."
+                )
+                heatmapwatch._send_photo(
+                    PUBLIC_CHAT_ID, result["image_url"], caption_pub
+                )
+        else:
+            log.warning("WeeklyIntel heatmap fetch returned no image")
+    except Exception as e:
+        log.warning(f"WeeklyIntel heatmap append failed: {e}")
+
+    STATE["last_intel_utc"] = now
+    log.info("WeeklyIntel (Wed) sent ✅")
