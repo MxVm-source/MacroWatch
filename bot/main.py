@@ -969,13 +969,6 @@ def start_scheduler():
     )
     print("📘 PositionWatch scheduled (10s) ✅", flush=True)
 
-    # ── WeeklyPerf — Monday 09:00
-    SCHED.add_job(
-        _job_weekly_perf, "cron", day_of_week="mon", hour=9, minute=0,
-        id="weekly_perf", max_instances=1,
-    )
-    print("📊 WeeklyPerf scheduled (Mon 09:00) ✅", flush=True)
-
     # ── MonthlyPerf — first Monday of month at 09:30
     SCHED.add_job(
         _job_monthly_perf, "cron", day_of_week="mon", day="1-7", hour=9, minute=30,
