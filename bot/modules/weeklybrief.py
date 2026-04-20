@@ -79,26 +79,45 @@ def _fetch_global_mcap() -> dict:
         return {}
 
 
+def _fetch_stooq_weekly(symbol: str) -> float | None:
+    """Fetch 7-day % change for a stooq symbol using last 8 daily closes."""
+    try:
+        # stooq daily history CSV
+        r = requests.get(
+            f"https://stooq.com/q/d/l/?s={symbol}&i=d",
+            timeout=8,
+        )
+        csv_lines = r.text.strip().splitlines()
+        if len(csv_lines) < 9:
+            return None
+        # Last line = most recent day; take last 8 data rows
+        rows       = csv_lines[1:]   # skip header
+        recent     = rows[-8:]       # 8 trading days
+        first_cols = recent[0].split(",")
+        last_cols  = recent[-1].split(",")
+        open_price  = float(first_cols[4])  # 5th col = close (stooq CSV: Date,Open,High,Low,Close,Volume)
+        close_price = float(last_cols[4])
+        if open_price > 0:
+            return round((close_price - open_price) / open_price * 100, 2)
+    except Exception as e:
+        log.warning(f"Stooq {symbol} weekly fetch failed: {e}")
+    return None
+
+
 def _fetch_equity_weekly() -> dict:
-    """S&P 500 and Nasdaq weekly change from stooq (free, no key)."""
-    result = {}
-    symbols = {"sp500": "^spx", "nasdaq": "^ndx"}
-    for name, sym in symbols.items():
-        try:
-            r = requests.get(
-                f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlcv&h&e=csv",
-                timeout=8,
-            )
-            lines = r.text.strip().splitlines()
-            if len(lines) >= 2:
-                parts  = lines[1].split(",")
-                close  = float(parts[6])
-                open_  = float(parts[3])
-                if open_ > 0:
-                    result[name] = round((close - open_) / open_ * 100, 2)
-        except Exception as e:
-            log.warning(f"Stooq {name} fetch failed: {e}")
-    return result
+    """S&P 500 and Nasdaq 7-day change from stooq."""
+    return {
+        "sp500":  _fetch_stooq_weekly("^spx"),
+        "nasdaq": _fetch_stooq_weekly("^ndx"),
+    }
+
+
+def _fetch_macro_assets_weekly() -> dict:
+    """Gold and DXY 7-day change from stooq."""
+    return {
+        "gold": _fetch_stooq_weekly("xauusd"),   # Gold spot
+        "dxy":  _fetch_stooq_weekly("^dxy"),     # US Dollar Index
+    }
 
 
 def _fetch_fear_greed() -> dict:
@@ -464,7 +483,8 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
     # Fetch all data
     crypto   = _fetch_crypto_weekly()
     global_  = _fetch_global_mcap()
-    equities = _fetch_equity_weekly()
+    equities     = _fetch_equity_weekly()
+    macro_assets = _fetch_macro_assets_weekly()
     fg       = _fetch_fear_greed()
     liqs     = _fetch_liq_summary(modules)
     funding  = _fetch_funding_summary(modules)
@@ -508,46 +528,53 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
             return "➡️"
         return "📈" if val >= 0 else "📉"
 
+    # Pre-compute F&G trajectory (merged into Crypto Market block)
+    fg_hist = _fetch_fear_greed_history()
+    fg_delta = None
+    fg_week  = None
+    if len(fg_hist) >= 7 and fg.get("value"):
+        fg_week  = fg_hist[6]["value"] if len(fg_hist) > 6 else fg_hist[-1]["value"]
+        fg_delta = fg["value"] - fg_week
+
+    # BTC dominance trajectory (merged into Crypto Market block)
+    global_hist = _fetch_global_history()
+    cur_dom = global_hist.get("btc_dominance")
+    btc_chg_7d = btc.get("chg7d") or 0
+    dom_trend = "↑" if btc_chg_7d > 0.5 else "↓" if btc_chg_7d < -0.5 else "→"
+
     lines = [
         f"📊 *Infinex Capital — Weekly Market Brief*",
         f"_Intelligence provided by MacroWatch 🧠_",
         f"📅 {week_start} → {week_end}",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🌍 *MARKET OVERVIEW*",
+        "🪙 *CRYPTO MARKET*",
         "",
     ]
 
-    # BTC
+    # Group 1: Prices
     if btc.get("price"):
         lines.append(
-            f"₿ *BTC*  `${btc['price']:,.0f}`  "
+            f"₿ *BTC*  `${btc['price']:,.0f}`   "
             f"{_chg_emoji(btc.get('chg7d'))} `{_pct(btc.get('chg7d'))}`"
         )
-    # ETH
     if eth.get("price"):
         lines.append(
-            f"Ξ *ETH*  `${eth['price']:,.2f}`  "
+            f"Ξ *ETH*  `${eth['price']:,.2f}`    "
             f"{_chg_emoji(eth.get('chg7d'))} `{_pct(eth.get('chg7d'))}`"
         )
-    # Market cap
-    if mcap_t:
-        lines.append(f"🌐 *Market Cap*  `${mcap_t}T`")
 
     lines.append("")
 
-    # Equities
-    if equities:
-        lines.append("📈 *Equities*")
-        if equities.get("sp500") is not None:
-            e = "📈" if equities["sp500"] >= 0 else "📉"
-            lines.append(f"  S&P 500: {e} `{_pct(equities['sp500'])}`")
-        if equities.get("nasdaq") is not None:
-            e = "📈" if equities["nasdaq"] >= 0 else "📉"
-            lines.append(f"  Nasdaq:  {e} `{_pct(equities['nasdaq'])}`")
-        lines.append("")
+    # Group 2: Market size
+    if mcap_t:
+        lines.append(f"🌐 *Total Mcap*   `${mcap_t}T`")
+    if cur_dom:
+        lines.append(f"👑 *BTC Dom*      `{cur_dom:.1f}%`  {dom_trend}")
 
-    # Fear & Greed
+    lines.append("")
+
+    # Group 3: Sentiment
     if fg.get("value"):
         val = fg["value"]
         if val >= 75:   fg_emoji = "🟢"
@@ -555,7 +582,38 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
         elif val >= 45: fg_emoji = "🟠"
         else:           fg_emoji = "🔴"
         lines.append(f"🎭 *Fear & Greed*  `{val}` — {fg_emoji} {fg['label']}")
-        lines.append("")
+        if fg_delta is not None:
+            sign = "+" if fg_delta >= 0 else ""
+            arrow = "📈" if fg_delta > 3 else "📉" if fg_delta < -3 else "➡️"
+            lines.append(f"   _7d: {sign}{fg_delta} {arrow}_")
+    lines.append("")
+
+    # ── Traditional Markets (7D) ─────────────────────────────────────────────
+    if equities or macro_assets:
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "🌍 *TRADITIONAL MARKETS (7D)*",
+            "",
+        ]
+        if equities and any(v is not None for v in equities.values()):
+            lines.append("📈 *Equities*")
+            if equities.get("sp500") is not None:
+                e = "📈" if equities["sp500"] >= 0 else "📉"
+                lines.append(f"  S&P 500:  {e} `{_pct(equities['sp500'])}`")
+            if equities.get("nasdaq") is not None:
+                e = "📈" if equities["nasdaq"] >= 0 else "📉"
+                lines.append(f"  Nasdaq:   {e} `{_pct(equities['nasdaq'])}`")
+            lines.append("")
+
+        if macro_assets and any(v is not None for v in macro_assets.values()):
+            lines.append("💰 *Macro Assets*")
+            if macro_assets.get("gold") is not None:
+                e = "📈" if macro_assets["gold"] >= 0 else "📉"
+                lines.append(f"  🥇 Gold:   {e} `{_pct(macro_assets['gold'])}`")
+            if macro_assets.get("dxy") is not None:
+                e = "📈" if macro_assets["dxy"] >= 0 else "📉"
+                lines.append(f"  💵 DXY:    {e} `{_pct(macro_assets['dxy'])}`")
+            lines.append("")
 
     # AI Narrative
     if narrative:
@@ -567,21 +625,8 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
             "",
         ]
 
-    # Liquidations
-    if liqs.get("usd_m", 0) > 0:
-        dom  = "SHORT liqs dominated 🔴" if liqs.get("short", 0) > liqs.get("long", 0) else "LONG liqs dominated 🟢"
-        lines += [
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "💥 *LIQUIDATIONS*",
-            "",
-            f"{dom}",
-            f"Total: `${liqs['usd_m']:.1f}M`  "
-            f"({liqs.get('long', 0)} long / {liqs.get('short', 0)} short events)",
-            "",
-        ]
-
-    # Funding
-    if funding:
+    # Funding rates — PRIVATE ONLY
+    if private and funding:
         lines += [
             "━━━━━━━━━━━━━━━━━━━━━━━━",
             "💸 *FUNDING RATES*",
@@ -614,23 +659,6 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
                 continue
         lines.append("")
 
-    # BTC Dominance trajectory (WoW delta — not duplicate of Market Overview)
-    global_hist = _fetch_global_history()
-    if global_hist.get("btc_dominance"):
-        cur_dom = global_hist["btc_dominance"]
-        # Approximate prior week dominance from 7d BTC change vs total mcap
-        # (simple proxy — CoinGecko free doesn't give true historical dominance)
-        btc_chg_7d   = btc.get("chg7d") or 0
-        mcap_chg_24h = global_hist.get("mcap_chg_24h") or 0
-        trend_arrow  = "↑" if btc_chg_7d > 0 else "↓" if btc_chg_7d < 0 else "→"
-        lines += [
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "👑 *BTC DOMINANCE*",
-            "",
-            f"  Current: `{cur_dom:.1f}%`  {trend_arrow} _(7D BTC {_pct(btc_chg_7d)})_",
-            "",
-        ]
-
     # CorrelWatch — DXY vs BTC
     correl = _fetch_correl(modules)
     if correl.get("dxy_chg_24h") is not None and correl.get("btc_chg_24h") is not None:
@@ -646,22 +674,6 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
         if divergence:
             lines.append(f"  _{divergence}_")
         lines.append("")
-
-    # Sentiment shift (F&G trajectory)
-    fg_hist = _fetch_fear_greed_history()
-    if len(fg_hist) >= 7:
-        cur_val  = fg_hist[0]["value"]
-        week_val = fg_hist[6]["value"] if len(fg_hist) > 6 else fg_hist[-1]["value"]
-        delta    = cur_val - week_val
-        trend    = "📈" if delta > 3 else "📉" if delta < -3 else "➡️"
-        sign     = "+" if delta >= 0 else ""
-        lines += [
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "🎭 *SENTIMENT SHIFT (7D)*",
-            "",
-            f"  7 days ago: `{week_val}` → Today: `{cur_val}`  {trend} `{sign}{delta}`",
-            "",
-        ]
 
     # ═══ END SHARED SECTIONS ════════════════════════════════════════════════
 
