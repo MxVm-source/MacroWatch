@@ -254,18 +254,20 @@ def _fetch_correl(modules: dict) -> dict:
 def _fetch_asset_structure(symbol: str) -> dict | None:
     """Fetch 50W/200W EMAs, RSI, and weekly range for an asset."""
     try:
-        # Daily candles for range + RSI
+        # Daily candles for range + RSI (Bitget max limit is 200)
         r_daily = requests.get(
             f"{BITGET_BASE}/api/v2/mix/market/candles",
             params={"symbol": symbol, "granularity": "1D",
-                    "limit": "220", "productType": PRODUCT_TYPE},
+                    "limit": "200", "productType": PRODUCT_TYPE},
             timeout=10,
         )
         d_daily = r_daily.json()
         if d_daily.get("code") != "00000":
+            log.warning(f"Structure fetch {symbol}: code={d_daily.get('code')} msg={d_daily.get('msg')}")
             return None
         candles = d_daily.get("data") or []
-        if len(candles) < 100:
+        if len(candles) < 50:
+            log.warning(f"Structure fetch {symbol}: only {len(candles)} candles")
             return None
 
         closes = [float(c[4]) for c in candles]
