@@ -421,21 +421,7 @@ def check_auto_trigger(modules: dict) -> bool:
         log.info(f"IntelWatch auto-trigger: {conditions}")
         msg = build_intel(modules, is_auto=True)
 
-        # Fire to public channel
-        if PUBLIC_CHAT_ID:
-            try:
-                import requests as _req
-                import os as _os
-                _req.post(
-                    f"https://api.telegram.org/bot{_os.getenv('TELEGRAM_TOKEN', '')}/sendMessage",
-                    json={"chat_id": PUBLIC_CHAT_ID, "text": msg,
-                          "parse_mode": "Markdown", "disable_web_page_preview": True},
-                    timeout=10,
-                )
-            except Exception as e:
-                log.warning(f"IntelWatch public send failed: {e}")
-
-        # Also fire to private group
+        # Auto-trigger fires to PRIVATE group only (public gets scheduled Wed Deep Dive)
         send_text(msg)
         STATE["last_auto_utc"] = now
         STATE["last_bias"]     = conditions
