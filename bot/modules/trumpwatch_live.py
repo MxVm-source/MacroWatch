@@ -17,7 +17,7 @@ import logging
 import requests
 import html
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 from collections import deque
 
@@ -32,6 +32,13 @@ OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL    = os.getenv("TW_OPENAI_MODEL", "gpt-4o-mini")   # fast + cheap
 AI_SCORE_MIN    = int(os.getenv("TW_AI_SCORE_MIN", "7"))         # 0-10, fire if >=
 AI_TIMEOUT      = int(os.getenv("TW_AI_TIMEOUT", "12"))
+
+# Max post age in minutes. Posts older than this are silently dedup'd on first
+# encounter — no alert. Prevents backlog flood on deploy/restart.
+MAX_POST_AGE_MIN = int(os.getenv("TW_MAX_POST_AGE_MIN", "30"))
+
+# Startup timestamp — posts published before (startup - MAX_POST_AGE_MIN) are ignored
+STARTUP_UTC = datetime.now(timezone.utc)
 
 SRC_RSS         = os.getenv("TW_SOURCE_RSS",  "https://www.trumpstruth.org/feed")
 SRC_CNN_JSON    = os.getenv("TW_SOURCE_CNN",  "https://ix.cnn.io/data/truth-social/truth_archive.json")
@@ -546,6 +553,42 @@ def show_sentiment():
     send_text("\n".join(lines))
 
 
+# ─── Age filtering (prevents flood on deploy/restart) ───────────────────────
+
+def _parse_ts(ts: str) -> datetime | None:
+    """Parse a post timestamp from RSS pubDate or ISO 8601 format."""
+    if not ts:
+        return None
+    # Try ISO 8601 first (CNN JSON format)
+    try:
+        # Handle both "2026-04-21T09:56:00Z" and "2026-04-21T09:56:00+00:00"
+        s = ts.replace("Z", "+00:00")
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except Exception:
+        pass
+    # Try RSS pubDate format: "Mon, 21 Apr 2026 09:56:00 GMT"
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(ts).astimezone(timezone.utc)
+    except Exception:
+        pass
+    return None
+
+
+def _is_too_old(ts: str) -> bool:
+    """
+    True if post is older than (startup - MAX_POST_AGE_MIN).
+    Posts older than this are silently dedup'd without firing.
+    Prevents flood of old posts getting re-alerted after deploy/restart.
+    """
+    post_ts = _parse_ts(ts)
+    if post_ts is None:
+        # If we can't parse the timestamp, fail safe: treat as too old
+        return True
+    age_cutoff = STARTUP_UTC - timedelta(minutes=MAX_POST_AGE_MIN)
+    return post_ts < age_cutoff
+
+
 # ─── Core poll ───────────────────────────────────────────────────────────────
 
 def poll_once():
@@ -584,6 +627,12 @@ def poll_once():
 
         # ── Dedup check — Redis first, memory fallback ──────────────
         if not _dedup_check(key):
+            continue
+
+        # ── Age filter — silently skip posts published before deploy ──
+        # Prevents backlog of old posts flooding the channel on restart.
+        if _is_too_old(it.get("ts", "")):
+            _dedup_mark(key)  # mark so we never re-check this one
             continue
 
         # ── Stage 1: Hard block ───────────────────────────────────────
