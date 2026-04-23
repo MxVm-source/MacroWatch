@@ -47,41 +47,70 @@ def _get_next_friday_expiry() -> str:
 def _fetch_instruments(expiry: str) -> list:
     """Fetch all ETH option instruments for given expiry.
        Falls back to closest upcoming expiry if exact date not listed."""
-    try:
-        r = requests.get(
-            f"{DERIBIT_BASE}/public/get_instruments",
-            params={"currency": "ETH", "kind": "option", "expired": False},
-            timeout=10,
-        )
-        data = r.json()
-        instruments = data.get("result") or []
-        if not instruments:
-            log.warning(f"Deribit returned 0 instruments")
-            return []
+    # Try multiple currency parameter variants since Deribit may have changed the API
+    # ETH options now exist in multiple forms: ETH-denominated and USDC-settled (ETH_USDC)
+    all_instruments = []
+    for currency in ["ETH", "eth"]:
+        try:
+            r = requests.get(
+                f"{DERIBIT_BASE}/public/get_instruments",
+                params={"currency": currency, "kind": "option", "expired": "false"},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                log.warning(f"Deribit HTTP {r.status_code} for currency={currency}: {r.text[:200]}")
+                continue
+            data = r.json()
+            if "error" in data:
+                log.warning(f"Deribit API error for currency={currency}: {data['error']}")
+                continue
+            instruments = data.get("result") or []
+            if instruments:
+                log.info(f"Deribit: got {len(instruments)} instruments with currency={currency}")
+                all_instruments = instruments
+                break
+            else:
+                log.info(f"Deribit: 0 instruments for currency={currency}, response keys: {list(data.keys())}")
+        except requests.exceptions.Timeout:
+            log.warning(f"Deribit timeout for currency={currency}")
+        except Exception as e:
+            log.warning(f"Deribit fetch error for currency={currency}: {type(e).__name__}: {e}")
 
-        # Try exact match first
-        matched = [i for i in instruments if expiry in i.get("instrument_name", "")]
-        if matched:
-            return matched
-
-        # Fallback: find closest upcoming expiry
-        from datetime import datetime as dt, timezone as tz
-        now_ms = int(dt.now(tz.utc).timestamp() * 1000)
-        upcoming = [i for i in instruments if i.get("expiration_timestamp", 0) > now_ms]
-        if not upcoming:
-            log.warning("No upcoming expiries found on Deribit")
-            return []
-
-        # Sort by expiration, take closest
-        upcoming.sort(key=lambda i: i.get("expiration_timestamp", 0))
-        closest_expiry = upcoming[0].get("expiration_timestamp", 0)
-        closest_group = [i for i in upcoming if i.get("expiration_timestamp") == closest_expiry]
-        log.info(f"OptionsWatch: exact expiry '{expiry}' not found, using closest: {len(closest_group)} instruments")
-        return closest_group
-
-    except Exception as e:
-        log.warning(f"Deribit instruments fetch failed: {e}")
+    # If ETH lookup failed, try listing all currencies
+    if not all_instruments:
+        try:
+            r = requests.get(f"{DERIBIT_BASE}/public/get_currencies", timeout=10)
+            if r.status_code == 200:
+                currencies = r.json().get("result") or []
+                currency_codes = [c.get("currency") for c in currencies]
+                log.warning(f"Deribit available currencies: {currency_codes}")
+        except Exception as e:
+            log.warning(f"Could not fetch currency list: {e}")
         return []
+
+    # Filter to ETH-only (some endpoints return all)
+    eth_instruments = [i for i in all_instruments
+                       if i.get("instrument_name", "").startswith("ETH")]
+
+    # Try exact expiry match
+    matched = [i for i in eth_instruments if expiry in i.get("instrument_name", "")]
+    if matched:
+        log.info(f"Deribit: {len(matched)} ETH instruments match expiry {expiry}")
+        return matched
+
+    # Fallback: closest upcoming expiry
+    from datetime import datetime as dt, timezone as tz
+    now_ms = int(dt.now(tz.utc).timestamp() * 1000)
+    upcoming = [i for i in eth_instruments if i.get("expiration_timestamp", 0) > now_ms]
+    if not upcoming:
+        log.warning(f"No upcoming ETH expiries found on Deribit (total ETH: {len(eth_instruments)})")
+        return []
+
+    upcoming.sort(key=lambda i: i.get("expiration_timestamp", 0))
+    closest_expiry = upcoming[0].get("expiration_timestamp", 0)
+    closest_group = [i for i in upcoming if i.get("expiration_timestamp") == closest_expiry]
+    log.info(f"OptionsWatch: exact expiry '{expiry}' not found, using closest: {len(closest_group)} instruments")
+    return closest_group
 
 
 def _fetch_ticker(instrument: str) -> dict | None:
