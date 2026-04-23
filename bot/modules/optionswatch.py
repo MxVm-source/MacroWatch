@@ -244,6 +244,24 @@ def send_alert(result: dict, is_morning: bool = False):
     log.info(f"OptionsWatch: alert sent — {expiry}, max pain ${max_pain:,.0f}")
 
 
+def refresh_state():
+    """
+    Silently refresh STATE so IntelWatch always has current options data.
+    Called on a timer — does not send alerts, just updates STATE.
+    """
+    try:
+        result = run_analysis()
+        if not result:
+            log.debug("OptionsWatch refresh: no data from Deribit")
+            return
+        STATE["last_expiry_str"] = result.get("expiry")
+        STATE["last_max_pain"]   = result.get("max_pain")
+        STATE["last_notional"]   = result.get("total_notional")
+        log.info(f"OptionsWatch STATE refreshed: expiry={result.get('expiry')} max_pain=${result.get('max_pain',0):,.0f}")
+    except Exception as e:
+        log.warning(f"OptionsWatch refresh_state failed: {e}")
+
+
 def run_thursday():
     """Called Thursday 18:00 UTC — pre-expiry heads up."""
     result = run_analysis()
