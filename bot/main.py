@@ -810,6 +810,14 @@ def _job_optionswatch_friday():
         _err("OptionsWatch", e)
 
 
+def _job_optionswatch_refresh():
+    """Silent STATE refresh for IntelWatch consumption."""
+    try:
+        optionswatch.refresh_state()
+    except Exception as e:
+        _err("OptionsWatch-refresh", e)
+
+
 def _get_modules():
     """Bundle all module references for IntelWatch."""
     return {
@@ -1047,6 +1055,14 @@ def start_scheduler():
         id="optionswatch_friday", max_instances=1,
     )
     print("⚙️ OptionsWatch scheduled (Thu 18:00 + Fri 07:00 UTC) ✅", flush=True)
+
+    # ── OptionsWatch STATE refresh — every 30 min (silent, feeds IntelWatch)
+    SCHED.add_job(
+        _job_optionswatch_refresh, "interval", minutes=30,
+        id="optionswatch_refresh", max_instances=1, misfire_grace_time=60,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    print("⚙️ OptionsWatch state refresh scheduled (30min silent) ✅", flush=True)
 
     # ── IntelWatch auto-trigger — every 30 minutes
     SCHED.add_job(
