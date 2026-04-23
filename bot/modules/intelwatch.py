@@ -484,11 +484,11 @@ def send_weekly_intel(modules: dict):
     # Append BTC heatmap to BOTH channels — single Apify fetch, sent twice
     try:
         from bot.modules import heatmapwatch
-        result = heatmapwatch._fetch_heatmap("BTC", timeframe="7d")
+        result = heatmapwatch._fetch_heatmap("BTC", timeframe="24h")
         if result:
             # Send to private group
             caption_priv = (
-                f"🔥 *BTC Liquidation Heatmap (7-day)*\n"
+                f"🔥 *BTC Liquidation Heatmap (24h)*\n"
                 f"_Source: CoinGlass · {now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
                 f"Yellow/red = large liquidation clusters.\n"
                 f"Price often sweeps these zones."
@@ -500,11 +500,11 @@ def send_weekly_intel(modules: dict):
             # Send to public channel
             if PUBLIC_CHAT_ID:
                 caption_pub = (
-                    f"🔥 *Infinex Capital — BTC Liquidation Heatmap (7-day)*\n"
+                    f"🔥 *Infinex Capital — BTC Liquidation Heatmap (24h)*\n"
                     f"_Intelligence provided by MacroWatch 🧠_\n\n"
                     f"_Source: CoinGlass · {now.strftime('%b %d, %Y')}_\n\n"
                     f"Yellow/red zones show where liquidation clusters sit. "
-                    f"Use this map alongside the intel above to plan your week's positioning."
+                    f"Use this map alongside the intel above to plan the next 48h."
                 )
                 heatmapwatch._send_photo(
                     PUBLIC_CHAT_ID, result["image_url"], caption_pub

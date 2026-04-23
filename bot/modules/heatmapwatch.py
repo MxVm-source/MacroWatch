@@ -215,5 +215,6 @@ def send_heatmap(coin: str = "BTC", target: str = "private", timeframe: str = "2
 
 
 def send_weekly_heatmap():
-    """Called from weekly brief — sends BTC 7-day heatmap to public channel."""
-    send_heatmap("BTC", target="public", timeframe="7d")
+    """Called from Wed Intel Deep Dive — sends BTC 24h heatmap.
+       Note: actor doesn't respect timeframe param and always returns 24h view."""
+    send_heatmap("BTC", target="public", timeframe="24h")
