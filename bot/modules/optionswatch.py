@@ -26,6 +26,10 @@ DERIBIT_BASE = "https://www.deribit.com/api/v2"
 
 STATE = {
     "last_alert_utc":  None,
+    # Per-asset state — both BTC and ETH tracked
+    "btc": {"expiry_str": None, "max_pain": None, "notional": None, "price": None},
+    "eth": {"expiry_str": None, "max_pain": None, "notional": None, "price": None},
+    # Backwards compat (legacy ETH-only fields, kept so older callers don't break)
     "last_expiry_str": None,
     "last_max_pain":   None,
     "last_notional":   None,
@@ -44,13 +48,12 @@ def _get_next_friday_expiry() -> str:
     return f"{friday.day}{month_map[friday.month]}{str(friday.year)[2:]}"
 
 
-def _fetch_instruments(expiry: str) -> list:
-    """Fetch all ETH option instruments for given expiry.
+def _fetch_instruments(expiry: str, asset: str = "ETH") -> list:
+    """Fetch all option instruments for given expiry and asset (BTC or ETH).
        Falls back to closest upcoming expiry if exact date not listed."""
-    # Try multiple currency parameter variants since Deribit may have changed the API
-    # ETH options now exist in multiple forms: ETH-denominated and USDC-settled (ETH_USDC)
+    asset = asset.upper()
     all_instruments = []
-    for currency in ["ETH", "eth"]:
+    for currency in [asset, asset.lower()]:
         try:
             r = requests.get(
                 f"{DERIBIT_BASE}/public/get_instruments",
@@ -66,50 +69,39 @@ def _fetch_instruments(expiry: str) -> list:
                 continue
             instruments = data.get("result") or []
             if instruments:
-                log.info(f"Deribit: got {len(instruments)} instruments with currency={currency}")
+                log.info(f"Deribit: got {len(instruments)} {asset} instruments")
                 all_instruments = instruments
                 break
-            else:
-                log.info(f"Deribit: 0 instruments for currency={currency}, response keys: {list(data.keys())}")
         except requests.exceptions.Timeout:
             log.warning(f"Deribit timeout for currency={currency}")
         except Exception as e:
             log.warning(f"Deribit fetch error for currency={currency}: {type(e).__name__}: {e}")
 
-    # If ETH lookup failed, try listing all currencies
     if not all_instruments:
-        try:
-            r = requests.get(f"{DERIBIT_BASE}/public/get_currencies", timeout=10)
-            if r.status_code == 200:
-                currencies = r.json().get("result") or []
-                currency_codes = [c.get("currency") for c in currencies]
-                log.warning(f"Deribit available currencies: {currency_codes}")
-        except Exception as e:
-            log.warning(f"Could not fetch currency list: {e}")
         return []
 
-    # Filter to ETH-only (some endpoints return all)
-    eth_instruments = [i for i in all_instruments
-                       if i.get("instrument_name", "").startswith("ETH")]
+    # Filter to asset-only (instrument names start with asset symbol)
+    asset_instruments = [i for i in all_instruments
+                         if i.get("instrument_name", "").startswith(asset)]
 
     # Try exact expiry match
-    matched = [i for i in eth_instruments if expiry in i.get("instrument_name", "")]
+    matched = [i for i in asset_instruments if expiry in i.get("instrument_name", "")]
     if matched:
-        log.info(f"Deribit: {len(matched)} ETH instruments match expiry {expiry}")
+        log.info(f"Deribit: {len(matched)} {asset} instruments match expiry {expiry}")
         return matched
 
     # Fallback: closest upcoming expiry
     from datetime import datetime as dt, timezone as tz
     now_ms = int(dt.now(tz.utc).timestamp() * 1000)
-    upcoming = [i for i in eth_instruments if i.get("expiration_timestamp", 0) > now_ms]
+    upcoming = [i for i in asset_instruments if i.get("expiration_timestamp", 0) > now_ms]
     if not upcoming:
-        log.warning(f"No upcoming ETH expiries found on Deribit (total ETH: {len(eth_instruments)})")
+        log.warning(f"No upcoming {asset} expiries found on Deribit")
         return []
 
     upcoming.sort(key=lambda i: i.get("expiration_timestamp", 0))
     closest_expiry = upcoming[0].get("expiration_timestamp", 0)
     closest_group = [i for i in upcoming if i.get("expiration_timestamp") == closest_expiry]
-    log.info(f"OptionsWatch: exact expiry '{expiry}' not found, using closest: {len(closest_group)} instruments")
+    log.info(f"OptionsWatch {asset}: exact expiry '{expiry}' not found, using closest: {len(closest_group)} instruments")
     return closest_group
 
 
@@ -193,13 +185,14 @@ def _compute_max_pain(instruments: list) -> dict | None:
     }
 
 
-def run_analysis() -> dict | None:
+def run_analysis(asset: str = "ETH") -> dict | None:
+    asset = asset.upper()
     expiry = _get_next_friday_expiry()
-    log.info(f"OptionsWatch: analysing expiry {expiry}...")
+    log.info(f"OptionsWatch {asset}: analysing expiry {expiry}...")
 
-    instruments = _fetch_instruments(expiry)
+    instruments = _fetch_instruments(expiry, asset=asset)
     if not instruments:
-        log.warning(f"OptionsWatch: no instruments found for {expiry}")
+        log.warning(f"OptionsWatch {asset}: no instruments found for {expiry}")
         return None
 
     result = _compute_max_pain(instruments)
@@ -207,55 +200,62 @@ def run_analysis() -> dict | None:
         return None
 
     result["expiry"] = expiry
+    result["asset"]  = asset
     return result
 
 
-def send_alert(result: dict, is_morning: bool = False):
-    now       = datetime.now(timezone.utc)
-    expiry    = result["expiry"]
-    max_pain  = result["max_pain"]
-    notional  = result["total_notional"]
-
-    # Get current ETH price
-    eth_price = None
+def _fetch_spot_price(asset: str) -> float | None:
+    """Fetch current spot price from Bitget."""
+    symbol = f"{asset.upper()}USDT"
     try:
         r = requests.get(
             "https://api.bitget.com/api/v2/mix/market/ticker",
-            params={"symbol": "ETHUSDT", "productType": os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")},
+            params={"symbol": symbol, "productType": os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")},
             timeout=6,
         )
         d = r.json().get("data") or {}
         if isinstance(d, list):
             d = d[0] if d else {}
-        eth_price = float(d.get("lastPr") or d.get("last") or 0) or None
+        price = float(d.get("lastPr") or d.get("last") or 0)
+        return price if price > 0 else None
     except Exception:
-        pass
+        return None
+
+
+def send_alert(result: dict, is_morning: bool = False):
+    now       = datetime.now(timezone.utc)
+    asset     = result.get("asset", "ETH")
+    expiry    = result["expiry"]
+    max_pain  = result["max_pain"]
+    notional  = result["total_notional"]
+
+    spot_price = _fetch_spot_price(asset)
 
     notional_b = notional / 1e9
     notional_str = f"${notional_b:.2f}B" if notional_b >= 1 else f"${notional/1e6:.0f}M"
 
     lines = [
-        f"⚙️ *OptionsWatch — {'Expiry Day' if is_morning else 'Pre-Expiry Alert'}*",
+        f"⚙️ *OptionsWatch {asset} — {'Expiry Day' if is_morning else 'Pre-Expiry Alert'}*",
         f"Expiry: *{expiry}* (Friday 08:00 UTC)",
         "",
         f"Notional expiring: `{notional_str}`",
         f"Max Pain: `${max_pain:,.0f}`",
     ]
 
-    if eth_price and max_pain:
-        gap     = eth_price - max_pain
-        gap_pct = gap / eth_price * 100
+    if spot_price and max_pain:
+        gap     = spot_price - max_pain
+        gap_pct = gap / spot_price * 100
         dir_str = "above" if gap > 0 else "below"
         lines += [
-            f"ETH now:  `${eth_price:,.2f}`",
+            f"{asset} now:  `${spot_price:,.2f}`",
             f"Gap: `${abs(gap):,.0f}` {dir_str} max pain ({abs(gap_pct):.1f}%)",
             "",
         ]
         if abs(gap_pct) > 5:
             if gap > 0:
-                lines.append("_Price is above max pain — gravitational pull downward into expiry._")
+                lines.append(f"_{asset} is above max pain — gravitational pull downward into expiry._")
             else:
-                lines.append("_Price is below max pain — gravitational pull upward into expiry._")
+                lines.append(f"_{asset} is below max pain — gravitational pull upward into expiry._")
             lines.append("_Watch for drift toward max pain as expiry approaches._ 🎯")
         else:
             lines.append("_Price near max pain — minimal gravitational pressure. Expiry likely quiet._ ✅")
@@ -266,47 +266,70 @@ def send_alert(result: dict, is_morning: bool = False):
 
     send_text("\n".join(lines))
 
-    STATE["last_alert_utc"]  = now
-    STATE["last_expiry_str"] = expiry
-    STATE["last_max_pain"]   = max_pain
-    STATE["last_notional"]   = notional
-    log.info(f"OptionsWatch: alert sent — {expiry}, max pain ${max_pain:,.0f}")
+    # Update per-asset state
+    asset_key = asset.lower()
+    if asset_key in STATE:
+        STATE[asset_key]["expiry_str"] = expiry
+        STATE[asset_key]["max_pain"]   = max_pain
+        STATE[asset_key]["notional"]   = notional
+        STATE[asset_key]["price"]      = spot_price
+
+    # Backwards compat (legacy ETH fields)
+    if asset == "ETH":
+        STATE["last_expiry_str"] = expiry
+        STATE["last_max_pain"]   = max_pain
+        STATE["last_notional"]   = notional
+
+    STATE["last_alert_utc"] = now
+    log.info(f"OptionsWatch {asset}: alert sent — {expiry}, max pain ${max_pain:,.0f}")
 
 
 def refresh_state():
     """
-    Silently refresh STATE so IntelWatch always has current options data.
-    Called on a timer — does not send alerts, just updates STATE.
+    Silently refresh STATE for BOTH BTC and ETH so IntelWatch always has fresh data.
+    Called on a timer — does not send alerts.
     """
-    try:
-        result = run_analysis()
-        if not result:
-            log.debug("OptionsWatch refresh: no data from Deribit")
-            return
-        STATE["last_expiry_str"] = result.get("expiry")
-        STATE["last_max_pain"]   = result.get("max_pain")
-        STATE["last_notional"]   = result.get("total_notional")
-        log.info(f"OptionsWatch STATE refreshed: expiry={result.get('expiry')} max_pain=${result.get('max_pain',0):,.0f}")
-    except Exception as e:
-        log.warning(f"OptionsWatch refresh_state failed: {e}")
+    for asset in ["BTC", "ETH"]:
+        try:
+            result = run_analysis(asset=asset)
+            if not result:
+                log.debug(f"OptionsWatch {asset} refresh: no data")
+                continue
+            asset_key = asset.lower()
+            STATE[asset_key]["expiry_str"] = result.get("expiry")
+            STATE[asset_key]["max_pain"]   = result.get("max_pain")
+            STATE[asset_key]["notional"]   = result.get("total_notional")
+            STATE[asset_key]["price"]      = _fetch_spot_price(asset)
+
+            # Backwards compat for ETH
+            if asset == "ETH":
+                STATE["last_expiry_str"] = result.get("expiry")
+                STATE["last_max_pain"]   = result.get("max_pain")
+                STATE["last_notional"]   = result.get("total_notional")
+
+            log.info(f"OptionsWatch {asset} STATE refreshed: expiry={result.get('expiry')} max_pain=${result.get('max_pain',0):,.0f}")
+        except Exception as e:
+            log.warning(f"OptionsWatch {asset} refresh failed: {e}")
 
 
 def run_thursday():
-    """Called Thursday 18:00 UTC — pre-expiry heads up."""
-    result = run_analysis()
-    if result:
-        send_alert(result, is_morning=False)
-    else:
-        send_text("⚙️ [OptionsWatch] Could not fetch expiry data from Deribit.")
+    """Called Thursday 18:00 UTC — pre-expiry heads up for both BTC and ETH."""
+    for asset in ["BTC", "ETH"]:
+        result = run_analysis(asset=asset)
+        if result:
+            send_alert(result, is_morning=False)
+        else:
+            log.warning(f"OptionsWatch {asset}: Thursday alert skipped — no data")
 
 
 def run_friday():
-    """Called Friday 07:00 UTC — expiry morning alert."""
-    result = run_analysis()
-    if result:
-        send_alert(result, is_morning=True)
-    else:
-        send_text("⚙️ [OptionsWatch] Could not fetch expiry data from Deribit.")
+    """Called Friday 07:00 UTC — expiry morning alert for both BTC and ETH."""
+    for asset in ["BTC", "ETH"]:
+        result = run_analysis(asset=asset)
+        if result:
+            send_alert(result, is_morning=True)
+        else:
+            log.warning(f"OptionsWatch {asset}: Friday alert skipped — no data")
 
 
 def show_diag():
