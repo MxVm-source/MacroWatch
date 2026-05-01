@@ -1,9 +1,9 @@
 # bot/modules/stratwatch.py
 """
-StratWatch — ATRb Multi-Asset Strategy Status
+StratWatch — Ascent Multi Asset Strategy Status
 
 Command: /status
-Shows live strategy state for ETH/BNB/SOL including:
+Shows live strategy state for ETH/SOL including:
   - Bot status + account balance
   - Per-asset: price, 4H MACD, ATR%, regime, open position
   - Next 4H candle close (cycle time)
@@ -31,9 +31,8 @@ log = logging.getLogger("stratwatch")
 # ─── Strategy config ─────────────────────────────────────────────────────────
 
 ASSETS = [
-    {"symbol": "ETHUSDT", "ticker": "ETH", "weight": "60%"},
-    {"symbol": "BNBUSDT", "ticker": "BNB", "weight": "40%"},
-    {"symbol": "SOLUSDT", "ticker": "SOL", "weight": "10%"},
+    {"symbol": "ETHUSDT", "ticker": "ETH", "weight": "80%"},
+    {"symbol": "SOLUSDT", "ticker": "SOL", "weight": "20%"},
 ]
 
 ATR_PERIOD    = 14
@@ -235,13 +234,11 @@ def _entry_conditions(analysis: dict) -> tuple[str, str]:
     if score == 4:
         return "🟢", "All conditions met — entry possible"
     elif score == 3:
-        return "🟡", "Near entry — 1 condition pending"
-    elif score == 2:
-        return "🟡", "Watching — 2 conditions pending"
-    elif score == 1:
-        return "⚪", "Early setup — 3 conditions pending"
+        return "🟡", "Near entry — 1 condition missing"
+    elif score <= 1:
+        return "⚪", "Cooling — waiting for setup"
     else:
-        return "⚪", "No setup — waiting for conditions"
+        return "🟡", "Watching — 2 conditions pending"
 
 
 # ─── Message builder ─────────────────────────────────────────────────────────
@@ -276,11 +273,11 @@ def build_status() -> str:
         pass
 
     lines = [
-        "🤖 *ATRb Multi — Live Status*",
+        "🔱 *PrimeWatch — Live Status*",
         f"🕐 {now.strftime('%Y-%m-%d %H:%M UTC')}",
         "",
         f"Bot: 🟢 Live  |  Balance: `{balance_str}`",
-        f"Assets: ETH 60% | BNB 40% | SOL 10%",
+        f"Assets: ETH 80% | SOL 20%",
         f"Next cycle: {next_cycle}  _(in {mins}m)_",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",

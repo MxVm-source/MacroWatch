@@ -8,7 +8,7 @@ compounded from a virtual starting capital of $1,000.
 - Does NOT use account balance (avoids capital injection distortion)
 - Fees already deducted in Bitget's realizedPL field
 - Compounds each closed trade from CHALLENGE_START_DATE onward
-- Works across ETH, BNB, SOL
+- Works across ETH, SOL
 
 Command: /challenge
 """
@@ -30,9 +30,9 @@ log = logging.getLogger("challengewatch")
 
 VIRTUAL_START        = float(os.getenv("CHALLENGE_START_USD",  "1000.00"))
 CHALLENGE_TARGET     = float(os.getenv("CHALLENGE_TARGET_USD", "100000.00"))
-CHALLENGE_START_DATE = os.getenv("CHALLENGE_START_DATE",       "2026-05-01")
+CHALLENGE_START_DATE = os.getenv("CHALLENGE_START_DATE",       "2026-06-01")
 CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
-SYMBOLS              = ["ETHUSDT", "BNBUSDT", "SOLUSDT"]
+SYMBOLS              = ["ETHUSDT", "SOLUSDT"]
 
 BITGET_URL = (
     "https://www.bitget.com/copy-trading/futures-trader-v1/"
