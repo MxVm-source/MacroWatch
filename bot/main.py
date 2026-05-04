@@ -977,13 +977,6 @@ def start_scheduler():
     )
     print("📘 PositionWatch scheduled (10s) ✅", flush=True)
 
-    # ── MonthlyPerf — first Monday of month at 09:30
-    SCHED.add_job(
-        _job_monthly_perf, "cron", day_of_week="mon", day="1-7", hour=9, minute=30,
-        id="monthly_perf", max_instances=1,
-    )
-    print("📊 MonthlyPerf scheduled (1st Mon 09:30) ✅", flush=True)
-
     # ── Market Open Alert — Mon–Fri 13:30 UTC (14:30 CET)
     if os.getenv("ENABLE_MARKET_OPEN", "true").lower() in ("1", "true", "yes", "on"):
         SCHED.add_job(
