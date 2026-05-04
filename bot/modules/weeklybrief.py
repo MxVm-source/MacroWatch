@@ -38,30 +38,75 @@ PRODUCT_TYPE   = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 # ─── Data fetchers ────────────────────────────────────────────────────────────
 
 def _fetch_crypto_weekly() -> dict:
-    """BTC, ETH, total market cap weekly change from CoinGecko."""
+    """BTC, ETH, total market cap weekly change from CoinGecko.
+       Falls back to Bitget for prices if CoinGecko fails/rate-limited."""
+    result = {}
     try:
         r = requests.get(
             f"{COINGECKO_BASE}/coins/markets",
             params={
-                "vs_currency":        "usd",
-                "ids":                "bitcoin,ethereum",
+                "vs_currency":             "usd",
+                "ids":                     "bitcoin,ethereum",
                 "price_change_percentage": "7d",
-                "sparkline":          False,
+                "sparkline":               False,
             },
             timeout=10,
         )
-        data = r.json()
-        result = {}
-        for coin in data:
-            cid   = coin.get("id")
-            price = coin.get("current_price")
-            chg7d = coin.get("price_change_percentage_7d_in_currency")
-            mcap  = coin.get("market_cap")
-            result[cid] = {"price": price, "chg7d": chg7d, "mcap": mcap}
-        return result
+        if r.status_code != 200:
+            log.warning(f"CoinGecko HTTP {r.status_code}: {r.text[:200]}")
+        else:
+            data = r.json()
+            # Validate response is a list (CoinGecko returns dict on rate-limit error)
+            if isinstance(data, list):
+                for coin in data:
+                    cid   = coin.get("id")
+                    price = coin.get("current_price")
+                    chg7d = coin.get("price_change_percentage_7d_in_currency")
+                    mcap  = coin.get("market_cap")
+                    if cid:
+                        result[cid] = {"price": price, "chg7d": chg7d, "mcap": mcap}
+            else:
+                log.warning(f"CoinGecko returned non-list response: {str(data)[:200]}")
     except Exception as e:
         log.warning(f"CoinGecko weekly fetch failed: {e}")
-        return {}
+
+    # Fallback: fetch BTC/ETH from Bitget if CoinGecko didn't deliver
+    if "bitcoin" not in result or not result.get("bitcoin", {}).get("price"):
+        log.info("CoinGecko BTC missing — falling back to Bitget")
+        btc_data = _fetch_bitget_weekly("BTCUSDT")
+        if btc_data:
+            result["bitcoin"] = btc_data
+    if "ethereum" not in result or not result.get("ethereum", {}).get("price"):
+        log.info("CoinGecko ETH missing — falling back to Bitget")
+        eth_data = _fetch_bitget_weekly("ETHUSDT")
+        if eth_data:
+            result["ethereum"] = eth_data
+
+    return result
+
+
+def _fetch_bitget_weekly(symbol: str) -> dict | None:
+    """Fallback price + 7d change fetcher using Bitget candles."""
+    try:
+        r = requests.get(
+            f"{BITGET_BASE}/api/v2/mix/market/candles",
+            params={"symbol": symbol, "granularity": "1D",
+                    "limit": "8", "productType": PRODUCT_TYPE},
+            timeout=8,
+        )
+        data = r.json()
+        if data.get("code") != "00000":
+            return None
+        candles = data.get("data") or []
+        if len(candles) < 2:
+            return None
+        price      = float(candles[-1][4])
+        prev_close = float(candles[0][4])
+        chg7d      = (price - prev_close) / prev_close * 100 if prev_close > 0 else None
+        return {"price": price, "chg7d": chg7d, "mcap": None}
+    except Exception as e:
+        log.warning(f"Bitget fallback fetch failed for {symbol}: {e}")
+        return None
 
 
 def _fetch_global_mcap() -> dict:
@@ -82,21 +127,36 @@ def _fetch_global_mcap() -> dict:
 def _fetch_stooq_weekly(symbol: str) -> float | None:
     """Fetch 7-day % change for a stooq symbol using last 8 daily closes."""
     try:
-        # stooq daily history CSV
         r = requests.get(
             f"https://stooq.com/q/d/l/?s={symbol}&i=d",
             timeout=8,
         )
+        if r.status_code != 200:
+            log.warning(f"Stooq HTTP {r.status_code} for {symbol}")
+            return None
         csv_lines = r.text.strip().splitlines()
         if len(csv_lines) < 9:
+            log.warning(f"Stooq {symbol}: only {len(csv_lines)} lines returned")
             return None
-        # Last line = most recent day; take last 8 data rows
-        rows       = csv_lines[1:]   # skip header
-        recent     = rows[-8:]       # 8 trading days
-        first_cols = recent[0].split(",")
-        last_cols  = recent[-1].split(",")
-        open_price  = float(first_cols[4])  # 5th col = close (stooq CSV: Date,Open,High,Low,Close,Volume)
-        close_price = float(last_cols[4])
+        rows = csv_lines[1:]   # skip header
+        # Filter out rows with N/D or invalid data
+        valid = []
+        for row in rows:
+            cols = row.split(",")
+            if len(cols) < 5:
+                continue
+            try:
+                close = float(cols[4])
+                if close > 0:
+                    valid.append(close)
+            except (ValueError, IndexError):
+                continue
+        if len(valid) < 8:
+            log.warning(f"Stooq {symbol}: only {len(valid)} valid daily closes")
+            return None
+        recent     = valid[-8:]   # 8 trading days
+        open_price = recent[0]
+        close_price = recent[-1]
         if open_price > 0:
             return round((close_price - open_price) / open_price * 100, 2)
     except Exception as e:
@@ -542,60 +602,72 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
     btc_chg_7d = btc.get("chg7d") or 0
     dom_trend = "↑" if btc_chg_7d > 0.5 else "↓" if btc_chg_7d < -0.5 else "→"
 
+    # Build header (date range only) — Crypto Market section conditional
     lines = [
         f"📊 *Infinex Capital — Weekly Market Brief*",
         f"_Intelligence provided by MacroWatch 🧠_",
         f"📅 {week_start} → {week_end}",
         "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🪙 *CRYPTO MARKET*",
-        "",
     ]
 
-    # Group 1: Prices
-    if btc.get("price"):
-        lines.append(
-            f"₿ *BTC*  `${btc['price']:,.0f}`   "
-            f"{_chg_emoji(btc.get('chg7d'))} `{_pct(btc.get('chg7d'))}`"
-        )
-    if eth.get("price"):
-        lines.append(
-            f"Ξ *ETH*  `${eth['price']:,.2f}`    "
-            f"{_chg_emoji(eth.get('chg7d'))} `{_pct(eth.get('chg7d'))}`"
-        )
+    # Check if we have any crypto data to show
+    has_crypto = bool(btc.get("price") or eth.get("price") or mcap_t or cur_dom or fg.get("value"))
 
-    lines.append("")
+    if has_crypto:
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "🪙 *CRYPTO MARKET*",
+            "",
+        ]
 
-    # Group 2: Market size
-    if mcap_t:
-        lines.append(f"🌐 *Total Mcap*   `${mcap_t}T`")
-    if cur_dom:
-        lines.append(f"👑 *BTC Dom*      `{cur_dom:.1f}%`  {dom_trend}")
+        # Group 1: Prices
+        if btc.get("price"):
+            lines.append(
+                f"₿ *BTC*  `${btc['price']:,.0f}`   "
+                f"{_chg_emoji(btc.get('chg7d'))} `{_pct(btc.get('chg7d'))}`"
+            )
+        if eth.get("price"):
+            lines.append(
+                f"Ξ *ETH*  `${eth['price']:,.2f}`    "
+                f"{_chg_emoji(eth.get('chg7d'))} `{_pct(eth.get('chg7d'))}`"
+            )
 
-    lines.append("")
+        if btc.get("price") or eth.get("price"):
+            lines.append("")
 
-    # Group 3: Sentiment
-    if fg.get("value"):
-        val = fg["value"]
-        if val >= 75:   fg_emoji = "🟢"
-        elif val >= 55: fg_emoji = "🟡"
-        elif val >= 45: fg_emoji = "🟠"
-        else:           fg_emoji = "🔴"
-        lines.append(f"🎭 *Fear & Greed*  `{val}` — {fg_emoji} {fg['label']}")
-        if fg_delta is not None:
-            sign = "+" if fg_delta >= 0 else ""
-            arrow = "📈" if fg_delta > 3 else "📉" if fg_delta < -3 else "➡️"
-            lines.append(f"   _7d: {sign}{fg_delta} {arrow}_")
-    lines.append("")
+        # Group 2: Market size
+        if mcap_t:
+            lines.append(f"🌐 *Total Mcap*   `${mcap_t}T`")
+        if cur_dom:
+            lines.append(f"👑 *BTC Dom*      `{cur_dom:.1f}%`  {dom_trend}")
+
+        if mcap_t or cur_dom:
+            lines.append("")
+
+        # Group 3: Sentiment
+        if fg.get("value"):
+            val = fg["value"]
+            if val >= 75:   fg_emoji = "🟢"
+            elif val >= 55: fg_emoji = "🟡"
+            elif val >= 45: fg_emoji = "🟠"
+            else:           fg_emoji = "🔴"
+            lines.append(f"🎭 *Fear & Greed*  `{val}` — {fg_emoji} {fg['label']}")
+            if fg_delta is not None:
+                sign = "+" if fg_delta >= 0 else ""
+                arrow = "📈" if fg_delta > 3 else "📉" if fg_delta < -3 else "➡️"
+                lines.append(f"   _7d: {sign}{fg_delta} {arrow}_")
+            lines.append("")
 
     # ── Traditional Markets (7D) ─────────────────────────────────────────────
-    if equities or macro_assets:
+    has_equities = equities and any(v is not None for v in equities.values())
+    has_macro    = macro_assets and any(v is not None for v in macro_assets.values())
+    if has_equities or has_macro:
         lines += [
             "━━━━━━━━━━━━━━━━━━━━━━━━",
             "🌍 *TRADITIONAL MARKETS (7D)*",
             "",
         ]
-        if equities and any(v is not None for v in equities.values()):
+        if has_equities:
             lines.append("📈 *Equities*")
             if equities.get("sp500") is not None:
                 e = "📈" if equities["sp500"] >= 0 else "📉"
@@ -605,7 +677,7 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
                 lines.append(f"  Nasdaq:   {e} `{_pct(equities['nasdaq'])}`")
             lines.append("")
 
-        if macro_assets and any(v is not None for v in macro_assets.values()):
+        if has_macro:
             lines.append("💰 *Macro Assets*")
             if macro_assets.get("gold") is not None:
                 e = "📈" if macro_assets["gold"] >= 0 else "📉"
