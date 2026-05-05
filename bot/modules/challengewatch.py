@@ -150,8 +150,10 @@ def build_challenge() -> str:
     if days_running < 0:
         days_to_go = abs(days_running)
         lines = [
+            "🚀 *OFFICIAL LAUNCH — June 1, 2026*",
+            "",
             "🎯 *$1k → $100k Challenge*",
-            f"⏳ Starts in *{days_to_go} days* — {start_str}",
+            f"⏳ Live in *{days_to_go} days*",
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━",
             f"💰 Virtual capital:  `${VIRTUAL_START:,.0f}`",
@@ -167,6 +169,11 @@ def build_challenge() -> str:
         lines += [
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "*What happens June 1:*",
+            "→ Ascent Multi Asset goes live",
+            "→ Every closed trade compounds into the challenge",
+            "→ Real PnL. Public. Logged. Auto-updated weekly.",
+            "",
             "_Capital loaded. Strategy armed._",
             f"_Clock starts {start_str}._",
             "",
