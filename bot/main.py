@@ -364,7 +364,7 @@ def _poll_positions():
                     pub_emoji = "🟢" if leveraged >= 0 else "🔴"
                     side_icon = "📈" if prev_side == "LONG" else "📉"
                     send_public(
-                        f"🤖 *Infinex Capital — Ascent Multi Asset Trade Closed*\n"
+                        f"🤖 *Infinex Capital — Ascent ETH Trade Closed*\n"
                         f"_Intelligence provided by MacroWatch 🧠_\n\n"
                         f"Pair: {sym}\n"
                         f"Side: {side_icon} {prev_side}\n"
@@ -1301,7 +1301,7 @@ def _handle_command(text: str, text_raw: str):
             "🩺 *System*\n"
             "/health — Full system status\n"
             "/restart — Trigger clean poll of all modules\n"
-            "/status — Ascent Multi Asset live strategy status\n"
+            "/status — Ascent ETH live strategy status\n"
             "/challenge — $1k → $100k challenge progress\n"
             "/report — Last 7 days trades + P&L\n"
         )
