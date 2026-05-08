@@ -1,9 +1,9 @@
 # bot/modules/stratwatch.py
 """
-StratWatch — Ascent Multi Asset Strategy Status
+StratWatch — Ascent ETH Strategy Status
 
 Command: /status
-Shows live strategy state for ETH/SOL including:
+Shows live strategy state for ETH including:
   - Bot status + account balance
   - Per-asset: price, 4H MACD, ATR%, regime, open position
   - Next 4H candle close (cycle time)
@@ -31,8 +31,7 @@ log = logging.getLogger("stratwatch")
 # ─── Strategy config ─────────────────────────────────────────────────────────
 
 ASSETS = [
-    {"symbol": "ETHUSDT", "ticker": "ETH", "weight": "80%"},
-    {"symbol": "SOLUSDT", "ticker": "SOL", "weight": "20%"},
+    {"symbol": "ETHUSDT", "ticker": "ETH", "weight": "100%"},
 ]
 
 ATR_PERIOD    = 14
@@ -277,7 +276,7 @@ def build_status() -> str:
         f"🕐 {now.strftime('%Y-%m-%d %H:%M UTC')}",
         "",
         f"Bot: 🟢 Live  |  Balance: `{balance_str}`",
-        f"Assets: ETH 80% | SOL 20%",
+        f"Assets: ETH 100%",
         f"Next cycle: {next_cycle}  _(in {mins}m)_",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",

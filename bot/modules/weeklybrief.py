@@ -12,7 +12,7 @@ Covers:
   - Funding rate summary
   - Fear & Greed
   - Top crypto performers (CoinGecko trending)
-  - Ascent strategy performance (ETH/SOL)
+  - Ascent strategy performance (ETH)
   - AI-generated narrative (Claude API)
 
 Fires to both private group and public channel.
@@ -519,14 +519,13 @@ Be direct, no fluff. Max 40 words total. No emojis."""
 
 def _generate_ascent_commentary(data: dict) -> str:
     """1-2 sentences on current market conditions for Ascent strategy context."""
-    prompt = f"""You are a quant analyst briefing copy traders on the Ascent Multi Asset strategy.
+    prompt = f"""You are a quant analyst briefing copy traders on the Ascent ETH strategy.
 Write exactly 1-2 short sentences describing current market conditions relevant to a
-4H momentum strategy trading ETH/SOL (80/20 allocation). Focus on: volatility regime, trend strength,
+4H momentum strategy trading ETH (100% allocation). Focus on: volatility regime, trend strength,
 and whether conditions favor or hurt a breakout strategy.
 
 This week's data:
 - ETH: {data.get('eth_chg', 'N/A')}%
-- SOL: {data.get('sol_chg', 'N/A')}%
 - BTC: {data.get('btc_chg', 'N/A')}%
 - Fear & Greed: {data.get('fg_value', 'N/A')} ({data.get('fg_label', 'N/A')})
 
@@ -555,7 +554,6 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
 
     # Ascent strategy assets
     eth_w = _fetch_asset_weekly("ETHUSDT")
-    sol_w = _fetch_asset_weekly("SOLUSDT")
 
     # Market cap in trillions
     mcap_t = round(global_.get("total_mcap", 0) / 1e12, 2) if global_.get("total_mcap") else None
@@ -758,8 +756,8 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
         closed = []
 
     # Aggregate by asset
-    pnl_by_asset = {"ETHUSDT": 0.0, "SOLUSDT": 0.0}
-    trades_by_asset = {"ETHUSDT": 0, "SOLUSDT": 0}
+    pnl_by_asset = {"ETHUSDT": 0.0}
+    trades_by_asset = {"ETHUSDT": 0}
     for t in closed:
         sym = t.get("symbol", "")
         if sym in pnl_by_asset:
@@ -770,7 +768,6 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
 
     ascent_data = {
         "eth_chg":  eth_w if eth_w is not None else "N/A",
-        "sol_chg":  sol_w if sol_w is not None else "N/A",
         "btc_chg":  round(btc.get("chg7d", 0), 2) if btc.get("chg7d") else "N/A",
         "fg_value": fg.get("value", "N/A"),
         "fg_label": fg.get("label", "N/A"),
@@ -779,7 +776,7 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
 
     lines += [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🤖 *ASCENT MULTI ASSET*",
+        "🤖 *ASCENT ETH*",
         "",
     ]
     if ascent_commentary:
@@ -790,32 +787,18 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
         net_e    = "🟢" if total_pnl >= 0 else "🔴"
         net_sign = "+" if total_pnl >= 0 else "-"
         lines.append(f"📊 *Weekly PnL:* {net_e} `{net_sign}${abs(total_pnl):.2f}` ({total_trades} trades)")
-        lines.append("")
-        for sym, label in [("ETHUSDT", "ETH"), ("SOLUSDT", "SOL")]:
-            pnl    = pnl_by_asset[sym]
-            count  = trades_by_asset[sym]
-            if count == 0:
-                lines.append(f"  ⚪ {label}: no trades")
-            else:
-                e    = "🟢" if pnl >= 0 else "🔴"
-                sign = "+" if pnl >= 0 else "-"
-                lines.append(f"  {e} {label}: `{sign}${abs(pnl):.2f}` ({count} trade{'s' if count != 1 else ''})")
     else:
         lines.append("📊 *Weekly PnL:* no trades this week")
         lines.append("_Strategy only fires when volatility + momentum align._")
 
     # Market context (spot performance — clearly separated)
-    lines += [
-        "",
-        "_Market context (7D spot performance):_",
-    ]
-    parts = []
-    for label, chg in [("ETH", eth_w), ("SOL", sol_w)]:
-        if chg is not None:
-            sign = "+" if chg >= 0 else ""
-            parts.append(f"{label} `{sign}{chg:.2f}%`")
-    if parts:
-        lines.append("  " + " · ".join(parts))
+    if eth_w is not None:
+        sign = "+" if eth_w >= 0 else ""
+        lines += [
+            "",
+            "_Market context (7D spot performance):_",
+            f"  ETH `{sign}{eth_w:.2f}%`",
+        ]
 
     # ═══ PRIVATE-ONLY SECTIONS ═══════════════════════════════════════════════
     if private:

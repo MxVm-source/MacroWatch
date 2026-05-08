@@ -30,7 +30,7 @@ log = logging.getLogger("strategyrecap")
 
 PUBLIC_CHAT_ID = os.getenv("PUBLIC_CHAT_ID", "")
 
-ASCENT_SYMBOLS = ["ETHUSDT", "SOLUSDT"]
+ASCENT_SYMBOLS = ["ETHUSDT"]
 
 
 # ─── Balance fetch (elite preferred) ──────────────────────────────────────────
@@ -187,7 +187,6 @@ def build_recap() -> str:
 
     # Asset performance
     eth_w = _fetch_asset_weekly("ETHUSDT")
-    sol_w = _fetch_asset_weekly("SOLUSDT")
 
     # Trade stats
     wins       = sum(1 for t in closed if t["pnl"] > 0)
@@ -196,7 +195,7 @@ def build_recap() -> str:
     trade_count = len(closed)
 
     lines = [
-        "🤖 *Infinex Capital — Ascent Multi Asset Weekly Recap*",
+        "🤖 *Infinex Capital — Ascent ETH Weekly Recap*",
         "_Intelligence provided by MacroWatch 🧠_",
         f"📅 {week_start} → {week_end}",
         "",
@@ -260,19 +259,18 @@ def build_recap() -> str:
     # Market context
     lines.append("📈 *Market Context (7D)*")
     lines.append("")
-    for label, chg in [("ETH", eth_w), ("SOL", sol_w)]:
-        if chg is not None:
-            e    = "📈" if chg >= 0 else "📉"
-            sign = "+" if chg >= 0 else ""
-            lines.append(f"  {e} {label}: `{sign}{chg:.2f}%`")
-        else:
-            lines.append(f"  {label}: N/A")
+    if eth_w is not None:
+        e    = "📈" if eth_w >= 0 else "📉"
+        sign = "+" if eth_w >= 0 else ""
+        lines.append(f"  {e} ETH: `{sign}{eth_w:.2f}%`")
+    else:
+        lines.append("  ETH: N/A")
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-    lines.append("🤖 *Ascent Multi Asset*")
-    lines.append("ETH 80% · SOL 20%  |  4H timeframe")
+    lines.append("🤖 *Ascent ETH*")
+    lines.append("ETH 100%  |  4H timeframe")
     lines.append("Fully automated. No discretion. No screen time.")
     lines.append("")
     lines.append("🔗 Copy on Bitget — /challenge")
