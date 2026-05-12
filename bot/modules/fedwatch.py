@@ -44,14 +44,21 @@ ET_TZ       = ZoneInfo("America/New_York")
 
 ALERT_OFFSETS = [
     ("T-24h", timedelta(hours=24)),
-    ("T-1h",  timedelta(hours=1)),
-    ("T-10m", timedelta(minutes=10)),
+    ("T-15m", timedelta(minutes=15)),
 ]
 
-REACTION_WINDOW_MIN = 10
+# Two reaction windows: immediate spike (30min) + confirmation (2h)
+REACTION_WINDOWS = [
+    ("T+30m",  timedelta(minutes=30)),
+    ("T+2h",   timedelta(hours=2)),
+]
+
 REACTION_THRESH_PC  = 0.5
 BTC_SYM = "BTCUSDT_UMCBL"
 ETH_SYM = "ETHUSDT_UMCBL"
+
+# Only high-impact events get the full 3-stage briefing cycle
+HIGH_IMPACT_CATEGORIES = {"FOMC", "CPI", "NFP", "ECB", "PPI"}
 
 # BLS series IDs for economic data (free, no key required)
 BLS_CPI_SERIES  = "CUSR0000SA0"    # CPI All Urban Consumers
@@ -68,7 +75,8 @@ STATE = {
     "alert_queue":     [],
     "reaction_queue":  [],
     "fired_alerts":    set(),   # set of (event_id, label) already sent
-    "pre_prices":      {},
+    "fired_reactions": set(),   # set of (event_id, window_label) already sent
+    "pre_prices":      {},      # ev_id → {"btc": float, "eth": float}
     "warned":          False,
     "source_ok":       False,
     "last_refresh":    None,
@@ -371,6 +379,9 @@ def _rebuild_queues():
     for ev in STATE["events"]:
         if ev["start"] <= now:
             continue
+        # Only high-impact events get full 3-stage cycle
+        if ev.get("category") not in HIGH_IMPACT_CATEGORIES:
+            continue
         ev_id = _event_id(ev)
 
         for label, delta in ALERT_OFFSETS:
@@ -378,9 +389,16 @@ def _rebuild_queues():
             if when > now:
                 alerts.append({"when": when, "label": label, "event": ev, "event_id": ev_id})
 
-        react_when = ev["start"] + timedelta(minutes=REACTION_WINDOW_MIN)
-        if react_when > now:
-            reactions.append({"when": react_when, "event": ev, "event_id": ev_id})
+        # Schedule both reaction windows (T+30min, T+2h)
+        for window_label, delta in REACTION_WINDOWS:
+            react_when = ev["start"] + delta
+            if react_when > now:
+                reactions.append({
+                    "when":     react_when,
+                    "window":   window_label,
+                    "event":    ev,
+                    "event_id": ev_id,
+                })
 
     alerts.sort(key=lambda a: a["when"])
     reactions.sort(key=lambda a: a["when"])
@@ -391,12 +409,68 @@ def _rebuild_queues():
 
 # ─── Pre-event price capture ─────────────────────────────────────────────────
 
+# ─── OpenAI helper for pre-event briefs ──────────────────────────────────────
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def _ai_pre_event_brief(ev: dict) -> dict:
+    """
+    Generate AI analyst view for pre-event brief.
+    Returns dict with: consensus, scenarios (bull/neutral/bear), trader_notes
+    """
+    if not OPENAI_API_KEY:
+        return {}
+
+    category = ev.get("category", "")
+    title    = ev.get("title", "")
+
+    prompt = f"""You are a macro analyst writing a pre-event brief for crypto traders.
+Event: {title}
+Category: {category}
+Date: {ev['start'].strftime('%A %b %d, %Y at %H:%M UTC')}
+
+Generate a concise pre-event brief in JSON format with these fields:
+{{
+  "consensus": "1-2 sentences on what markets expect (consensus view, key numbers if applicable)",
+  "scenario_bullish": "1 short sentence on what triggers bullish reaction for crypto",
+  "scenario_neutral": "1 short sentence on what would be priced-in / muted reaction",
+  "scenario_bearish": "1 short sentence on what triggers bearish reaction for crypto",
+  "trader_note": "1 short tactical note for crypto traders (history of similar events, what to watch)"
+}}
+
+Be specific. No fluff. No emojis. No disclaimers. JSON only."""
+
+    try:
+        import requests as _req
+        import json
+        r = _req.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={
+                "model":       OPENAI_MODEL,
+                "temperature": 0.4,
+                "max_tokens":  400,
+                "response_format": {"type": "json_object"},
+                "messages":    [{"role": "user", "content": prompt}],
+            },
+            timeout=15,
+        )
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        return json.loads(text)
+    except Exception as e:
+        log.warning(f"AI pre-event brief failed: {e}")
+        return {}
+
+
 def _capture_pre_prices(ev_id: str):
     try:
         btc = get_ticker(BTC_SYM)
         eth = get_ticker(ETH_SYM)
         if btc and eth:
             STATE["pre_prices"][ev_id] = {"btc": float(btc), "eth": float(eth)}
+            log.info(f"FedWatch: pre-event prices captured for {ev_id}")
     except Exception as e:
         log.warning(f"Pre-price capture failed: {e}")
 
@@ -418,6 +492,28 @@ def _cat_emoji(ev: dict) -> str:
 
 # ─── Alert sending ────────────────────────────────────────────────────────────
 
+def _send_to_both(msg: str):
+    """Send to private group AND public channel."""
+    send_text(msg)
+    public_id = os.getenv("PUBLIC_CHAT_ID", "")
+    tg_token  = os.getenv("TELEGRAM_TOKEN", "")
+    if public_id and tg_token:
+        try:
+            import requests as _req
+            _req.post(
+                f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                json={
+                    "chat_id":      public_id,
+                    "text":         msg,
+                    "parse_mode":   "Markdown",
+                    "disable_web_page_preview": True,
+                },
+                timeout=10,
+            )
+        except Exception as e:
+            log.warning(f"FedWatch public send failed: {e}")
+
+
 def _send_alert(alert: dict):
     ev      = alert["event"]
     label   = alert["label"]
@@ -430,74 +526,161 @@ def _send_alert(alert: dict):
 
     emoji    = _cat_emoji(ev)
     category = ev.get("category", "")
+    title    = ev.get("title", "")
 
-    lines = [
-        f"{emoji} [FedWatch] {label} — {ev['title']}",
-        f"🕒 {_fmt(ev['start'])}",
-        f"📍 {ev.get('location', '')}",
-    ]
+    # ── T-24h: Full pre-event brief with AI consensus + scenarios ──────────
+    if label == "T-24h":
+        lines = [
+            f"{emoji} *FedWatch — Event Setup*",
+            f"📅 *{title}* in 24h",
+            f"🕒 {_fmt(ev['start'])}",
+            "",
+        ]
 
-    # Rate probability for FOMC events only (not relevant for CPI/NFP)
-    if category == "FOMC" and label in ("T-1h", "T-10m"):
+        brief = _ai_pre_event_brief(ev)
+        if brief:
+            lines += [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "📊 *Market Expectations*",
+                f"_{brief.get('consensus', '')}_",
+                "",
+            ]
+
+            if category == "FOMC":
+                lines.append(_rate_prob_line())
+                lines.append("")
+
+            lines += [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "🎯 *Scenarios*",
+                f"🟢 *Bullish:* {brief.get('scenario_bullish', '—')}",
+                f"⚪ *Neutral:* {brief.get('scenario_neutral', '—')}",
+                f"🔴 *Bearish:* {brief.get('scenario_bearish', '—')}",
+                "",
+            ]
+
+            note = brief.get('trader_note', '')
+            if note:
+                lines += [
+                    "━━━━━━━━━━━━━━━━━━━━━━━━",
+                    "📌 *Trader Note*",
+                    f"_{note}_",
+                    "",
+                ]
+
+            lines.append("_AI analyst view. Verify with primary sources._")
+        else:
+            if category == "FOMC":
+                lines.append(_rate_prob_line())
+            lines.append("_High-impact event ahead — expect volatility._")
+
+        _send_to_both("\n".join(lines))
+        return
+
+    # ── T-15m: Quick final reminder ────────────────────────────────────────
+    if label == "T-15m":
+        lines = [
+            f"⚠️ *{title}* in 15 minutes",
+            f"🕒 {_fmt(ev['start'])}",
+        ]
+        if category == "FOMC":
+            lines.append("")
+            lines.append(_rate_prob_line())
         lines.append("")
-        lines.append(_rate_prob_line())
+        lines.append("_Strap in._ 🎢")
 
-    # Pre-meeting bias summary for all macro events at T-1h
-    if label == "T-1h":
-        if category in ("CPI", "NFP", "PPI"):
-            lines.append("")
-            lines.append(f"⚠️ High-impact release — expect BTC/ETH volatility at open")
-        elif category == "ECB":
-            lines.append("")
-            lines.append(f"🇪🇺 ECB decision can move EUR pairs and crypto risk appetite")
-
-    send_text("\n".join(filter(None, lines)))
-
-    # Capture prices at T-10m for post-event reaction
-    if label == "T-10m":
+        _send_to_both("\n".join(lines))
         _capture_pre_prices(ev_id)
+        return
 
 
 # ─── Post-event reaction ─────────────────────────────────────────────────────
 
-def _send_reaction(ev: dict, ev_id: str):
+def _send_reaction(ev: dict, ev_id: str, window_label: str = "T+30m"):
+    """Send post-event market reaction analysis.
+
+    window_label: 'T+30m' (immediate spike) or 'T+2h' (confirmation move)
+    """
+    fire_key = (ev_id, window_label)
+    if fire_key in STATE["fired_reactions"]:
+        return
+    STATE["fired_reactions"].add(fire_key)
+
     ref = STATE["pre_prices"].get(ev_id)
     if not ref:
+        log.warning(f"FedWatch: no pre-prices for {ev_id} — skipping {window_label} reaction")
         return
 
     try:
         btc_now = float(get_ticker(BTC_SYM))
         eth_now = float(get_ticker(ETH_SYM))
-    except Exception:
+    except Exception as e:
+        log.warning(f"FedWatch reaction price fetch failed: {e}")
         return
 
     def pct(now, before):
         return (now - before) / before * 100 if before else 0
 
     def tag(pc):
-        if pc >= REACTION_THRESH_PC:   return "🟢 Bullish"
-        if pc <= -REACTION_THRESH_PC:  return "🔴 Bearish"
-        return "🔵 Neutral"
+        if pc >= REACTION_THRESH_PC:   return "🟢"
+        if pc <= -REACTION_THRESH_PC:  return "🔴"
+        return "⚪"
 
     btc_pc = pct(btc_now, ref["btc"])
     eth_pc = pct(eth_now, ref["eth"])
     emoji  = _cat_emoji(ev)
 
+    # Generate verdict
+    avg_pc = (btc_pc + eth_pc) / 2
+    if avg_pc >= 1.0:
+        verdict = "🟢 *BULLISH MARKET RESPONSE*"
+        verdict_note = "Risk-on confirmed."
+    elif avg_pc <= -1.0:
+        verdict = "🔴 *BEARISH MARKET RESPONSE*"
+        verdict_note = "Risk-off — defensive flow."
+    elif abs(avg_pc) < 0.3:
+        verdict = "⚪ *MUTED REACTION*"
+        verdict_note = "Already priced in. No surprise."
+    elif avg_pc > 0:
+        verdict = "🟡 *MILDLY BULLISH*"
+        verdict_note = "Slight risk-on tilt."
+    else:
+        verdict = "🟡 *MILDLY BEARISH*"
+        verdict_note = "Slight risk-off tilt."
+
+    # Window-specific framing
+    if window_label == "T+30m":
+        section_title = "📊 *Initial Reaction (30 min)*"
+        footer_note = "_Watch for follow-through over next 90 min._"
+    else:
+        section_title = "📊 *Confirmation (2 hours)*"
+        # Compare with what T+30m showed
+        footer_note = "_Real move confirmed. Initial spike vs sustained move tells the story._"
+
     lines = [
-        f"{emoji} [FedWatch] Market Reaction — {ev['title']}",
+        f"{emoji} *FedWatch — {window_label} Post-Event*",
+        f"📅 {ev['title']}",
         f"🕒 {_fmt(ev['start'])}",
         "",
-        f"BTC: {btc_pc:+.2f}%  {tag(btc_pc)}",
-        f"ETH: {eth_pc:+.2f}%  {tag(eth_pc)}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        section_title,
+        f"₿ BTC: `{btc_pc:+.2f}%`  {tag(btc_pc)}",
+        f"Ξ ETH: `{eth_pc:+.2f}%`  {tag(eth_pc)}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🤖 Verdict: {verdict}",
+        f"_{verdict_note}_",
     ]
 
     # For FOMC: add updated rate probability (post-decision)
-    if ev.get("category") == "FOMC" and "Statement" in ev["title"]:
+    if ev.get("category") == "FOMC" and window_label == "T+2h":
         lines.append("")
         lines.append(_rate_prob_line())
-        lines.append("ℹ️ Rate probability now reflects post-decision market pricing")
+        lines.append("_Rate probability now reflects post-decision pricing._")
 
-    send_text("\n".join(lines))
+    lines += ["", footer_note]
+
+    _send_to_both("\n".join(lines))
 
 
 # ─── poll_once — called by APScheduler ───────────────────────────────────────
@@ -524,7 +707,7 @@ def poll_once():
     # Fire due reactions
     while STATE["reaction_queue"] and now >= STATE["reaction_queue"][0]["when"]:
         nxt = STATE["reaction_queue"].pop(0)
-        _send_reaction(nxt["event"], nxt["event_id"])
+        _send_reaction(nxt["event"], nxt["event_id"], nxt.get("window", "T+30m"))
 
     if fired_any:
         log.info("Alerts fired this poll")
