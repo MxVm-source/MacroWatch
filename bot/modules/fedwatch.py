@@ -25,7 +25,6 @@ import re
 import time
 import logging
 import requests
-import feedparser
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
