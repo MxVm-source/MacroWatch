@@ -651,7 +651,7 @@ def show_intel(modules: dict):
 def send_weekly_intel(modules: dict):
     """
     Wednesday 09:00 UTC scheduled Intel Deep Dive.
-    Fires to BOTH private group and public channel, then appends BTC heatmap.
+    Fires to BOTH private group and public channel.
     """
     import os as _os
     import requests as _req
@@ -686,39 +686,6 @@ def send_weekly_intel(modules: dict):
             )
         except Exception as e:
             log.warning(f"WeeklyIntel public send failed: {e}")
-
-    # Append BTC heatmap to BOTH channels — single Apify fetch, sent twice
-    try:
-        from bot.modules import heatmapwatch
-        result = heatmapwatch._fetch_heatmap("BTC", timeframe="24h")
-        if result:
-            # Send to private group
-            caption_priv = (
-                f"🔥 *BTC Liquidation Heatmap (24h)*\n"
-                f"_Source: CoinGlass · {now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
-                f"Yellow/red = large liquidation clusters.\n"
-                f"Price often sweeps these zones."
-            )
-            heatmapwatch._send_photo(
-                heatmapwatch.TELEGRAM_CHAT_ID, result["image_url"], caption_priv
-            )
-
-            # Send to public channel
-            if PUBLIC_CHAT_ID:
-                caption_pub = (
-                    f"🔥 *Infinex Capital — BTC Liquidation Heatmap (24h)*\n"
-                    f"_Intelligence provided by MacroWatch 🧠_\n\n"
-                    f"_Source: CoinGlass · {now.strftime('%b %d, %Y')}_\n\n"
-                    f"Yellow/red zones show where liquidation clusters sit. "
-                    f"Use this map alongside the intel above to plan the next 48h."
-                )
-                heatmapwatch._send_photo(
-                    PUBLIC_CHAT_ID, result["image_url"], caption_pub
-                )
-        else:
-            log.warning("WeeklyIntel heatmap fetch returned no image")
-    except Exception as e:
-        log.warning(f"WeeklyIntel heatmap append failed: {e}")
 
     STATE["last_intel_utc"] = now
     log.info("WeeklyIntel (Wed) sent ✅")
