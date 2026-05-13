@@ -35,12 +35,8 @@ from bot.utils import send_text, get_updates
 
 
 import bot.modules.fedwatch        as fedwatch
-import bot.modules.cryptowatch     as cryptowatch
-import bot.modules.cryptowatch_daily as cryptowatch_daily
 import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.correlwatch     as correlwatch
-from bot.modules.pnlcard import send_card as send_pnl_card
-from bot.modules.weeklyimage import send_weekly_image
 import bot.modules.whalewatch      as whalewatch
 import bot.modules.stratwatch      as stratwatch
 import bot.modules.challengewatch  as challengewatch
@@ -325,37 +321,19 @@ def _poll_positions():
                     if s:
                         streak_str = s
 
-                # ── Try image card first, fall back to text ──────────────
-                card_sent = False
-                if entry and last_px:
-                    try:
-                        h_held, rem = divmod(int((datetime.now(timezone.utc) - opened_at).total_seconds()), 3600) if opened_at else (0, 0)
-                        hold_str = f"{h_held}h {rem // 60:02d}m" if opened_at else "—"
-                        card_sent = send_pnl_card(
-                            pair    = sym,
-                            side    = prev_side,
-                            entry   = entry,
-                            exit_px = last_px,
-                            pnl_pct = leveraged,
-                            hold    = hold_str,
-                            streak  = streak_str,
-                        )
-                    except Exception as ce:
-                        log.warning(f"PnL card failed: {ce}")
-
-                if not card_sent:
-                    streak_line = f"\n{streak_str}" if streak_str else ""
-                    send_text(
-                        f"🔱 *PrimeWatch — Position Closed*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Pair: {sym}\n"
-                        f"Side: {prev_emoji} {prev_side}"
-                        f"{pnl_pct}"
-                        f"{duration}"
-                        f"{streak_line}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🕐 {iso_utc_now()}"
-                    )
+                # ── Text alert (PnL card removed for memory) ──────────────
+                streak_line = f"\n{streak_str}" if streak_str else ""
+                send_text(
+                    f"🔱 *PrimeWatch — Position Closed*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Pair: {sym}\n"
+                    f"Side: {prev_emoji} {prev_side}"
+                    f"{pnl_pct}"
+                    f"{duration}"
+                    f"{streak_line}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🕐 {iso_utc_now()}"
+                )
 
                 # ── Public channel post ───────────────────────────────────
                 if PUBLIC_CHAT_ID and entry and last_px:
@@ -605,36 +583,14 @@ def _send_weekly_perf():
         except Exception as e:
             trades_section = f"\nTrade history unavailable: {str(e)[:80]}"
 
-    # ── Send image first, fall back to text ────────────────────────────────
-    # Parse eth_chg float from eth_line if available
-    _eth_chg_val = None
-    try:
-        import re as _re
-        _m = _re.search(r"([+-][\d.]+)%", eth_line)
-        if _m:
-            _eth_chg_val = float(_m.group(1))
-    except Exception:
-        pass
-
-    _img_sent = False
-    try:
-        _img_sent = send_weekly_image(
-            trades     = closed if BITGET_API_KEY and closed else [],
-            week_start = week_start_str,
-            week_end   = week_end_str,
-            eth_chg    = _eth_chg_val,
-        )
-    except Exception as _ie:
-        log.warning(f"Weekly image failed: {_ie}")
-
-    if not _img_sent:
-        send_text(
-            f"🔱 *PrimeWatch — Weekly Recap*\n"
-            f"📅 {week_start_str} → {week_end_str}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{eth_line}"
-            f"{trades_section}"
-        )
+    # ── Text-only weekly recap (image module removed for memory) ───────────
+    send_text(
+        f"🔱 *PrimeWatch — Weekly Recap*\n"
+        f"📅 {week_start_str} → {week_end_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{eth_line}"
+        f"{trades_section}"
+    )
 
 
 def _job_monthly_perf():
