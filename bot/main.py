@@ -50,7 +50,6 @@ import bot.modules.optionswatch    as optionswatch
 import bot.modules.vixwatch        as vixwatch
 import bot.modules.intelwatch      as intelwatch
 import bot.modules.reportwatch     as reportwatch
-import bot.modules.heatmapwatch    as heatmapwatch
 
 log = logging.getLogger("main")
 
@@ -963,7 +962,7 @@ def start_scheduler():
     )
     print("🤖 Strategy Recap scheduled (Fri 09:00) ✅", flush=True)
 
-    # ── Weekly Intel Deep Dive — Wednesday 09:00 (intel + BTC heatmap)
+    # ── Weekly Intel Deep Dive — Wednesday 09:00
     SCHED.add_job(
         _job_weekly_intel, "cron", day_of_week="wed", hour=9, minute=0,
         id="weekly_intel", max_instances=1,
@@ -1068,7 +1067,7 @@ def start_scheduler():
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
     print("💸 FundingWatch · 📊 OIWatch · ⚙️ OptionsWatch ready ✅", flush=True)
-    print("🔥 HeatmapWatch · 🧠 IntelWatch ready ✅", flush=True)
+    print("🧠 IntelWatch ready ✅", flush=True)
     print("😱 VixWatch ready — /vix command live ✅", flush=True)
 
 
@@ -1292,9 +1291,7 @@ def _handle_command(text: str, text_raw: str):
             "/options_diag — Last expiry analysis\n"
             "/options_now — Run analysis now\n\n"
             "🧠 *IntelWatch*\n"
-            "/intel — Full market intelligence briefing\n"
-            "/heatmap [coin] [timeframe] — Liquidation heatmap\n"
-            "   (default BTC 24h, tfs: 12h/24h/3d/7d/30d/90d/180d/1y)\n\n"
+            "/intel — Full market intelligence briefing\n\n"
             "😱 *VixWatch*\n"
             "/vix — Current VIX reading + market context\n"
             "/vix_diag — Last value + alert state\n\n"
@@ -1452,22 +1449,6 @@ def _handle_command(text: str, text_raw: str):
             intelwatch.show_intel(_get_modules())
         except Exception as e:
             send_text(f"🧠 [IntelWatch] Error: {e}")
-        return
-
-    # ── /heatmap [coin] [timeframe] ──────────────────────────────────────────
-    if text.startswith("/heatmap"):
-        try:
-            parts     = text.split()
-            coin      = parts[1] if len(parts) > 1 else "BTC"
-            timeframe = parts[2] if len(parts) > 2 else "24h"
-            # Validate timeframe
-            valid_tfs = {"12h", "24h", "3d", "7d", "30d", "90d", "180d", "1y"}
-            if timeframe not in valid_tfs:
-                send_text(f"🔥 Invalid timeframe. Use: {', '.join(sorted(valid_tfs))}")
-                return
-            heatmapwatch.send_heatmap(coin, target="private", timeframe=timeframe)
-        except Exception as e:
-            send_text(f"🔥 [HeatmapWatch] Error: {e}")
         return
 
     # ── /vix / /vix_diag ─────────────────────────────────────────────────────
