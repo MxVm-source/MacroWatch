@@ -46,6 +46,7 @@ import bot.modules.optionswatch    as optionswatch
 import bot.modules.vixwatch        as vixwatch
 import bot.modules.intelwatch      as intelwatch
 import bot.modules.reportwatch     as reportwatch
+import bot.modules.tradewatch      as tradewatch
 
 log = logging.getLogger("main")
 
@@ -278,6 +279,9 @@ def _poll_positions():
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🕐 {iso_utc_now()}"
                 )
+                # TradeWatch — enriched plan (R:R, risk %, liq, ratchet).
+                # Delayed post so TP/SL bracket orders have time to land.
+                tradewatch.on_position_opened(sym)
 
             # Position closed
             elif prev["has_position"] and not cur["has_position"]:
@@ -1257,6 +1261,7 @@ def _handle_command(text: str, text_raw: str):
             "/status — Ascent ETH live strategy status\n"
             "/challenge — $1k → $100k challenge progress\n"
             "/report — Last 7 days trades + P&L\n"
+            "/plan — Post enriched plan for the open position (R:R, risk %, liq, ratchet)\n"
         )
         return
 
@@ -1445,6 +1450,16 @@ def _handle_command(text: str, text_raw: str):
             reportwatch.show_report()
         except Exception as e:
             send_text(f"🔱 [Report] Error: {e}")
+        return
+
+    # ── /plan ─────────────────────────────────────────────────────────────────
+    if text.startswith("/plan"):
+        try:
+            parts = text.split()
+            sym = parts[1].upper() if len(parts) > 1 else ""
+            tradewatch.show_plan(sym)
+        except Exception as e:
+            send_text(f"📋 [TradeWatch] Error: {e}")
         return
 
 
