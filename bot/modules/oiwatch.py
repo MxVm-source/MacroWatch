@@ -23,8 +23,8 @@ log = logging.getLogger("oiwatch")
 BITGET_BASE  = "https://api.bitget.com"
 PRODUCT_TYPE = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 
-ASSETS  = ["ETHUSDT", "BNBUSDT", "SOLUSDT"]
-TICKERS = {"ETHUSDT": "ETH", "BNBUSDT": "BNB", "SOLUSDT": "SOL"}
+ASSETS  = ["BTCUSDT", "ETHUSDT"]
+TICKERS = {"BTCUSDT": "BTC", "ETHUSDT": "ETH"}
 
 OI_SPIKE_PCT   = 5.0   # % change in OI to trigger alert
 COOLDOWN_MIN   = 240   # 4 hours per asset

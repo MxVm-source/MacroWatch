@@ -21,8 +21,8 @@ log = logging.getLogger("fundingwatch")
 BITGET_BASE    = "https://api.bitget.com"
 PRODUCT_TYPE   = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 
-ASSETS = ["ETHUSDT", "BNBUSDT", "SOLUSDT"]
-TICKERS = {"ETHUSDT": "ETH", "BNBUSDT": "BNB", "SOLUSDT": "SOL"}
+ASSETS  = ["BTCUSDT", "ETHUSDT"]
+TICKERS = {"BTCUSDT": "BTC", "ETHUSDT": "ETH"}
 
 # Thresholds
 FUNDING_EXTREME_LONG  =  0.10   # % — above = overleveraged longs
