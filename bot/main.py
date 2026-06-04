@@ -54,6 +54,9 @@ STARTED_AT_UTC = datetime.now(timezone.utc)
 
 # ─── Public channel + Challenge config ───────────────────────────────────────
 PUBLIC_CHAT_ID       = os.getenv("PUBLIC_CHAT_ID", "")
+# Which account's closed trades are broadcast to the public channel.
+# Default "main" — personal/discretionary (elite) trades stay private.
+PUBLIC_ACCOUNT       = os.getenv("PUBLIC_ACCOUNT", "main").strip().lower()
 CHALLENGE_START_USD  = float(os.getenv("CHALLENGE_START_USD", "1000.00"))
 CHALLENGE_TARGET_USD = float(os.getenv("CHALLENGE_TARGET_USD", "100000"))
 CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
@@ -79,14 +82,28 @@ def send_public(text: str):
 from bot.datafeed_bitget import (
     _fetch_current_futures_position,
     _fetch_pending_tp_sl_orders,
+    _fetch_current_futures_position_elite,
+    _fetch_pending_tp_sl_orders_elite,
     _position_is_open,
     _to_float,
     iso_utc_now,
     BITGET_SYMBOLS,
+    BITGET_API_KEY,
+    ELITE_API_KEY,
     get_elite_usdt_balance,
 )
 
-_POS_SNAPSHOT: dict = {}   # { "BTCUSDT": { has_position, side, size, entry, tp, sl }, ... }
+# Accounts PositionWatch polls. Each entry: (label, position_fetcher, order_fetcher).
+# Creds-gated so an unconfigured account is skipped silently (no 10s log spam).
+def _active_accounts():
+    accts = []
+    if BITGET_API_KEY:
+        accts.append(("main",  _fetch_current_futures_position,       _fetch_pending_tp_sl_orders))
+    if ELITE_API_KEY:
+        accts.append(("elite", _fetch_current_futures_position_elite, _fetch_pending_tp_sl_orders_elite))
+    return accts
+
+_POS_SNAPSHOT: dict = {}   # keyed "acct:SYMBOL" → { has_position, side, size, entry, tp, sl }
 _POS_INITIALISED = False
 
 # ─── Milestone tracker ───────────────────────────────────────────────────────
@@ -232,11 +249,14 @@ def _poll_positions():
 
     symbols = BITGET_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
 
-    for sym in symbols:
+    for acct, fetch_pos, fetch_orders in _active_accounts():
+      for sym in symbols:
         sym = sym.strip().upper()
+        key = f"{acct}:{sym}"
+        acct_tag = f" ({acct})"
         try:
-            pos    = _fetch_current_futures_position(sym)
-            orders = _fetch_pending_tp_sl_orders(sym)
+            pos    = fetch_pos(sym)
+            orders = fetch_orders(sym)
             tps    = sorted([_to_float(x) for x in (orders.get("tp") or [])])
             sls    = sorted([_to_float(x) for x in (orders.get("sl") or [])])
             is_open = _position_is_open(pos)
@@ -251,15 +271,15 @@ def _poll_positions():
                 "sl":    sls,
             }
 
-            prev = _POS_SNAPSHOT.get(sym)
+            prev = _POS_SNAPSHOT.get(key)
 
             # First run — seed baseline silently
             if not _POS_INITIALISED:
-                _POS_SNAPSHOT[sym] = cur
+                _POS_SNAPSHOT[key] = cur
                 continue
 
             if prev is None:
-                _POS_SNAPSHOT[sym] = cur
+                _POS_SNAPSHOT[key] = cur
                 continue
 
             # ── Detect changes ───────────────────────────────────────────
@@ -269,7 +289,7 @@ def _poll_positions():
             if not prev["has_position"] and cur["has_position"]:
                 cur["opened_at"] = datetime.now(timezone.utc)
                 send_text(
-                    f"🔱 *PrimeWatch — Position Opened*\n"
+                    f"🔱 *PrimeWatch — Position Opened*{acct_tag}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"Pair: {sym}\n"
                     f"Side: {side_emoji} {cur['side']}\n"
@@ -281,7 +301,7 @@ def _poll_positions():
                 )
                 # TradeWatch — enriched plan (R:R, risk %, liq, ratchet).
                 # Delayed post so TP/SL bracket orders have time to land.
-                tradewatch.on_position_opened(sym)
+                tradewatch.on_position_opened(sym, account=acct)
 
             # Position closed
             elif prev["has_position"] and not cur["has_position"]:
@@ -328,7 +348,7 @@ def _poll_positions():
                 # ── Text alert (PnL card removed for memory) ──────────────
                 streak_line = f"\n{streak_str}" if streak_str else ""
                 send_text(
-                    f"🔱 *PrimeWatch — Position Closed*\n"
+                    f"🔱 *PrimeWatch — Position Closed*{acct_tag}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"Pair: {sym}\n"
                     f"Side: {prev_emoji} {prev_side}"
@@ -340,7 +360,9 @@ def _poll_positions():
                 )
 
                 # ── Public channel post ───────────────────────────────────
-                if PUBLIC_CHAT_ID and entry and last_px:
+                # Strategy account only — never broadcast personal/discretionary
+                # (elite) trades to the public copy-trading channel.
+                if PUBLIC_CHAT_ID and entry and last_px and acct == PUBLIC_ACCOUNT:
                     sign      = "+" if leveraged >= 0 else ""
                     pub_emoji = "🟢" if leveraged >= 0 else "🔴"
                     side_icon = "📈" if prev_side == "LONG" else "📉"
@@ -366,7 +388,7 @@ def _poll_positions():
                 for tp in prev_tps:
                     if tp not in cur_tps:
                         send_text(
-                            f"✅ *PrimeWatch — TP Hit*\n"
+                            f"✅ *PrimeWatch — TP Hit*{acct_tag}\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Pair: {sym}\n"
                             f"Side: {side_emoji} {cur['side']}\n"
@@ -379,7 +401,7 @@ def _poll_positions():
                 for sl in prev_sls:
                     if sl not in cur_sls and not cur["has_position"]:
                         send_text(
-                            f"❌ *PrimeWatch — SL Hit*\n"
+                            f"❌ *PrimeWatch — SL Hit*{acct_tag}\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Pair: {sym}\n"
                             f"Side was: {side_emoji} {prev['side']}\n"
@@ -387,10 +409,10 @@ def _poll_positions():
                             f"🕐 {iso_utc_now()}"
                         )
 
-            _POS_SNAPSHOT[sym] = cur
+            _POS_SNAPSHOT[key] = cur
 
         except Exception as e:
-            print(f"[PositionWatch] Error for {sym}: {e}", flush=True)
+            print(f"[PositionWatch:{acct}] Error for {sym}: {e}", flush=True)
 
     # Mark initialised after first full pass
     if not _POS_INITIALISED:
