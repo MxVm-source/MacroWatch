@@ -528,3 +528,179 @@ def build_positions_and_orders_message(symbols: list[str] | None = None) -> str:
         return f"ℹ️ No open positions or pending TP/SL orders for: {', '.join(symbols)}."
 
     return "\n\n────────────\n\n".join(blocks)
+
+
+# ======================
+# Elite Account (Scalper — Challenge Tracker)
+# ======================
+# Add these to Render env vars:
+#   ELITE_API_KEY        = elite Bitget API key
+#   ELITE_API_SECRET     = elite Bitget API secret
+#   ELITE_API_PASSPHRASE = elite Bitget passphrase
+
+ELITE_API_KEY        = os.environ.get("ELITE_API_KEY", "")
+ELITE_API_SECRET     = os.environ.get("ELITE_API_SECRET", "")
+ELITE_API_PASSPHRASE = os.environ.get("ELITE_API_PASSPHRASE", "")
+
+
+def _signed_request_elite(method: str, request_path: str,
+                           params: dict | None = None,
+                           body: dict | None = None):
+    """Same as _signed_request but uses ELITE account credentials."""
+    if not (ELITE_API_KEY and ELITE_API_SECRET and ELITE_API_PASSPHRASE):
+        raise RuntimeError("Elite API credentials not set")
+
+    method    = method.upper()
+    timestamp = str(int(time.time() * 1000))
+    query     = ""
+
+    if params:
+        from urllib.parse import urlencode
+        query = urlencode(params)
+
+    body_str = json.dumps(body, separators=(",", ":")) if body else ""
+
+    if query:
+        prehash = timestamp + method + request_path + "?" + query + body_str
+        url     = f"{BITGET_BASE_URL}{request_path}?{query}"
+    else:
+        prehash = timestamp + method + request_path + body_str
+        url     = f"{BITGET_BASE_URL}{request_path}"
+
+    sign = hmac.new(
+        ELITE_API_SECRET.encode(),
+        prehash.encode(),
+        hashlib.sha256
+    ).digest()
+
+    headers = {
+        "ACCESS-KEY":        ELITE_API_KEY,
+        "ACCESS-SIGN":       base64.b64encode(sign).decode(),
+        "ACCESS-TIMESTAMP":  timestamp,
+        "ACCESS-PASSPHRASE": ELITE_API_PASSPHRASE,
+        "Content-Type":      "application/json",
+    }
+
+    if method == "GET":
+        r = requests.get(url, headers=headers, timeout=10)
+    else:
+        r = requests.post(url, headers=headers, data=body_str, timeout=10)
+
+    if r.status_code != 200:
+        raise RuntimeError(f"Elite Bitget HTTP {r.status_code}: {r.text}")
+
+    data = r.json()
+    if data.get("code") != "00000":
+        raise RuntimeError(f"Elite Bitget API error {data.get('code')}: {data.get('msg')}")
+
+    return data
+
+
+def get_elite_usdt_balance() -> float | None:
+    """
+    Fetch total USDT balance on the ELITE account (scalper / challenge account).
+    Returns usdtEquity as float, or None on error.
+    Used by the challenge milestone tracker in main.py.
+    """
+    try:
+        res = _signed_request_elite(
+            "GET",
+            "/api/v2/mix/account/accounts",
+            params={
+                "productType": BITGET_PRODUCT_TYPE,
+                "marginCoin":  "USDT",
+            }
+        )
+        accounts = res.get("data") or []
+        if isinstance(accounts, dict):
+            accounts = [accounts]
+
+        for acc in accounts:
+            coin = (acc.get("marginCoin") or acc.get("coin") or "").upper()
+            if coin == "USDT":
+                equity = acc.get("usdtEquity") or acc.get("available") or "0"
+                return round(float(equity), 2)
+
+        return None
+    except Exception as e:
+        print(f"[Elite] Balance fetch error: {e}", flush=True)
+        return None
+
+# ======================
+# ELITE account position / order fetchers
+# Mirror the main-account fetchers above but sign with ELITE_* creds.
+# Added so PositionWatch can detect trades taken on the elite account.
+# ======================
+
+def _fetch_all_futures_positions_elite() -> list[dict]:
+    params = {
+        "productType": BITGET_PRODUCT_TYPE,
+        "marginCoin":  BITGET_MARGIN_COIN,
+    }
+    res = _signed_request_elite(
+        "GET",
+        "/api/v2/mix/position/all-position",
+        params=params,
+        body=None,
+    )
+    data = res.get("data")
+    positions = _as_list(data)
+    if len(positions) == 1 and isinstance(positions[0], dict):
+        for k in ("positions", "positionList", "list", "data"):
+            if isinstance(positions[0].get(k), list):
+                positions = positions[0][k]
+                break
+    return [p for p in positions if isinstance(p, dict)]
+
+
+def _find_position_for_symbol_elite(symbol: str) -> dict | None:
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return None
+    positions = _fetch_all_futures_positions_elite()
+    for p in positions:
+        if (p.get("symbol") or "").upper() == symbol:
+            return p
+    for p in positions:
+        for k in ("instId", "instrumentId", "symbolName"):
+            if (p.get(k) or "").upper() == symbol:
+                return p
+    return None
+
+
+def _fetch_current_futures_position_elite(symbol: str):
+    return _find_position_for_symbol_elite(symbol)
+
+
+def _fetch_pending_tp_sl_orders_elite(symbol: str):
+    params = {
+        "planType":    "profit_loss",
+        "productType": BITGET_PRODUCT_TYPE,
+        "symbol":      symbol,
+        "limit":       "100",
+    }
+    res = _signed_request_elite(
+        "GET",
+        "/api/v2/mix/order/orders-plan-pending",
+        params=params,
+        body=None,
+    )
+    data = res.get("data") or {}
+    entrusted = data.get("entrustedList") or []
+    tps, sls = [], []
+    for o in entrusted:
+        if (o.get("symbol", "") or "").upper() != symbol.upper():
+            continue
+        tp = o.get("stopSurplusTriggerPrice")
+        if tp:
+            try:
+                tps.append(float(tp))
+            except Exception:
+                pass
+        sl = o.get("stopLossTriggerPrice")
+        if sl:
+            try:
+                sls.append(float(sl))
+            except Exception:
+                pass
+    return {"tp": tps, "sl": sls}

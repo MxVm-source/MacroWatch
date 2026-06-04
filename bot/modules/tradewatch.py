@@ -28,10 +28,20 @@ from bot.utils import send_text
 from bot.datafeed_bitget import (
     _fetch_current_futures_position,
     _fetch_pending_tp_sl_orders,
+    _fetch_current_futures_position_elite,
+    _fetch_pending_tp_sl_orders_elite,
     _position_is_open,
     _to_float,
     iso_utc_now,
+    BITGET_API_KEY,
+    ELITE_API_KEY,
 )
+
+# account label → (position_fetcher, order_fetcher)
+_ACCOUNTS = {
+    "main":  (_fetch_current_futures_position,       _fetch_pending_tp_sl_orders),
+    "elite": (_fetch_current_futures_position_elite, _fetch_pending_tp_sl_orders_elite),
+}
 
 log = logging.getLogger("tradewatch")
 
@@ -81,12 +91,13 @@ def compute_plan(side: str, entry: float, sl: float, tps: list,
 # ─── Message ─────────────────────────────────────────────────────────────────
 
 def build_plan_message(symbol: str, side: str, entry: float, size,
-                       lev: float, sl: float, tps: list, liq: float) -> str:
+                       lev: float, sl: float, tps: list, liq: float,
+                       account: str = "main") -> str:
     p = compute_plan(side, entry, sl, tps, lev, liq)
     side_emoji = "🟢" if side == "LONG" else "🔴"
 
     lines = [
-        f"📋 *TradeWatch — Plan*",
+        f"📋 *TradeWatch — Plan* ({account})",
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
         f"Pair: {symbol}",
         f"Side: {side_emoji} {side}   Lev: {lev:g}x",
@@ -138,14 +149,16 @@ def build_plan_message(symbol: str, side: str, entry: float, size,
 
 # ─── Entry points ──────────────────────────────────────────────────────────
 
-def _post_for_symbol(symbol: str):
-    """Re-poll the live position + bracket, then post the enriched plan."""
-    pos = _fetch_current_futures_position(symbol)
+def _post_for_symbol(symbol: str, account: str = "main"):
+    """Re-poll the live position + bracket on the given account, then post the plan."""
+    fetch_pos, fetch_orders = _ACCOUNTS.get(account, _ACCOUNTS["main"])
+
+    pos = fetch_pos(symbol)
     if not _position_is_open(pos):
-        log.info(f"TradeWatch: {symbol} no longer open, skipping plan")
+        log.info(f"TradeWatch: {symbol} ({account}) no longer open, skipping plan")
         return
 
-    orders = _fetch_pending_tp_sl_orders(symbol) or {}
+    orders = fetch_orders(symbol) or {}
     tps = sorted(_to_float(x) for x in (orders.get("tp") or []))
     sls = sorted(_to_float(x) for x in (orders.get("sl") or []))
 
@@ -160,23 +173,37 @@ def _post_for_symbol(symbol: str):
     # Order TPs in the direction price travels.
     tps = tps if side == "LONG" else sorted(tps, reverse=True)
 
-    send_text(build_plan_message(symbol, side, entry, size, lev, sl, tps, liq))
+    send_text(build_plan_message(symbol, side, entry, size, lev, sl, tps, liq, account))
 
 
-def on_position_opened(symbol: str):
+def on_position_opened(symbol: str, account: str = "main"):
     """
     Called by PositionWatch the moment it detects a new position.
     Schedules a delayed post so TP/SL bracket orders have time to land.
     """
     if not ENABLED:
         return
-    threading.Timer(DELAY_S, lambda: _safe(_post_for_symbol, symbol)).start()
+    threading.Timer(DELAY_S, lambda: _safe(_post_for_symbol, symbol, account)).start()
 
 
 def show_plan(symbol: str = ""):
-    """Manual /plan command — post immediately for the open position."""
+    """Manual /plan command — post the plan for an open position on either account."""
     sym = (symbol or os.getenv("INFINEX_SYMBOL", "ETHUSDT")).strip().upper()
-    _safe(_post_for_symbol, sym)
+    posted = False
+    for acct in ("elite", "main"):
+        if acct == "main"  and not BITGET_API_KEY:
+            continue
+        if acct == "elite" and not ELITE_API_KEY:
+            continue
+        try:
+            fetch_pos, _ = _ACCOUNTS[acct]
+            if _position_is_open(fetch_pos(sym)):
+                _safe(_post_for_symbol, sym, acct)
+                posted = True
+        except Exception as e:
+            log.warning(f"TradeWatch show_plan {acct}: {e}")
+    if not posted:
+        send_text(f"📋 [TradeWatch] No open {sym} position found on elite/main.")
 
 
 def _safe(fn, *a):
