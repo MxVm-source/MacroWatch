@@ -625,3 +625,96 @@ def get_elite_usdt_balance() -> float | None:
     except Exception as e:
         print(f"[Elite] Balance fetch error: {e}", flush=True)
         return None
+
+# ─── Elite position + bracket fetchers ────────────────────────────────────────
+# Mirrors of _fetch_current_futures_position / _fetch_pending_tp_sl_orders
+# but signed with the Elite account credentials. Used by TradeWatch to read
+# Maxime's discretionary book (the $1k → $100k LIVE Trading Challenge).
+
+def _fetch_all_futures_positions_elite() -> list[dict]:
+    """Elite-signed variant of _fetch_all_futures_positions."""
+    if not (ELITE_API_KEY and ELITE_API_SECRET and ELITE_API_PASSPHRASE):
+        return []
+    try:
+        params = {
+            "productType": BITGET_PRODUCT_TYPE,
+            "marginCoin":  BITGET_MARGIN_COIN,
+        }
+        res = _signed_request_elite(
+            "GET",
+            "/api/v2/mix/position/all-position",
+            params=params,
+            body=None,
+        )
+        data = res.get("data")
+        positions = _as_list(data)
+        if len(positions) == 1 and isinstance(positions[0], dict):
+            for k in ("positions", "positionList", "list", "data"):
+                if isinstance(positions[0].get(k), list):
+                    positions = positions[0][k]
+                    break
+        return [p for p in positions if isinstance(p, dict)]
+    except Exception as e:
+        print(f"[Elite] Positions fetch error: {e}", flush=True)
+        return []
+
+
+def _fetch_current_futures_position_elite(symbol: str) -> dict | None:
+    """Elite-signed variant of _fetch_current_futures_position."""
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return None
+    positions = _fetch_all_futures_positions_elite()
+
+    # strict symbol match
+    for p in positions:
+        if (p.get("symbol") or "").upper() == symbol:
+            return p
+    # fallback keys
+    for p in positions:
+        for k in ("instId", "instrumentId", "symbolName"):
+            if (p.get(k) or "").upper() == symbol:
+                return p
+    return None
+
+
+def _fetch_pending_tp_sl_orders_elite(symbol: str) -> dict:
+    """Elite-signed variant of _fetch_pending_tp_sl_orders."""
+    if not (ELITE_API_KEY and ELITE_API_SECRET and ELITE_API_PASSPHRASE):
+        return {"tp": [], "sl": []}
+    try:
+        params = {
+            "planType":    "profit_loss",
+            "productType": BITGET_PRODUCT_TYPE,
+            "symbol":      symbol,
+            "limit":       "100",
+        }
+        res = _signed_request_elite(
+            "GET",
+            "/api/v2/mix/order/orders-plan-pending",
+            params=params,
+            body=None,
+        )
+        data      = res.get("data") or {}
+        entrusted = data.get("entrustedList") or []
+
+        tps, sls = [], []
+        for o in entrusted:
+            if (o.get("symbol", "") or "").upper() != symbol.upper():
+                continue
+            tp = o.get("stopSurplusTriggerPrice")
+            if tp:
+                try:
+                    tps.append(float(tp))
+                except Exception:
+                    pass
+            sl = o.get("stopLossTriggerPrice")
+            if sl:
+                try:
+                    sls.append(float(sl))
+                except Exception:
+                    pass
+        return {"tp": tps, "sl": sls}
+    except Exception as e:
+        print(f"[Elite] TP/SL fetch error: {e}", flush=True)
+        return {"tp": [], "sl": []}
