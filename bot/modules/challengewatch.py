@@ -1,14 +1,15 @@
 # bot/modules/challengewatch.py
 """
-ChallengeWatch — $1k → $100k Challenge
+ChallengeWatch — $1k → $100k LIVE Trading Challenge
 
-Tracks strategy performance using real closed trade P&L from Bitget,
-compounded from a virtual starting capital of $1,000.
+Tracks Maxime's live discretionary trading performance using real closed
+trade P&L from Bitget, compounded from a virtual starting capital of $1,000.
 
 - Does NOT use account balance (avoids capital injection distortion)
 - Fees already deducted in Bitget's realizedPL field
 - Compounds each closed trade from CHALLENGE_START_DATE onward
-- Works on ETH
+- Tracks any pair (BTC/ETH/SOL/etc.) — discretionary, not systematic
+- Separate from Ascent ETH (systematic strategy, runs on its own account)
 
 Command: /challenge
 """
@@ -32,7 +33,9 @@ VIRTUAL_START        = float(os.getenv("CHALLENGE_START_USD",  "1000.00"))
 CHALLENGE_TARGET     = float(os.getenv("CHALLENGE_TARGET_USD", "100000.00"))
 CHALLENGE_START_DATE = os.getenv("CHALLENGE_START_DATE",       "2026-06-01")
 CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
-SYMBOLS              = ["ETHUSDT"]
+# Discretionary challenge — track any pair the trader uses
+# Common pairs covered; bot.utils _fetch_closed_trades can hit each symbol
+SYMBOLS              = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 BITGET_URL = (
     "https://www.bitget.com/copy-trading/futures-trader-v1/"
@@ -152,7 +155,7 @@ def build_challenge() -> str:
         lines = [
             "🚀 *OFFICIAL LAUNCH — June 1, 2026*",
             "",
-            "🎯 *$1k → $100k Challenge*",
+            "🎯 *$1k → $100k LIVE Trading Challenge*",
             f"⏳ Live in *{days_to_go} days*",
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -170,14 +173,15 @@ def build_challenge() -> str:
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━",
             "*What happens June 1:*",
-            "→ Ascent ETH goes live",
+            "→ Maxime's live discretionary trading begins",
             "→ Every closed trade compounds into the challenge",
             "→ Real PnL. Public. Logged. Auto-updated weekly.",
             "",
-            "_Capital loaded. Strategy armed._",
-            f"_Clock starts {start_str}._",
+            "_This is a discretionary trading challenge._",
+            "_Real trades, real risk — not a backtested system._",
+            "_Capital loaded. Clock starts {}._".format(start_str),
             "",
-            f"🔗 [Copy on Bitget]({BITGET_URL})",
+            f"🔗 [Follow on Bitget]({BITGET_URL})",
         ]
         return "\n".join(lines)
 
@@ -219,7 +223,7 @@ def build_challenge() -> str:
                 milestone_lines.append(f"⬜ ${ms:,.0f}")
 
     lines = [
-        "🎯 *$1k → $100k Challenge*",
+        "🎯 *$1k → $100k LIVE Trading Challenge*",
         f"📅 Day {max(days_running, 1)} — Started {start_str}",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -245,7 +249,10 @@ def build_challenge() -> str:
         f"Weekly avg:   `{gain_sign}${weekly_avg:,.2f}`",
         f"Est. target:  `{eta}`",
         "",
-        f"🔗 [Copy on Bitget]({BITGET_URL})",
+        "_Live discretionary trades by Maxime. Real risk, real PnL._",
+        "_Ascent ETH (systematic) runs separately — see /status._",
+        "",
+        f"🔗 [Follow on Bitget]({BITGET_URL})",
     ]
 
     return "\n".join(lines)
