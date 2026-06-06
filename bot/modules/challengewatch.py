@@ -20,7 +20,8 @@ from datetime import datetime, timezone, timedelta
 
 from bot.utils import send_text
 from bot.datafeed_bitget import (
-    _signed_request,
+    _signed_request_elite,
+    ELITE_API_KEY,
     _to_float,
     BITGET_PRODUCT_TYPE,
 )
@@ -47,16 +48,23 @@ BITGET_URL = (
 
 def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
     """
-    Fetch all filled closing orders across all strategy symbols
-    from start_dt to end_dt. Returns list of {pnl, date, symbol}.
+    Fetch all filled closing orders from the Elite/discretionary account.
+    The challenge tracks Maxime's live discretionary trading, NOT the
+    systematic Ascent ETH bot (which lives on the main account).
+
+    Returns list of {pnl, date, symbol}.
     """
+    if not ELITE_API_KEY:
+        log.warning("ChallengeWatch: ELITE_API_KEY not set — cannot fetch discretionary trades")
+        return []
+
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms   = int(end_dt.timestamp() * 1000)
     trades   = []
 
     for sym in SYMBOLS:
         try:
-            res = _signed_request(
+            res = _signed_request_elite(
                 "GET",
                 "/api/v2/mix/order/history",
                 params={
