@@ -276,3 +276,48 @@ def show_challenge():
     except Exception as e:
         log.exception(f"ChallengeWatch failed: {e}")
         send_text(f"🎯 [Challenge] ⚠️ Error: {str(e)[:200]}")
+
+
+def show_challenge_diag():
+    """Diagnostic — show raw Elite trade data so we can debug filter mismatches."""
+    if not ELITE_API_KEY:
+        send_text("🎯 [Diag] ELITE_API_KEY not set")
+        return
+
+    try:
+        now      = datetime.now(timezone.utc)
+        start_dt = datetime.strptime(CHALLENGE_START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms   = int(now.timestamp() * 1000)
+
+        lines = [f"🎯 *Challenge Diag* — Elite trades since {CHALLENGE_START_DATE}", ""]
+
+        for sym in SYMBOLS:
+            res = _signed_request_elite(
+                "GET",
+                "/api/v2/mix/order/history",
+                params={
+                    "symbol":      sym,
+                    "productType": BITGET_PRODUCT_TYPE,
+                    "startTime":   str(start_ms),
+                    "endTime":     str(end_ms),
+                    "limit":       "100",
+                }
+            )
+            orders = ((res.get("data") or {}).get("orderList") or [])
+            lines.append(f"*{sym}*: {len(orders)} raw orders")
+
+            # Show first 3 orders fully — to inspect the field values
+            for o in orders[:3]:
+                state      = o.get("state") or "—"
+                trade_side = o.get("tradeSide") or o.get("side") or "—"
+                pnl        = o.get("pnl") or o.get("realizedPL") or o.get("profit") or "—"
+                size       = o.get("size") or o.get("baseVolume") or "—"
+                lines.append(f"  • state=`{state}` tradeSide=`{trade_side}` pnl=`{pnl}` size=`{size}`")
+
+            lines.append("")
+
+        send_text("\n".join(lines))
+    except Exception as e:
+        log.exception(f"Diag failed: {e}")
+        send_text(f"🎯 [Diag] Error: {str(e)[:300]}")
