@@ -95,7 +95,7 @@ def _fetch_closed_trades() -> list:
     for sym in ASCENT_SYMBOLS:
         try:
             res = _signed_request(
-                "GET", "/api/v2/mix/order/history",
+                "GET", "/api/v2/mix/order/orders-history",
                 params={
                     "symbol":      sym,
                     "productType": BITGET_PRODUCT_TYPE,
@@ -104,13 +104,19 @@ def _fetch_closed_trades() -> list:
                     "limit":       "100",
                 }
             )
-            orders = ((res.get("data") or {}).get("orderList") or [])
+            # Bitget v2 returns data.entrustedList (NOT orderList)
+            orders = ((res.get("data") or {}).get("entrustedList") or [])
             for o in orders:
-                state      = (o.get("state") or "").lower()
+                # Bitget v2 fields: status (not state), totalProfits (not pnl/realizedPL)
+                status     = (o.get("status") or "").lower()
                 trade_side = (o.get("tradeSide") or o.get("side") or "").lower()
-                pnl_raw    = o.get("pnl") or o.get("realizedPL") or o.get("profit") or ""
+                pnl_raw    = (o.get("totalProfits")
+                              or o.get("pnl")
+                              or o.get("realizedPL")
+                              or o.get("profit")
+                              or "")
 
-                if state != "filled":
+                if status != "filled":
                     continue
                 if "close" not in trade_side and "reduce" not in trade_side:
                     continue
@@ -119,6 +125,8 @@ def _fetch_closed_trades() -> list:
                     pnl = float(pnl_raw)
                 except Exception:
                     continue
+                if pnl == 0:
+                    continue
 
                 try:
                     ctime = int(o.get("cTime") or o.get("uTime") or 0)
@@ -126,7 +134,7 @@ def _fetch_closed_trades() -> list:
                 except Exception:
                     date = "—"
 
-                side = (o.get("holdSide") or trade_side or "").upper()
+                side = (o.get("posSide") or o.get("holdSide") or trade_side or "").upper()
                 all_closed.append({"symbol": sym, "pnl": pnl, "date": date, "side": side})
         except Exception as e:
             log.warning(f"Closed trades fetch failed for {sym}: {e}")

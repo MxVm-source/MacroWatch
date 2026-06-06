@@ -66,7 +66,7 @@ def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
         try:
             res = _signed_request_elite(
                 "GET",
-                "/api/v2/mix/order/history",
+                "/api/v2/mix/order/orders-history",
                 params={
                     "symbol":      sym,
                     "productType": BITGET_PRODUCT_TYPE,
@@ -75,20 +75,31 @@ def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
                     "limit":       "100",
                 }
             )
-            orders = ((res.get("data") or {}).get("orderList") or [])
+            # Bitget v2 returns data.entrustedList (NOT orderList)
+            orders = ((res.get("data") or {}).get("entrustedList") or [])
 
             for o in orders:
-                state      = (o.get("state") or "").lower()
+                # Bitget v2 fields: status (not state), totalProfits (not pnl/realizedPL)
+                status     = (o.get("status") or "").lower()
                 trade_side = (o.get("tradeSide") or o.get("side") or "").lower()
-                pnl_raw    = o.get("pnl") or o.get("realizedPL") or o.get("profit") or ""
+                pnl_raw    = (o.get("totalProfits")
+                              or o.get("pnl")
+                              or o.get("realizedPL")
+                              or o.get("profit")
+                              or "")
 
-                if state != "filled":
+                if status != "filled":
                     continue
+                # Only count closing trades (open trades have 0 PnL anyway, but
+                # we want to be explicit and avoid double-counting)
                 if "close" not in trade_side and "reduce" not in trade_side:
                     continue
                 try:
                     pnl = float(pnl_raw)
                 except Exception:
+                    continue
+                # Skip zero-PnL (typically reduce-only fills that didn't realize)
+                if pnl == 0:
                     continue
 
                 try:
@@ -295,7 +306,7 @@ def show_challenge_diag():
         for sym in SYMBOLS:
             res = _signed_request_elite(
                 "GET",
-                "/api/v2/mix/order/history",
+                "/api/v2/mix/order/orders-history",
                 params={
                     "symbol":      sym,
                     "productType": BITGET_PRODUCT_TYPE,
@@ -304,16 +315,20 @@ def show_challenge_diag():
                     "limit":       "100",
                 }
             )
-            orders = ((res.get("data") or {}).get("orderList") or [])
+            orders = ((res.get("data") or {}).get("entrustedList") or [])
             lines.append(f"*{sym}*: {len(orders)} raw orders")
 
             # Show first 3 orders fully — to inspect the field values
             for o in orders[:3]:
-                state      = o.get("state") or "—"
+                status     = o.get("status") or "—"
                 trade_side = o.get("tradeSide") or o.get("side") or "—"
-                pnl        = o.get("pnl") or o.get("realizedPL") or o.get("profit") or "—"
+                pnl        = (o.get("totalProfits")
+                              or o.get("pnl")
+                              or o.get("realizedPL")
+                              or o.get("profit")
+                              or "—")
                 size       = o.get("size") or o.get("baseVolume") or "—"
-                lines.append(f"  • state=`{state}` tradeSide=`{trade_side}` pnl=`{pnl}` size=`{size}`")
+                lines.append(f"  • status=`{status}` tradeSide=`{trade_side}` totalProfits=`{pnl}` size=`{size}`")
 
             lines.append("")
 
