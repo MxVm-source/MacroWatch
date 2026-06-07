@@ -21,7 +21,6 @@ from bot.datafeed_bitget import (
     _fetch_current_futures_position,
     _position_is_open,
     _to_float,
-    get_elite_usdt_balance,
     BITGET_BASE_URL,
     BITGET_PRODUCT_TYPE,
 )
@@ -246,33 +245,30 @@ def build_status() -> str:
     now              = datetime.now(timezone.utc)
     next_cycle, mins = _next_4h_utc()
 
-    # Account balance — try elite first, fall back to main account
+    # Account balance — Ascent ETH lives on the BITGET_API_KEY account
+    # (currently the sub-account, eventually sub/elite). Never read Elite here —
+    # Elite is Maxime's discretionary LIVE Trading book, separate product.
     balance_str = "—"
     try:
-        from bot.datafeed_bitget import ELITE_API_KEY as _ELITE_KEY
-        if _ELITE_KEY:
-            bal = get_elite_usdt_balance()
-        else:
-            # Fall back to main account balance
-            from bot.datafeed_bitget import _signed_request, BITGET_PRODUCT_TYPE as _PT
-            res = _signed_request("GET", "/api/v2/mix/account/accounts",
-                                  params={"productType": _PT, "marginCoin": "USDT"})
-            accounts = res.get("data") or []
-            if isinstance(accounts, dict):
-                accounts = [accounts]
-            bal = None
-            for acc in accounts:
-                coin = (acc.get("marginCoin") or acc.get("coin") or "").upper()
-                if coin == "USDT":
-                    bal = round(float(acc.get("usdtEquity") or acc.get("available") or 0), 2)
-                    break
-        if bal is not None and bal > 0:
+        from bot.datafeed_bitget import _signed_request, BITGET_PRODUCT_TYPE as _PT
+        res = _signed_request("GET", "/api/v2/mix/account/accounts",
+                              params={"productType": _PT, "marginCoin": "USDT"})
+        accounts = res.get("data") or []
+        if isinstance(accounts, dict):
+            accounts = [accounts]
+        bal = None
+        for acc in accounts:
+            coin = (acc.get("marginCoin") or acc.get("coin") or "").upper()
+            if coin == "USDT":
+                bal = round(float(acc.get("usdtEquity") or acc.get("available") or 0), 2)
+                break
+        if bal is not None:
             balance_str = f"${bal:,.2f}"
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"StratWatch balance fetch failed: {e}")
 
     lines = [
-        "🔱 *PrimeWatch — Live Status*",
+        "🤖 *Ascent ETH — Live Status*",
         f"🕐 {now.strftime('%Y-%m-%d %H:%M UTC')}",
         "",
         f"Bot: 🟢 Live  |  Balance: `{balance_str}`",

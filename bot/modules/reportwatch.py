@@ -1,9 +1,9 @@
 # bot/modules/reportwatch.py
 """
-ReportWatch — 7-day PrimeWatch trade report
+ReportWatch — 7-day Ascent ETH trade report
 
 Command: /report
-Shows last 7 days of closed trades across ETH/BNB/SOL with
+Shows last 7 days of closed Ascent ETH trades with
 win rate, net PnL, best/worst trade — designed to be shareable.
 """
 
@@ -80,7 +80,7 @@ def _fetch_trades(days: int = 7) -> list:
 
 def build_report() -> str:
     if not BITGET_API_KEY:
-        return "🔱 [PrimeWatch] ⚠️ API credentials not set."
+        return "🤖 [Ascent ETH] ⚠️ API credentials not set."
 
     now    = datetime.now(timezone.utc)
     trades = _fetch_trades(days=7)
@@ -90,7 +90,7 @@ def build_report() -> str:
 
     if not trades:
         return (
-            f"🔱 *PrimeWatch — 7-Day Report*\n"
+            f"🤖 *Ascent ETH — 7-Day Report*\n"
             f"📅 {week_start} → {week_end}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"No closed trades this week."
@@ -114,7 +114,7 @@ def build_report() -> str:
         trade_lines.append(f"{e} {t['symbol']}  {s}${t['pnl']:.2f}  —  {t['date']}")
 
     lines = [
-        f"🔱 *PrimeWatch — 7-Day Report*",
+        f"🤖 *Ascent ETH — 7-Day Report*",
         f"📅 {week_start} → {week_end}",
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
         f"",
@@ -133,7 +133,7 @@ def build_report() -> str:
         f"🏆 Best:   +${best['pnl']:.2f}  {best['symbol']}  {best['date']}",
         f"💀 Worst:  ${worst['pnl']:.2f}  {worst['symbol']}  {worst['date']}",
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"_PrimeWatch · ETH · BNB · SOL · 4H_",
+        f"_Ascent ETH · ETH · 4H · Sub-account_",
     ]
 
     return "\n".join(lines)
@@ -145,4 +145,4 @@ def show_report():
         send_text(msg)
     except Exception as e:
         log.exception(f"ReportWatch failed: {e}")
-        send_text(f"🔱 [Report] ⚠️ Error: {str(e)[:200]}")
+        send_text(f"🤖 [Ascent ETH] ⚠️ Error: {str(e)[:200]}")
