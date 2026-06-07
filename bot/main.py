@@ -269,7 +269,7 @@ def _poll_positions():
             if not prev["has_position"] and cur["has_position"]:
                 cur["opened_at"] = datetime.now(timezone.utc)
                 send_text(
-                    f"🔱 *PrimeWatch — Position Opened*\n"
+                    f"🤖 *Ascent ETH — Position Opened*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"Pair: {sym}\n"
                     f"Side: {side_emoji} {cur['side']}\n"
@@ -328,7 +328,7 @@ def _poll_positions():
                 # ── Text alert (PnL card removed for memory) ──────────────
                 streak_line = f"\n{streak_str}" if streak_str else ""
                 send_text(
-                    f"🔱 *PrimeWatch — Position Closed*\n"
+                    f"🤖 *Ascent ETH — Position Closed*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"Pair: {sym}\n"
                     f"Side: {prev_emoji} {prev_side}"
@@ -366,7 +366,7 @@ def _poll_positions():
                 for tp in prev_tps:
                     if tp not in cur_tps:
                         send_text(
-                            f"✅ *PrimeWatch — TP Hit*\n"
+                            f"✅ *Ascent ETH — TP Hit*\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Pair: {sym}\n"
                             f"Side: {side_emoji} {cur['side']}\n"
@@ -379,7 +379,7 @@ def _poll_positions():
                 for sl in prev_sls:
                     if sl not in cur_sls and not cur["has_position"]:
                         send_text(
-                            f"❌ *PrimeWatch — SL Hit*\n"
+                            f"❌ *Ascent ETH — SL Hit*\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Pair: {sym}\n"
                             f"Side was: {side_emoji} {prev['side']}\n"
@@ -589,7 +589,7 @@ def _send_weekly_perf():
 
     # ── Text-only weekly recap (image module removed for memory) ───────────
     send_text(
-        f"🔱 *PrimeWatch — Weekly Recap*\n"
+        f"🤖 *Ascent ETH — Weekly Recap*\n"
         f"📅 {week_start_str} → {week_end_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{eth_line}"
@@ -702,7 +702,7 @@ def _send_monthly_perf():
             trades_section = f"\nTrade history unavailable: {str(e)[:80]}"
 
     send_text(
-        f"🔱 *PrimeWatch — Monthly Recap*\n"
+        f"🤖 *Ascent ETH — Monthly Recap*\n"
         f"📅 {month_start_str} → {month_end_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{eth_line}"
@@ -1192,10 +1192,10 @@ def command_loop():
                     first    = member.get("first_name", "")
                     mention  = f"@{username}" if username else first
                     send_text(
-                        f"🔱 Welcome {mention}!\n\n"
-                        f"You just joined the DEGEN MACRO HQ —\n"
-                        f"home of PrimeWatch, a fully automated trading strategy\n"
-                        f"running 24/7 on ETH · BNB · SOL.\n\n"
+                        f"🤖 Welcome {mention}!\n\n"
+                        f"You just joined Infinex Capital HQ —\n"
+                        f"home of Ascent ETH, a fully automated trading strategy\n"
+                        f"running 24/7 on ETH (4H timeframe).\n\n"
                         f"No charts. No noise. No emotion.\n"
                         f"Just the system doing its work.\n\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1457,7 +1457,7 @@ def _handle_command(text: str, text_raw: str):
         try:
             reportwatch.show_report()
         except Exception as e:
-            send_text(f"🔱 [Report] Error: {e}")
+            send_text(f"🤖 [Report] Error: {e}")
         return
 
     # ── /plan ─────────────────────────────────────────────────────────────────
