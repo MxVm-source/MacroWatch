@@ -32,7 +32,7 @@ log = logging.getLogger("challengewatch")
 
 VIRTUAL_START        = float(os.getenv("CHALLENGE_START_USD",  "1000.00"))
 CHALLENGE_TARGET     = float(os.getenv("CHALLENGE_TARGET_USD", "100000.00"))
-CHALLENGE_START_DATE = os.getenv("CHALLENGE_START_DATE",       "2026-06-01")
+CHALLENGE_START_DATE = os.getenv("CHALLENGE_START_DATE",       "2026-05-01")
 CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
 # Discretionary challenge — track any pair the trader uses
 # Common pairs covered; bot.utils _fetch_closed_trades can hit each symbol
