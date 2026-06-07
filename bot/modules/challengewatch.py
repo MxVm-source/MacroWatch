@@ -1,17 +1,27 @@
 # bot/modules/challengewatch.py
 """
-ChallengeWatch — $1k → $100k LIVE Trading Challenge
+ChallengeWatch — Two parallel challenges:
 
-Tracks Maxime's live discretionary trading performance using real closed
-trade P&L from Bitget, compounded from a virtual starting capital of $1,000.
+  1. ATRb v2 Bot Challenge ($1k -> $100k)
+     - Tracks the systematic ATRb v2 bot's closed PnL on the sub-account
+     - Signed with BITGET_API_KEY credentials
+     - Fires to PUBLIC + PRIVATE channels (Tuesday cadence handled in main.py)
 
-- Does NOT use account balance (avoids capital injection distortion)
-- Fees already deducted in Bitget's realizedPL field
-- Compounds each closed trade from CHALLENGE_START_DATE onward
-- Tracks any pair (BTC/ETH/SOL/etc.) — discretionary, not systematic
-- Separate from ATRb v2 (systematic strategy, runs on its own account)
+  2. Maxime LIVE Challenge ($1k -> $10k)
+     - Tracks Maxime's discretionary trading on the standard/Elite account
+     - Signed with ELITE_API_KEY credentials
+     - Fires to PRIVATE channel only - exclusive content for active traders
 
-Command: /challenge
+Both challenges:
+- Compound from a virtual $1,000 starting capital
+- Use Bitget v2 orders-history endpoint with proper field mapping
+- Do NOT use raw account balance (avoids capital injection distortion)
+
+Commands:
+  /challenge         -> Live challenge (backwards compat alias)
+  /bot_challenge     -> ATRb v2 systematic challenge
+  /live_challenge    -> Maxime discretionary challenge
+  /challenge_diag    -> Raw API debug dump
 """
 
 import logging
@@ -20,51 +30,84 @@ from datetime import datetime, timezone, timedelta
 
 from bot.utils import send_text
 from bot.datafeed_bitget import (
+    _signed_request,
     _signed_request_elite,
+    BITGET_API_KEY,
     ELITE_API_KEY,
-    _to_float,
     BITGET_PRODUCT_TYPE,
 )
 
 log = logging.getLogger("challengewatch")
 
-# ─── Config ──────────────────────────────────────────────────────────────────
+# ----- Configs --------------------------------------------------------------
 
-VIRTUAL_START        = float(os.getenv("CHALLENGE_START_USD",  "1000.00"))
-CHALLENGE_TARGET     = float(os.getenv("CHALLENGE_TARGET_USD", "100000.00"))
-CHALLENGE_START_DATE = os.getenv("CHALLENGE_START_DATE",       "2026-05-01")
-CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
-# Discretionary challenge — track any pair the trader uses
-# Common pairs covered; bot.utils _fetch_closed_trades can hit each symbol
-SYMBOLS              = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+VIRTUAL_START = float(os.getenv("CHALLENGE_START_USD", "1000.00"))
 
 BITGET_URL = (
     "https://www.bitget.com/copy-trading/futures-trader-v1/"
     "bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
 )
 
+BOT_CONFIG = {
+    "name":         "ATRb v2 Bot Challenge",
+    "header":       "🤖 *$1k → $100k — ATRb v2 Bot Challenge*",
+    "target":       100000.00,
+    "milestones":   [2500, 5000, 10000, 25000, 50000, 100000],
+    "start_date":   os.getenv("BOT_CHALLENGE_START_DATE",  "2026-06-07"),
+    "symbols":      ["ETHUSDT"],
+    "signer":       "main",
+    "footer_lines": [
+        "_Fully automated. No discretion. No emotion._",
+        "_Maxime's LIVE discretionary trading is separate - private group._",
+    ],
+    "follow_link":  BITGET_URL,
+    "link_label":   "Copy on Bitget",
+}
 
-# ─── Trade fetcher ────────────────────────────────────────────────────────────
+LIVE_CONFIG = {
+    "name":         "Maxime LIVE Challenge",
+    "header":       "🎯 *$1k → $10k — Maxime LIVE Challenge*",
+    "target":       10000.00,
+    "milestones":   [2000, 3000, 5000, 7500, 10000],
+    "start_date":   os.getenv("LIVE_CHALLENGE_START_DATE", "2026-05-01"),
+    "symbols":      ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "signer":       "elite",
+    "footer_lines": [
+        "_Live discretionary trades by Maxime. Real risk, real PnL._",
+        "_ATRb v2 (systematic) runs separately - see /bot\\_challenge._",
+    ],
+    "follow_link":  None,
+    "link_label":   None,
+}
 
-def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
-    """
-    Fetch all filled closing orders from the Elite/discretionary account.
-    The challenge tracks Maxime's live discretionary trading, NOT the
-    systematic ATRb v2 bot (which lives on the sub-account).
 
-    Returns list of {pnl, date, symbol}.
-    """
-    if not ELITE_API_KEY:
-        log.warning("ChallengeWatch: ELITE_API_KEY not set — cannot fetch discretionary trades")
+# ----- Trade fetcher --------------------------------------------------------
+
+def _fetch_closed_trades(config: dict, start_dt: datetime, end_dt: datetime) -> list:
+    signer  = config["signer"]
+    symbols = config["symbols"]
+
+    if signer == "main":
+        if not BITGET_API_KEY:
+            log.warning(f"{config['name']}: BITGET_API_KEY not set")
+            return []
+        sign_fn = _signed_request
+    elif signer == "elite":
+        if not ELITE_API_KEY:
+            log.warning(f"{config['name']}: ELITE_API_KEY not set")
+            return []
+        sign_fn = _signed_request_elite
+    else:
+        log.error(f"Unknown signer: {signer}")
         return []
 
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms   = int(end_dt.timestamp() * 1000)
     trades   = []
 
-    for sym in SYMBOLS:
+    for sym in symbols:
         try:
-            res = _signed_request_elite(
+            res = sign_fn(
                 "GET",
                 "/api/v2/mix/order/orders-history",
                 params={
@@ -75,11 +118,9 @@ def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
                     "limit":       "100",
                 }
             )
-            # Bitget v2 returns data.entrustedList (NOT orderList)
             orders = ((res.get("data") or {}).get("entrustedList") or [])
 
             for o in orders:
-                # Bitget v2 fields: status (not state), totalProfits (not pnl/realizedPL)
                 status     = (o.get("status") or "").lower()
                 trade_side = (o.get("tradeSide") or o.get("side") or "").lower()
                 pnl_raw    = (o.get("totalProfits")
@@ -90,15 +131,12 @@ def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
 
                 if status != "filled":
                     continue
-                # Only count closing trades (open trades have 0 PnL anyway, but
-                # we want to be explicit and avoid double-counting)
                 if "close" not in trade_side and "reduce" not in trade_side:
                     continue
                 try:
                     pnl = float(pnl_raw)
                 except Exception:
                     continue
-                # Skip zero-PnL (typically reduce-only fills that didn't realize)
                 if pnl == 0:
                     continue
 
@@ -108,7 +146,7 @@ def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
                     date_str = dt.strftime("%b %d")
                     ts       = ctime
                 except Exception:
-                    date_str = "—"
+                    date_str = "--"
                     ts       = 0
 
                 trades.append({
@@ -119,14 +157,11 @@ def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
                 })
 
         except Exception as e:
-            log.warning(f"Trade fetch failed for {sym}: {e}")
+            log.warning(f"{config['name']} - trade fetch failed for {sym}: {e}")
 
-    # Sort chronologically by timestamp
     trades.sort(key=lambda x: x.get("ts", 0))
     return trades
 
-
-# ─── Equity compounding ───────────────────────────────────────────────────────
 
 def _compound(trades: list) -> float:
     equity = VIRTUAL_START
@@ -135,86 +170,63 @@ def _compound(trades: list) -> float:
     return round(equity, 2)
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
 def _progress_bar(pct: float, width: int = 10) -> str:
     filled = int(min(max(pct, 0), 100) / 100 * width)
     return "▓" * filled + "░" * (width - filled)
 
 
-def _calc_eta(equity: float, days_running: int) -> str:
-    if days_running <= 0 or equity <= VIRTUAL_START:
-        return "—"
-    gain_per_day = (equity - VIRTUAL_START) / days_running
-    if gain_per_day <= 0:
-        return "—"
-    days_remaining = (CHALLENGE_TARGET - equity) / gain_per_day
-    eta_date = datetime.now(timezone.utc) + timedelta(days=days_remaining)
-    return eta_date.strftime("%b %Y")
+# ----- Message builder ------------------------------------------------------
 
+def build_challenge(config: dict) -> str:
+    now    = datetime.now(timezone.utc)
+    target = config["target"]
 
-# ─── Message builder ─────────────────────────────────────────────────────────
-
-def build_challenge() -> str:
-    now = datetime.now(timezone.utc)
-
-    # Parse start date
     try:
-        start_dt     = datetime.strptime(CHALLENGE_START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        start_dt     = datetime.strptime(config["start_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         days_running = (now - start_dt).days
         start_str    = start_dt.strftime("%b %d, %Y")
     except Exception:
         start_dt     = now
         days_running = 0
-        start_str    = "—"
+        start_str    = "--"
 
-    # ── Pre-start mode ────────────────────────────────────────────────────────
+    # Pre-start mode
     if days_running < 0:
         days_to_go = abs(days_running)
         lines = [
-            "🚀 *OFFICIAL LAUNCH — June 1, 2026*",
+            f"🚀 *LAUNCH - {start_str}*",
             "",
-            "🎯 *$1k → $100k LIVE Trading Challenge*",
+            config["header"],
             f"⏳ Live in *{days_to_go} days*",
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━",
             f"💰 Virtual capital:  `${VIRTUAL_START:,.0f}`",
-            f"🏁 Target:           `${CHALLENGE_TARGET:,.0f}`",
-            f"📈 Required:         `×{CHALLENGE_TARGET / VIRTUAL_START:,.0f}`",
+            f"🏁 Target:           `${target:,.0f}`",
+            f"📈 Required:         `×{target / VIRTUAL_START:,.0f}`",
             "━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
             "🏆 *Milestones*",
-            f"⬜ ${VIRTUAL_START:,.0f} — Start 🚀",
+            f"⬜ ${VIRTUAL_START:,.0f} - Start 🚀",
         ]
-        for ms in CHALLENGE_MILESTONES:
+        for ms in config["milestones"]:
             lines.append(f"⬜ ${ms:,.0f}")
-        lines += [
-            "",
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "*What happens June 1:*",
-            "→ Maxime's live discretionary trading begins",
-            "→ Every closed trade compounds into the challenge",
-            "→ Real PnL. Public. Logged. Auto-updated weekly.",
-            "",
-            "_This is a discretionary trading challenge._",
-            "_Real trades, real risk — not a backtested system._",
-            "_Capital loaded. Clock starts {}._".format(start_str),
-            "",
-            f"🔗 [Follow on Bitget]({BITGET_URL})",
-        ]
+        lines += ["", "━━━━━━━━━━━━━━━━━━━━━━━━"]
+        lines += config["footer_lines"]
+        if config["follow_link"]:
+            lines += ["", f"🔗 [{config['link_label']}]({config['follow_link']})"]
         return "\n".join(lines)
 
-    # ── Live mode ─────────────────────────────────────────────────────────────
+    # Live mode
     try:
-        trades = _fetch_closed_trades(start_dt, now)
+        trades = _fetch_closed_trades(config, start_dt, now)
     except Exception as e:
-        log.warning(f"Trade fetch error: {e}")
+        log.warning(f"{config['name']} - fetch error: {e}")
         trades = []
 
     equity   = _compound(trades)
     gain_usd = equity - VIRTUAL_START
     gain_pct = (gain_usd / VIRTUAL_START) * 100
-    progress = min(max((equity - VIRTUAL_START) / (CHALLENGE_TARGET - VIRTUAL_START) * 100, 0), 100)
+    progress = min(max((equity - VIRTUAL_START) / (target - VIRTUAL_START) * 100, 0), 100)
     bar      = _progress_bar(progress)
 
     gain_sign  = "+" if gain_usd >= 0 else ""
@@ -224,35 +236,37 @@ def build_challenge() -> str:
     losses    = sum(1 for t in trades if t["pnl"] <= 0)
     win_rate  = round(wins / len(trades) * 100) if trades else 0
 
-    daily_avg  = gain_usd / max(days_running, 1)
-    weekly_avg = daily_avg * 7
-    eta        = _calc_eta(equity, max(days_running, 1))
+    daily_avg = gain_usd / max(days_running, 1)
+    if equity > 0 and days_running >= 1:
+        daily_pct = ((equity / VIRTUAL_START) ** (1 / days_running) - 1) * 100
+    else:
+        daily_pct = 0
+    avg_trade = gain_usd / len(trades) if trades else 0
 
-    # Milestones
-    milestone_lines = [f"✅ ${VIRTUAL_START:,.0f} — Start 🚀"]
+    milestone_lines = [f"✅ ${VIRTUAL_START:,.0f} - Start 🚀"]
     next_milestone  = None
-    for ms in CHALLENGE_MILESTONES:
+    for ms in config["milestones"]:
         if equity >= ms:
             milestone_lines.append(f"✅ ${ms:,.0f}")
         else:
             if next_milestone is None:
                 next_milestone = ms
-                milestone_lines.append(f"⬜ ${ms:,.0f}  ← next  (${ms - equity:,.0f} away)")
+                milestone_lines.append(f"⬜ ${ms:,.0f}  <- next  (${ms - equity:,.0f} away)")
             else:
                 milestone_lines.append(f"⬜ ${ms:,.0f}")
 
     lines = [
-        "🎯 *$1k → $100k LIVE Trading Challenge*",
-        f"📅 Day {max(days_running, 1)} — Started {start_str}",
+        config["header"],
+        f"📅 Day {max(days_running, 1)} - Started {start_str}",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"💰 Equity:    `${equity:,.2f}`",
         f"{gain_emoji} Gain:      `{gain_sign}${gain_usd:,.2f}` ({gain_sign}{gain_pct:.1f}%)",
-        f"🏁 Target:    `${CHALLENGE_TARGET:,.0f}`",
+        f"🏁 Target:    `${target:,.0f}`",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
         f"Progress: {progress:.2f}%",
-        f"`{bar}`  ${equity:,.0f} / ${CHALLENGE_TARGET:,.0f}",
+        f"`{bar}`  ${equity:,.0f} / ${target:,.0f}",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "🏆 *Milestones*",
@@ -262,77 +276,109 @@ def build_challenge() -> str:
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "📊 *Performance*",
-        f"Trades:       `{len(trades)}` ({wins}W / {losses}L)",
-        f"Win rate:     `{win_rate}%`",
-        f"Daily avg:    `{gain_sign}${daily_avg:,.2f}`",
-        f"Weekly avg:   `{gain_sign}${weekly_avg:,.2f}`",
-        f"Est. target:  `{eta}`",
+        f"Trades:        `{len(trades)}` ({wins}W / {losses}L)",
+        f"Win rate:      `{win_rate}%`",
+        f"Avg per trade: `{gain_sign}${avg_trade:,.2f}`",
+        f"Daily avg:     `{gain_sign}${daily_avg:,.2f}`  ({gain_sign}{daily_pct:.2f}% compounding)",
         "",
-        "_Live discretionary trades by Maxime. Real risk, real PnL._",
-        "_ATRb v2 (systematic) runs separately — see /status._",
-        "",
-        f"🔗 [Follow on Bitget]({BITGET_URL})",
     ]
+    lines += config["footer_lines"]
+    if config["follow_link"]:
+        lines += ["", f"🔗 [{config['link_label']}]({config['follow_link']})"]
 
     return "\n".join(lines)
 
 
-# ─── Entry point ─────────────────────────────────────────────────────────────
+# ----- Public + Private send helper -----------------------------------------
+
+def _send_to_both(msg: str):
+    """Send to private (CHAT_ID) and public (PUBLIC_CHAT_ID) channels."""
+    send_text(msg)
+    public_id = os.getenv("PUBLIC_CHAT_ID", "")
+    tg_token  = os.getenv("TELEGRAM_TOKEN", "")
+    if public_id and tg_token:
+        try:
+            import requests as _req
+            _req.post(
+                f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                json={
+                    "chat_id":      public_id,
+                    "text":         msg,
+                    "parse_mode":   "Markdown",
+                    "disable_web_page_preview": True,
+                },
+                timeout=10,
+            )
+        except Exception as e:
+            log.warning(f"Public channel send failed: {e}")
+
+
+# ----- Entry points ---------------------------------------------------------
+
+def show_bot_challenge():
+    """ATRb v2 Bot Challenge - public + private."""
+    try:
+        msg = build_challenge(BOT_CONFIG)
+        _send_to_both(msg)
+    except Exception as e:
+        log.exception(f"Bot challenge failed: {e}")
+        send_text(f"🤖 [Bot Challenge] ⚠️ Error: {str(e)[:200]}")
+
+
+def show_live_challenge():
+    """Maxime LIVE Challenge - private only."""
+    try:
+        msg = build_challenge(LIVE_CONFIG)
+        send_text(msg)
+    except Exception as e:
+        log.exception(f"Live challenge failed: {e}")
+        send_text(f"🎯 [Live Challenge] ⚠️ Error: {str(e)[:200]}")
+
 
 def show_challenge():
-    try:
-        msg = build_challenge()
-        if msg:
-            send_text(msg)
-    except Exception as e:
-        log.exception(f"ChallengeWatch failed: {e}")
-        send_text(f"🎯 [Challenge] ⚠️ Error: {str(e)[:200]}")
+    """Legacy /challenge command - defaults to LIVE (Maxime discretionary)."""
+    show_live_challenge()
 
 
 def show_challenge_diag():
-    """Diagnostic — show raw Elite trade data so we can debug filter mismatches."""
-    if not ELITE_API_KEY:
-        send_text("🎯 [Diag] ELITE_API_KEY not set")
-        return
+    """Diagnostic - show raw trade data from BOTH accounts for debugging."""
+    now = datetime.now(timezone.utc)
+    lines = ["🎯 *Challenge Diag*", ""]
 
-    try:
-        now      = datetime.now(timezone.utc)
-        start_dt = datetime.strptime(CHALLENGE_START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        start_ms = int(start_dt.timestamp() * 1000)
-        end_ms   = int(now.timestamp() * 1000)
+    for config in (BOT_CONFIG, LIVE_CONFIG):
+        signer = config["signer"]
+        if signer == "main" and not BITGET_API_KEY:
+            lines.append(f"*{config['name']}*: BITGET_API_KEY not set\n")
+            continue
+        if signer == "elite" and not ELITE_API_KEY:
+            lines.append(f"*{config['name']}*: ELITE_API_KEY not set\n")
+            continue
 
-        lines = [f"🎯 *Challenge Diag* — Elite trades since {CHALLENGE_START_DATE}", ""]
+        try:
+            start_dt = datetime.strptime(config["start_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            start_ms = int(start_dt.timestamp() * 1000)
+            end_ms   = int(now.timestamp() * 1000)
+            sign_fn  = _signed_request if signer == "main" else _signed_request_elite
 
-        for sym in SYMBOLS:
-            res = _signed_request_elite(
-                "GET",
-                "/api/v2/mix/order/orders-history",
-                params={
-                    "symbol":      sym,
-                    "productType": BITGET_PRODUCT_TYPE,
-                    "startTime":   str(start_ms),
-                    "endTime":     str(end_ms),
-                    "limit":       "100",
-                }
-            )
-            orders = ((res.get("data") or {}).get("entrustedList") or [])
-            lines.append(f"*{sym}*: {len(orders)} raw orders")
+            lines.append(f"*{config['name']}* - since {config['start_date']}")
 
-            # Show first 3 orders fully — to inspect the field values
-            for o in orders[:3]:
-                status     = o.get("status") or "—"
-                trade_side = o.get("tradeSide") or o.get("side") or "—"
-                pnl        = (o.get("totalProfits")
-                              or o.get("pnl")
-                              or o.get("realizedPL")
-                              or o.get("profit")
-                              or "—")
-                size       = o.get("size") or o.get("baseVolume") or "—"
-                lines.append(f"  • status=`{status}` tradeSide=`{trade_side}` totalProfits=`{pnl}` size=`{size}`")
+            for sym in config["symbols"]:
+                res = sign_fn(
+                    "GET",
+                    "/api/v2/mix/order/orders-history",
+                    params={
+                        "symbol":      sym,
+                        "productType": BITGET_PRODUCT_TYPE,
+                        "startTime":   str(start_ms),
+                        "endTime":     str(end_ms),
+                        "limit":       "100",
+                    }
+                )
+                orders = ((res.get("data") or {}).get("entrustedList") or [])
+                lines.append(f"  {sym}: {len(orders)} raw orders")
 
             lines.append("")
+        except Exception as e:
+            lines.append(f"  ⚠️ {config['name']} fetch error: {str(e)[:200]}\n")
 
-        send_text("\n".join(lines))
-    except Exception as e:
-        log.exception(f"Diag failed: {e}")
-        send_text(f"🎯 [Diag] Error: {str(e)[:300]}")
+    send_text("\n".join(lines))
