@@ -269,7 +269,7 @@ def _poll_positions():
             if not prev["has_position"] and cur["has_position"]:
                 cur["opened_at"] = datetime.now(timezone.utc)
                 send_text(
-                    f"🤖 *Ascent ETH — Position Opened*\n"
+                    f"🤖 *ATRb v2 — Position Opened*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"Pair: {sym}\n"
                     f"Side: {side_emoji} {cur['side']}\n"
@@ -328,7 +328,7 @@ def _poll_positions():
                 # ── Text alert (PnL card removed for memory) ──────────────
                 streak_line = f"\n{streak_str}" if streak_str else ""
                 send_text(
-                    f"🤖 *Ascent ETH — Position Closed*\n"
+                    f"🤖 *ATRb v2 — Position Closed*\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"Pair: {sym}\n"
                     f"Side: {prev_emoji} {prev_side}"
@@ -345,7 +345,7 @@ def _poll_positions():
                     pub_emoji = "🟢" if leveraged >= 0 else "🔴"
                     side_icon = "📈" if prev_side == "LONG" else "📉"
                     send_public(
-                        f"🤖 *Infinex Capital — Ascent ETH Trade Closed*\n"
+                        f"🤖 *Infinex Capital — ATRb v2 Trade Closed*\n"
                         f"_Intelligence provided by MacroWatch 🧠_\n\n"
                         f"Pair: {sym}\n"
                         f"Side: {side_icon} {prev_side}\n"
@@ -353,7 +353,7 @@ def _poll_positions():
                         f"Exit: ${last_px:,.2f}\n"
                         f"Est. PnL: {pub_emoji} {sign}{leveraged:.1f}%\n"
                         f"{streak_str + chr(10) if streak_str else ''}"
-                        f"\n🎯 $1k → $100k Challenge — /challenge"
+                        f"\n🤖 ATRb v2 $1k → $100k — /bot\\_challenge"
                     )
 
             elif cur["has_position"] and prev["has_position"]:
@@ -366,7 +366,7 @@ def _poll_positions():
                 for tp in prev_tps:
                     if tp not in cur_tps:
                         send_text(
-                            f"✅ *Ascent ETH — TP Hit*\n"
+                            f"✅ *ATRb v2 — TP Hit*\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Pair: {sym}\n"
                             f"Side: {side_emoji} {cur['side']}\n"
@@ -379,7 +379,7 @@ def _poll_positions():
                 for sl in prev_sls:
                     if sl not in cur_sls and not cur["has_position"]:
                         send_text(
-                            f"❌ *Ascent ETH — SL Hit*\n"
+                            f"❌ *ATRb v2 — SL Hit*\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"Pair: {sym}\n"
                             f"Side was: {side_emoji} {prev['side']}\n"
@@ -424,10 +424,18 @@ def _fetch_account_balance_eur() -> float | None:
 
 
 def _job_challenge_update():
+    """Tuesday 09:15 — fire both challenges to their respective channels."""
+    # Bot challenge -> public + private
     try:
-        _send_challenge_update()
+        challengewatch.show_bot_challenge()
     except Exception as e:
-        _err("ChallengeUpdate", e)
+        _err("BotChallengeUpdate", e)
+
+    # Live (Maxime discretionary) challenge -> private only
+    try:
+        challengewatch.show_live_challenge()
+    except Exception as e:
+        _err("LiveChallengeUpdate", e)
 
 
 def _send_challenge_update():
@@ -589,7 +597,7 @@ def _send_weekly_perf():
 
     # ── Text-only weekly recap (image module removed for memory) ───────────
     send_text(
-        f"🤖 *Ascent ETH — Weekly Recap*\n"
+        f"🤖 *ATRb v2 — Weekly Recap*\n"
         f"📅 {week_start_str} → {week_end_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{eth_line}"
@@ -702,7 +710,7 @@ def _send_monthly_perf():
             trades_section = f"\nTrade history unavailable: {str(e)[:80]}"
 
     send_text(
-        f"🤖 *Ascent ETH — Monthly Recap*\n"
+        f"🤖 *ATRb v2 — Monthly Recap*\n"
         f"📅 {month_start_str} → {month_end_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{eth_line}"
@@ -1194,7 +1202,7 @@ def command_loop():
                     send_text(
                         f"🤖 Welcome {mention}!\n\n"
                         f"You just joined Infinex Capital HQ —\n"
-                        f"home of Ascent ETH, a fully automated trading strategy\n"
+                        f"home of ATRb v2, a fully automated trading strategy\n"
                         f"running 24/7 on ETH (4H timeframe).\n\n"
                         f"No charts. No noise. No emotion.\n"
                         f"Just the system doing its work.\n\n"
@@ -1202,7 +1210,7 @@ def command_loop():
                         f"Here's what to do:\n\n"
                         f"1. Read the pinned message\n"
                         f"2. Type /status to see the strategy live\n"
-                        f"3. Type /challenge to follow the $1k → $100k journey\n"
+                        f"3. Type /bot_challenge for the ATRb v2 $1k → $100k journey\n"
                         f"4. Activate copy trading on Bitget to mirror every trade\n\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"🚀 Copy trading live May 1, 2026\n"
@@ -1258,8 +1266,9 @@ def _handle_command(text: str, text_raw: str):
             "🩺 *System*\n"
             "/health — Full system status\n"
             "/restart — Trigger clean poll of all modules\n"
-            "/status — Ascent ETH live strategy status\n"
-            "/challenge — $1k → $100k challenge progress\n"
+            "/status — ATRb v2 live strategy status\n"
+            "/bot_challenge — ATRb v2 $1k → $100k progress\n"
+            "/live_challenge — Maxime LIVE $1k → $10k progress\n"
             "/report — Last 7 days trades + P&L\n"
             "/plan — Post enriched plan for the open position (R:R, risk %, liq, ratchet)\n"
         )
@@ -1436,7 +1445,7 @@ def _handle_command(text: str, text_raw: str):
             send_text(f"🤖 [StratWatch] Error: {e}")
         return
 
-    # ── /challenge_diag (must come before /challenge so it matches first) ────
+    # ── /challenge_diag (must come first - longest prefix wins) ──────────────
     if text.startswith("/challenge_diag"):
         try:
             challengewatch.show_challenge_diag()
@@ -1444,7 +1453,23 @@ def _handle_command(text: str, text_raw: str):
             send_text(f"🎯 [Diag] Error: {e}")
         return
 
-    # ── /challenge ────────────────────────────────────────────────────────────
+    # ── /bot_challenge → ATRb v2 systematic ($1k → $100k) ─────────────────────
+    if text.startswith("/bot_challenge"):
+        try:
+            challengewatch.show_bot_challenge()
+        except Exception as e:
+            send_text(f"🤖 [Bot Challenge] Error: {e}")
+        return
+
+    # ── /live_challenge → Maxime discretionary ($1k → $10k) ───────────────────
+    if text.startswith("/live_challenge"):
+        try:
+            challengewatch.show_live_challenge()
+        except Exception as e:
+            send_text(f"🎯 [Live Challenge] Error: {e}")
+        return
+
+    # ── /challenge (legacy alias) → defaults to LIVE challenge ───────────────
     if text.startswith("/challenge"):
         try:
             challengewatch.show_challenge()
