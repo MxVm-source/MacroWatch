@@ -290,7 +290,7 @@ def build_status() -> str:
         atr  = a.get("atr")
 
         # Price
-        price_str = f"`${a['price']:,.2f}`" if a["price"] else "`—`"
+        price_str = f"`@ ${a['price']:,.2f}`" if a["price"] else "`—`"
 
         # MACD line
         if macd:
