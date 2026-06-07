@@ -49,7 +49,7 @@ STATE = {
 # ─── Data fetchers ────────────────────────────────────────────────────────────
 
 def _fetch_dxy_change() -> float | None:
-    """Fetch DXY 1D change % — tries Finnhub first, falls back to stooq."""
+    """Fetch DXY 1D change % — tries Finnhub → Yahoo → stooq."""
     # Finnhub path
     if FINNHUB_KEY:
         try:
@@ -66,20 +66,44 @@ def _fetch_dxy_change() -> float | None:
         except Exception as e:
             log.warning(f"DXY Finnhub fetch failed: {e}")
 
-    # Fallback: stooq (no key needed)
+    # Yahoo Finance — more reliable than stooq, no key needed
+    try:
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB",
+            params={"interval": "1d", "range": "5d"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            data    = r.json()
+            result  = (data.get("chart") or {}).get("result") or []
+            if result:
+                meta    = result[0].get("meta") or {}
+                price   = meta.get("regularMarketPrice")
+                prev    = meta.get("chartPreviousClose") or meta.get("previousClose")
+                if price and prev and prev > 0:
+                    return round((float(price) - float(prev)) / float(prev) * 100, 3)
+    except Exception as e:
+        log.warning(f"DXY Yahoo fetch failed: {e}")
+
+    # Last-resort: stooq (frequently returns JS challenge pages now)
     try:
         r = requests.get(
             "https://stooq.com/q/l/?s=dx.f&f=sd2t2ohlcv&h&e=csv",
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=8,
         )
-        lines = r.text.strip().splitlines()
-        if len(lines) >= 2:
-            parts = lines[1].split(",")
-            # columns: Symbol,Date,Time,Open,High,Low,Close,Volume
-            close = float(parts[6])
-            open_ = float(parts[3])
-            if open_ > 0:
-                return round((close - open_) / open_ * 100, 3)
+        if r.status_code == 200 and r.text.strip().startswith("Symbol"):
+            lines = r.text.strip().splitlines()
+            if len(lines) >= 2:
+                parts = lines[1].split(",")
+                # columns: Symbol,Date,Time,Open,High,Low,Close,Volume
+                close = float(parts[6])
+                open_ = float(parts[3])
+                if open_ > 0:
+                    return round((close - open_) / open_ * 100, 3)
+        else:
+            log.warning(f"DXY stooq returned non-CSV (likely bot block): {r.text[:80]}")
     except Exception as e:
         log.warning(f"DXY stooq fallback failed: {e}")
 

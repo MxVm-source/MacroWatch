@@ -124,22 +124,56 @@ def _fetch_global_mcap() -> dict:
         return {}
 
 
+def _fetch_yahoo_weekly(yahoo_symbol: str) -> float | None:
+    """Fetch 7-day % change from Yahoo Finance — more reliable than stooq."""
+    try:
+        r = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
+            params={"interval": "1d", "range": "1mo"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            log.warning(f"Yahoo HTTP {r.status_code} for {yahoo_symbol}")
+            return None
+        data    = r.json()
+        result  = (data.get("chart") or {}).get("result") or []
+        if not result:
+            return None
+        closes = ((result[0].get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+        valid  = [c for c in closes if c is not None and c > 0]
+        if len(valid) < 8:
+            log.warning(f"Yahoo {yahoo_symbol}: only {len(valid)} valid closes")
+            return None
+        recent      = valid[-8:]
+        open_price  = recent[0]
+        close_price = recent[-1]
+        if open_price > 0:
+            return round((close_price - open_price) / open_price * 100, 2)
+    except Exception as e:
+        log.warning(f"Yahoo {yahoo_symbol} weekly fetch failed: {e}")
+    return None
+
+
 def _fetch_stooq_weekly(symbol: str) -> float | None:
-    """Fetch 7-day % change for a stooq symbol using last 8 daily closes."""
+    """Fallback: stooq. Frequently returns JS challenge pages; we detect that."""
     try:
         r = requests.get(
             f"https://stooq.com/q/d/l/?s={symbol}&i=d",
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=8,
         )
         if r.status_code != 200:
             log.warning(f"Stooq HTTP {r.status_code} for {symbol}")
             return None
+        # Detect anti-bot HTML page (starts with HTML / JS, not CSV header)
+        if not r.text.strip().lower().startswith("date,"):
+            log.warning(f"Stooq {symbol}: blocked (non-CSV response)")
+            return None
         csv_lines = r.text.strip().splitlines()
         if len(csv_lines) < 9:
-            log.warning(f"Stooq {symbol}: only {len(csv_lines)} lines returned")
             return None
-        rows = csv_lines[1:]   # skip header
-        # Filter out rows with N/D or invalid data
+        rows = csv_lines[1:]
         valid = []
         for row in rows:
             cols = row.split(",")
@@ -152,10 +186,9 @@ def _fetch_stooq_weekly(symbol: str) -> float | None:
             except (ValueError, IndexError):
                 continue
         if len(valid) < 8:
-            log.warning(f"Stooq {symbol}: only {len(valid)} valid daily closes")
             return None
-        recent     = valid[-8:]   # 8 trading days
-        open_price = recent[0]
+        recent      = valid[-8:]
+        open_price  = recent[0]
         close_price = recent[-1]
         if open_price > 0:
             return round((close_price - open_price) / open_price * 100, 2)
@@ -164,19 +197,27 @@ def _fetch_stooq_weekly(symbol: str) -> float | None:
     return None
 
 
+def _fetch_with_fallback(yahoo_sym: str, stooq_sym: str) -> float | None:
+    """Try Yahoo first, then stooq as backup."""
+    val = _fetch_yahoo_weekly(yahoo_sym)
+    if val is not None:
+        return val
+    return _fetch_stooq_weekly(stooq_sym)
+
+
 def _fetch_equity_weekly() -> dict:
-    """S&P 500 and Nasdaq 7-day change from stooq."""
+    """S&P 500 and Nasdaq 7-day change — Yahoo primary, stooq fallback."""
     return {
-        "sp500":  _fetch_stooq_weekly("^spx"),
-        "nasdaq": _fetch_stooq_weekly("^ndx"),
+        "sp500":  _fetch_with_fallback("^GSPC",  "^spx"),
+        "nasdaq": _fetch_with_fallback("^NDX",   "^ndx"),
     }
 
 
 def _fetch_macro_assets_weekly() -> dict:
-    """Gold and DXY 7-day change from stooq."""
+    """Gold and DXY 7-day change — Yahoo primary, stooq fallback."""
     return {
-        "gold": _fetch_stooq_weekly("xauusd"),   # Gold spot
-        "dxy":  _fetch_stooq_weekly("^dxy"),     # US Dollar Index
+        "gold": _fetch_with_fallback("GC=F",     "xauusd"),
+        "dxy":  _fetch_with_fallback("DX-Y.NYB", "^dxy"),
     }
 
 
