@@ -9,7 +9,7 @@ trade P&L from Bitget, compounded from a virtual starting capital of $1,000.
 - Fees already deducted in Bitget's realizedPL field
 - Compounds each closed trade from CHALLENGE_START_DATE onward
 - Tracks any pair (BTC/ETH/SOL/etc.) — discretionary, not systematic
-- Separate from Ascent ETH (systematic strategy, runs on its own account)
+- Separate from ATRb v2 (systematic strategy, runs on its own account)
 
 Command: /challenge
 """
@@ -50,7 +50,7 @@ def _fetch_closed_trades(start_dt: datetime, end_dt: datetime) -> list:
     """
     Fetch all filled closing orders from the Elite/discretionary account.
     The challenge tracks Maxime's live discretionary trading, NOT the
-    systematic Ascent ETH bot (which lives on the main account).
+    systematic ATRb v2 bot (which lives on the sub-account).
 
     Returns list of {pnl, date, symbol}.
     """
@@ -269,7 +269,7 @@ def build_challenge() -> str:
         f"Est. target:  `{eta}`",
         "",
         "_Live discretionary trades by Maxime. Real risk, real PnL._",
-        "_Ascent ETH (systematic) runs separately — see /status._",
+        "_ATRb v2 (systematic) runs separately — see /status._",
         "",
         f"🔗 [Follow on Bitget]({BITGET_URL})",
     ]

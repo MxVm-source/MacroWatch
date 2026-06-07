@@ -1,6 +1,6 @@
 # bot/modules/stratwatch.py
 """
-StratWatch — Ascent ETH Strategy Status
+StratWatch — ATRb v2 Strategy Status
 
 Command: /status
 Shows live strategy state for ETH including:
@@ -245,7 +245,7 @@ def build_status() -> str:
     now              = datetime.now(timezone.utc)
     next_cycle, mins = _next_4h_utc()
 
-    # Account balance — Ascent ETH lives on the BITGET_API_KEY account
+    # Account balance — ATRb v2 lives on the BITGET_API_KEY account
     # (currently the sub-account, eventually sub/elite). Never read Elite here —
     # Elite is Maxime's discretionary LIVE Trading book, separate product.
     balance_str = "—"
@@ -268,7 +268,7 @@ def build_status() -> str:
         log.warning(f"StratWatch balance fetch failed: {e}")
 
     lines = [
-        "🤖 *Ascent ETH — Live Status*",
+        "🤖 *ATRb v2 — Live Status*",
         f"🕐 {now.strftime('%Y-%m-%d %H:%M UTC')}",
         "",
         f"Bot: 🟢 Live  |  Balance: `{balance_str}`",
