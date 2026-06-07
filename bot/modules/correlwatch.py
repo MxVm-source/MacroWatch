@@ -36,14 +36,52 @@ FINNHUB_BASE   = "https://finnhub.io/api/v1"
 BITGET_BASE    = "https://api.bitget.com"
 PRODUCT_TYPE   = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 
+# Persistent state — survives Render redeploys
+STATE_PATH = os.getenv("CORREL_STATE_PATH", "/var/data/correlwatch_state.json")
+
 # ─── State ───────────────────────────────────────────────────────────────────
 
 STATE = {
-    "last_alert_utc": None,
-    "last_dxy":       None,
-    "last_btc":       None,
-    "last_check_utc": None,
+    "last_alert_utc":  None,
+    "last_alert_type": None,   # last alert classification, to avoid same-condition repeats
+    "last_dxy":        None,
+    "last_btc":        None,
+    "last_check_utc":  None,
 }
+
+
+def _load_state():
+    """Load persisted state from disk (survives Render redeploys)."""
+    try:
+        import json
+        with open(STATE_PATH, "r") as f:
+            data = json.load(f)
+        if data.get("last_alert_utc"):
+            STATE["last_alert_utc"] = datetime.fromisoformat(data["last_alert_utc"])
+        STATE["last_alert_type"] = data.get("last_alert_type")
+        log.info(f"CorrelWatch: loaded persisted state — last alert {STATE['last_alert_utc']}, type {STATE['last_alert_type']}")
+    except FileNotFoundError:
+        log.info("CorrelWatch: no persisted state file yet")
+    except Exception as e:
+        log.warning(f"CorrelWatch: state load failed: {e}")
+
+
+def _save_state():
+    """Persist alert state to disk."""
+    try:
+        import json
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+        with open(STATE_PATH, "w") as f:
+            json.dump({
+                "last_alert_utc":  STATE["last_alert_utc"].isoformat() if STATE["last_alert_utc"] else None,
+                "last_alert_type": STATE["last_alert_type"],
+            }, f)
+    except Exception as e:
+        log.warning(f"CorrelWatch: state save failed: {e}")
+
+
+# Auto-load on module import (Render redeploys safe)
+_load_state()
 
 
 # ─── Data fetchers ────────────────────────────────────────────────────────────
@@ -240,11 +278,18 @@ def poll_once():
     if not alert:
         return
 
+    # Skip if same alert TYPE was the last one fired (avoid repeat-spam of same condition)
+    if STATE.get("last_alert_type") == alert['type']:
+        log.debug(f"CorrelWatch: same condition '{alert['type']}' as last alert — skipping")
+        return
+
     if not _cooldown_ok():
         log.debug("CorrelWatch: cooldown active — skipping alert")
         return
 
-    STATE["last_alert_utc"] = now
+    STATE["last_alert_utc"]  = now
+    STATE["last_alert_type"] = alert['type']
+    _save_state()   # persist to disk so redeploys don't reset
 
     send_text(
         f"{alert['emoji']} *[CorrelWatch] {alert['type']}*\n"
