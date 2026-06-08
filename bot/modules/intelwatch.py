@@ -75,10 +75,20 @@ def _auto_cooldown_ok():
 
 def _fetch_btc_price() -> tuple[float, float] | tuple[None, None]:
     """Returns (current_price, 4h_change_pct)"""
+    return _fetch_price_4h("BTCUSDT")
+
+
+def _fetch_eth_price_4h() -> tuple[float, float] | tuple[None, None]:
+    """Returns (current_price, 4h_change_pct) for ETH"""
+    return _fetch_price_4h("ETHUSDT")
+
+
+def _fetch_price_4h(symbol: str) -> tuple[float, float] | tuple[None, None]:
+    """Generic 4H price + change fetcher."""
     try:
         r = requests.get(
             f"{BITGET_BASE}/api/v2/mix/market/candles",
-            params={"symbol": "BTCUSDT", "granularity": "4H",
+            params={"symbol": symbol, "granularity": "4H",
                     "limit": "3", "productType": PRODUCT_TYPE},
             timeout=6,
         )
@@ -93,7 +103,7 @@ def _fetch_btc_price() -> tuple[float, float] | tuple[None, None]:
         chg        = (price - prev_close) / prev_close * 100
         return round(price, 2), round(chg, 2)
     except Exception as e:
-        log.warning(f"BTC price fetch failed: {e}")
+        log.warning(f"{symbol} 4H price fetch failed: {e}")
         return None, None
 
 
@@ -478,6 +488,7 @@ def _bias_verdict(net: float) -> tuple[str, str]:
 def build_intel(modules: dict, is_auto: bool = False, custom_header: str | None = None, custom_label: str | None = None) -> str:
     now = datetime.now(timezone.utc)
     btc_price, btc_chg = _fetch_btc_price()
+    eth_price, eth_chg = _fetch_eth_price_4h()
 
     result        = _evaluate_signals(modules)
     signals       = result["signals"]
@@ -510,6 +521,12 @@ def build_intel(modules: dict, is_auto: bool = False, custom_header: str | None 
         sign      = "+" if (btc_chg or 0) >= 0 else ""
         btc_line  = f"BTC: `${btc_price:,.2f}` {chg_emoji} `{sign}{btc_chg:.2f}%` (4H)"
 
+    eth_line = ""
+    if eth_price:
+        chg_emoji = "📈" if (eth_chg or 0) >= 0 else "📉"
+        sign      = "+" if (eth_chg or 0) >= 0 else ""
+        eth_line  = f"ETH: `${eth_price:,.2f}` {chg_emoji} `{sign}{eth_chg:.2f}%` (4H)"
+
     # Header variants
     if custom_header:
         header_line1 = custom_header
@@ -524,6 +541,7 @@ def build_intel(modules: dict, is_auto: bool = False, custom_header: str | None 
         header_line2,
         "",
         btc_line,
+        eth_line,
         f"{regime_emoji} *Regime: {regime}*",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
