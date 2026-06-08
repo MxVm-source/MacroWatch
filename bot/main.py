@@ -1296,7 +1296,9 @@ def _handle_command(text: str, text_raw: str):
             "🩺 *System*\n"
             "/health — Full system status\n"
             "/restart — Trigger clean poll of all modules\n"
-            "/status — ATRb v2 live strategy status\n"
+            "/status — ATRb v2 live strategy status (indicators + regime)\n"
+            "/bot — ATRb v2 current open position(s)\n"
+            "/live — Maxime LIVE current open position(s)\n"
             "/bot_challenge — ATRb v2 $1k → $100k progress\n"
             "/live_challenge — Maxime LIVE $1k → $10k progress\n"
             "/report — Last 7 days trades + P&L\n"
@@ -1513,6 +1515,22 @@ def _handle_command(text: str, text_raw: str):
             reportwatch.show_report()
         except Exception as e:
             send_text(f"🤖 [Report] Error: {e}")
+        return
+
+    # ── /bot → ATRb v2 systematic live state ──────────────────────────────────
+    if text.startswith("/bot") and not text.startswith("/bot_challenge"):
+        try:
+            tradewatch.show_bot_state()
+        except Exception as e:
+            send_text(f"🤖 [Bot State] Error: {e}")
+        return
+
+    # ── /live → Maxime LIVE discretionary live state ──────────────────────────
+    if text.startswith("/live") and not text.startswith("/live_challenge"):
+        try:
+            tradewatch.show_live_state()
+        except Exception as e:
+            send_text(f"🎯 [Live State] Error: {e}")
         return
 
     # ── /plan ─────────────────────────────────────────────────────────────────
