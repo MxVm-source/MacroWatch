@@ -35,6 +35,7 @@ from bot.datafeed_bitget import (
     iso_utc_now,
     BITGET_API_KEY,
     ELITE_API_KEY,
+    get_ticker,
 )
 
 # account label → (position_fetcher, order_fetcher)
@@ -187,23 +188,51 @@ def on_position_opened(symbol: str, account: str = "main"):
 
 
 def show_plan(symbol: str = ""):
-    """Manual /plan command — post the plan for an open position on either account."""
-    sym = (symbol or os.getenv("INFINEX_SYMBOL", "ETHUSDT")).strip().upper()
+    """Manual /plan command - post plan for open position(s).
+
+    If a symbol is given, looks for it on both accounts.
+    If no symbol is given, scans ALL open positions across both accounts
+    and posts a plan for each one found.
+    """
+    sym = (symbol or "").strip().upper()
     posted = False
+
+    if sym:
+        # Specific symbol: try on both accounts
+        for acct in ("elite", "main"):
+            if acct == "main"  and not BITGET_API_KEY:
+                continue
+            if acct == "elite" and not ELITE_API_KEY:
+                continue
+            try:
+                fetch_pos, _ = _ACCOUNTS[acct]
+                if _position_is_open(fetch_pos(sym)):
+                    _safe(_post_for_symbol, sym, acct)
+                    posted = True
+            except Exception as e:
+                log.warning(f"TradeWatch show_plan {acct}: {e}")
+        if not posted:
+            send_text(f"📋 [TradeWatch] No open {sym} position found on elite/main.")
+        return
+
+    # No symbol: scan every common pair across both accounts
+    scan_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
     for acct in ("elite", "main"):
         if acct == "main"  and not BITGET_API_KEY:
             continue
         if acct == "elite" and not ELITE_API_KEY:
             continue
-        try:
-            fetch_pos, _ = _ACCOUNTS[acct]
-            if _position_is_open(fetch_pos(sym)):
-                _safe(_post_for_symbol, sym, acct)
-                posted = True
-        except Exception as e:
-            log.warning(f"TradeWatch show_plan {acct}: {e}")
+        for s in scan_symbols:
+            try:
+                fetch_pos, _ = _ACCOUNTS[acct]
+                if _position_is_open(fetch_pos(s)):
+                    _safe(_post_for_symbol, s, acct)
+                    posted = True
+            except Exception as e:
+                log.warning(f"TradeWatch show_plan scan {acct} {s}: {e}")
+
     if not posted:
-        send_text(f"📋 [TradeWatch] No open {sym} position found on elite/main.")
+        send_text("📋 [TradeWatch] No open positions found on elite/main.")
 
 
 def _safe(fn, *a):
@@ -215,3 +244,117 @@ def _safe(fn, *a):
             send_text(f"📋 [TradeWatch] error: {str(e)[:160]}")
         except Exception:
             pass
+
+
+# ─── Live state commands (/bot and /live) ────────────────────────────────────
+
+def _format_position_card(symbol: str, pos: dict, orders: dict) -> str:
+    """Build a compact live-state card for one open position."""
+    side  = (pos.get("holdSide") or "").upper()
+    entry = _to_float(pos.get("openPriceAvg") or pos.get("openPrice") or 0)
+    size  = _to_float(pos.get("total") or pos.get("available") or 0)
+    lev   = _to_float(pos.get("leverage") or 0)
+    liq   = _liq_price(pos)
+
+    tps = sorted(_to_float(x) for x in (orders.get("tp") or []))
+    sls = sorted(_to_float(x) for x in (orders.get("sl") or []))
+    sl  = (min(sls) if side == "LONG" else max(sls)) if sls else 0.0
+    if side == "SHORT":
+        tps = sorted(tps, reverse=True)
+
+    # Live unrealized PnL
+    last_px  = 0.0
+    try:
+        last_px = float(get_ticker(symbol) or 0)
+    except Exception:
+        pass
+
+    pnl_line = ""
+    if entry and last_px and lev:
+        raw = (last_px - entry) / entry * 100
+        if side == "SHORT":
+            raw = -raw
+        leveraged = raw * lev
+        sign  = "🟢 +" if leveraged >= 0 else "🔴 "
+        pnl_line = f"\nUnrealized: {sign}{leveraged:.2f}% (@ ${last_px:,.2f})"
+
+    p = compute_plan(side, entry, sl, tps, lev, liq)
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+
+    lines = [
+        f"━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Pair: {symbol}",
+        f"Side: {side_emoji} {side}   Lev: {lev:g}x",
+        f"Entry: {entry:,.2f}   Size: {size}",
+    ]
+
+    if sl:
+        sl_text = f"SL: {sl:,.2f}"
+        if p["sl_dist_pct"] is not None:
+            sl_text += f"  ({p['sl_dist_pct']:.2f}% away)"
+        lines.append(sl_text)
+
+    if p["rr"]:
+        for i, (tp, rr) in enumerate(p["rr"], 1):
+            lines.append(f"TP{i}: {tp:,.2f}   R:R {rr:.2f}")
+
+    if p["risk_pct"] is not None:
+        flag = "  🚩 OVER LIMIT" if p["risk_flag"] else ""
+        lines.append(f"Risk: {p['risk_pct']:.1f}% of capital{flag}")
+
+    if liq:
+        if p["liq_ok"] is True:
+            lines.append(f"Liq: {liq:,.2f}  ✅ ({p['liq_dist_pct']:.1f}% away)")
+        elif p["liq_ok"] is False:
+            lines.append(f"Liq: {liq:,.2f}  ❌ SL BEYOND LIQ")
+        else:
+            lines.append(f"Liq: {liq:,.2f}")
+
+    if pnl_line:
+        lines.append(pnl_line.lstrip("\n"))
+
+    return "\n".join(lines)
+
+
+def _show_account_state(account: str, label: str, scan_symbols: list[str]):
+    """Render and send all open positions for one account."""
+    if account == "main" and not BITGET_API_KEY:
+        send_text(f"{label}: BITGET_API_KEY not set.")
+        return
+    if account == "elite" and not ELITE_API_KEY:
+        send_text(f"{label}: ELITE_API_KEY not set.")
+        return
+
+    fetch_pos, fetch_orders = _ACCOUNTS[account]
+    open_positions = []
+
+    for sym in scan_symbols:
+        try:
+            pos = fetch_pos(sym)
+            if _position_is_open(pos):
+                orders = fetch_orders(sym) or {}
+                open_positions.append((sym, pos, orders))
+        except Exception as e:
+            log.warning(f"{label} state scan {sym}: {e}")
+
+    if not open_positions:
+        send_text(f"*{label} — Live State*\n\n_No open positions. Flat._\n\n🕐 {iso_utc_now()}")
+        return
+
+    lines = [f"*{label} — Live State*", ""]
+    for sym, pos, orders in open_positions:
+        lines.append(_format_position_card(sym, pos, orders))
+        lines.append("")
+    lines.append(f"━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🕐 {iso_utc_now()}")
+    send_text("\n".join(lines))
+
+
+def show_bot_state():
+    """/bot — current ATRb v2 systematic position(s) on main/sub-account."""
+    _show_account_state("main", "🤖 ATRb v2", ["ETHUSDT"])
+
+
+def show_live_state():
+    """/live — current Maxime LIVE discretionary position(s) on Elite account."""
+    _show_account_state("elite", "🎯 Maxime LIVE", ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
