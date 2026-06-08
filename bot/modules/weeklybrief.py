@@ -12,7 +12,7 @@ Covers:
   - Funding rate summary
   - Fear & Greed
   - Top crypto performers (CoinGecko trending)
-  - Ascent strategy performance (ETH)
+  - ATRb v2 strategy performance (ETH)
   - AI-generated narrative (Claude API)
 
 Fires to both private group and public channel.
@@ -423,15 +423,12 @@ def _fetch_asset_structure(symbol: str) -> dict | None:
 
 
 def _fetch_options_positioning(modules: dict) -> dict:
-    """Pull latest options snapshot from OptionsWatch."""
+    """Pull latest options snapshot from OptionsWatch for BTC + ETH."""
     try:
         state = modules["optionswatch"].STATE
         return {
-            "expiry":    state.get("last_expiry_str"),
-            "max_pain":  state.get("last_max_pain"),
-            "pc_ratio":  state.get("last_pc_ratio"),
-            "calls_oi":  state.get("last_calls_oi"),
-            "puts_oi":   state.get("last_puts_oi"),
+            "btc": state.get("btc", {}) or {},
+            "eth": state.get("eth", {}) or {},
         }
     except Exception:
         return {}
@@ -559,8 +556,8 @@ Be direct, no fluff. Max 40 words total. No emojis."""
 
 
 def _generate_ascent_commentary(data: dict) -> str:
-    """1-2 sentences on current market conditions for Ascent strategy context."""
-    prompt = f"""You are a quant analyst briefing copy traders on the Ascent ETH strategy.
+    """1-2 sentences on current market conditions for ATRb v2 strategy context."""
+    prompt = f"""You are a quant analyst briefing copy traders on the ATRb v2 strategy.
 Write exactly 1-2 short sentences describing current market conditions relevant to a
 4H momentum strategy trading ETH (100% allocation). Focus on: volatility regime, trend strength,
 and whether conditions favor or hurt a breakout strategy.
@@ -593,7 +590,7 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
     btc = crypto.get("bitcoin", {})
     eth = crypto.get("ethereum", {})
 
-    # Ascent strategy assets
+    # ATRb v2 strategy assets
     eth_w = _fetch_asset_weekly("ETHUSDT")
 
     # Market cap in trillions
@@ -788,7 +785,7 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
 
     # ═══ END SHARED SECTIONS ════════════════════════════════════════════════
 
-    # Ascent strategy — real PnL from last 7 days closed trades
+    # ATRb v2 strategy — real PnL from last 7 days closed trades
     try:
         from bot.modules.strategyrecap import _fetch_closed_trades
         closed = _fetch_closed_trades()
@@ -817,7 +814,7 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
 
     lines += [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🤖 *ASCENT ETH*",
+        "🤖 *ATRb v2*",
         "",
     ]
     if ascent_commentary:
@@ -851,44 +848,30 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
             "",
         ]
 
-        # Asset structure — BTC/ETH/SOL
-        lines += [
-            "📐 *TECHNICAL STRUCTURE*",
-            "",
-        ]
-        for label, symbol in [("BTC", "BTCUSDT"), ("ETH", "ETHUSDT"),
-                              ("SOL", "SOLUSDT")]:
-            s = _fetch_asset_structure(symbol)
-            if not s:
-                lines.append(f"  {label}: data unavailable")
-                continue
-            vs50  = f"{'+' if s['vs_ema50']  >= 0 else ''}{s['vs_ema50']:.1f}%"  if s['vs_ema50']  is not None else "N/A"
-            vs200 = f"{'+' if s['vs_ema200'] >= 0 else ''}{s['vs_ema200']:.1f}%" if s['vs_ema200'] is not None else "N/A"
-            rsi_emoji = "🔴" if s['rsi'] >= 70 else "🟢" if s['rsi'] <= 30 else "⚪"
-            lines.append(
-                f"  *{label}* `${s['price']:,.2f}` | "
-                f"Range `{s['range_pct']:.1f}%` | "
-                f"vs 50EMA `{vs50}` | vs 200EMA `{vs200}` | "
-                f"{rsi_emoji} RSI `{s['rsi']:.0f}`"
-            )
-        lines.append("")
-
-        # Options positioning
+        # Options positioning (BTC + ETH with gap-to-current calc)
         opt = _fetch_options_positioning(modules)
-        if opt.get("max_pain"):
+        btc_opt = opt.get("btc", {}) or {}
+        eth_opt = opt.get("eth", {}) or {}
+
+        if btc_opt.get("max_pain") or eth_opt.get("max_pain"):
             lines += [
-                "━━━━━━━━━━━━━━━━━━━━━━━━",
-                "⚙️ *OPTIONS POSITIONING (ETH)*",
+                "⚙️ *OPTIONS POSITIONING*",
                 "",
             ]
-            lines.append(f"  Expiry: `{opt.get('expiry', 'N/A')}`")
-            lines.append(f"  Max Pain: `${opt['max_pain']:,.0f}`")
-            if opt.get("pc_ratio") is not None:
-                pc = opt["pc_ratio"]
-                pc_emoji = "🔴" if pc > 1.2 else "🟢" if pc < 0.8 else "⚪"
-                lines.append(f"  Put/Call Ratio: {pc_emoji} `{pc:.2f}`")
-            if opt.get("calls_oi") and opt.get("puts_oi"):
-                lines.append(f"  OI: Calls `${opt['calls_oi']/1e6:.0f}M` · Puts `${opt['puts_oi']/1e6:.0f}M`")
+
+            for label, data in [("BTC", btc_opt), ("ETH", eth_opt)]:
+                if not data.get("max_pain"):
+                    continue
+                pain   = data["max_pain"]
+                expiry = data.get("expiry_str", "N/A")
+                price  = data.get("price")
+
+                line = f"  *{label}*: Expiry `{expiry}` — Max Pain `${pain:,.0f}`"
+                if price:
+                    gap_pct = (price - pain) / price * 100
+                    direction = "above" if gap_pct > 0 else "below"
+                    line += f" (`{abs(gap_pct):.1f}%` {direction} current)"
+                lines.append(line)
             lines.append("")
 
         # Stablecoin market cap
