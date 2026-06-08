@@ -206,10 +206,11 @@ def _fetch_with_fallback(yahoo_sym: str, stooq_sym: str) -> float | None:
 
 
 def _fetch_equity_weekly() -> dict:
-    """S&P 500 and Nasdaq 7-day change — Yahoo primary, stooq fallback."""
+    """S&P 500, Nasdaq, Apple 7-day change — Yahoo primary, stooq fallback."""
     return {
         "sp500":  _fetch_with_fallback("^GSPC",  "^spx"),
         "nasdaq": _fetch_with_fallback("^NDX",   "^ndx"),
+        "aapl":   _fetch_with_fallback("AAPL",   "aapl.us"),
     }
 
 
@@ -711,6 +712,9 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
             if equities.get("nasdaq") is not None:
                 e = "📈" if equities["nasdaq"] >= 0 else "📉"
                 lines.append(f"  Nasdaq:   {e} `{_pct(equities['nasdaq'])}`")
+            if equities.get("aapl") is not None:
+                e = "📈" if equities["aapl"] >= 0 else "📉"
+                lines.append(f"  🍎 AAPL:  {e} `{_pct(equities['aapl'])}`")
             lines.append("")
 
         if has_macro:
@@ -840,14 +844,6 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
 
     # ═══ PRIVATE-ONLY SECTIONS ═══════════════════════════════════════════════
     if private:
-        lines += [
-            "",
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "🔒 *TRADER DETAIL (private only)*",
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-        ]
-
         # Options positioning (BTC + ETH with gap-to-current calc)
         opt = _fetch_options_positioning(modules)
         btc_opt = opt.get("btc", {}) or {}
@@ -855,6 +851,7 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
 
         if btc_opt.get("max_pain") or eth_opt.get("max_pain"):
             lines += [
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
                 "⚙️ *OPTIONS POSITIONING*",
                 "",
             ]
