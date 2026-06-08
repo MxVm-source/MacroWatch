@@ -353,7 +353,7 @@ def _poll_positions():
                         f"Exit: ${last_px:,.2f}\n"
                         f"Est. PnL: {pub_emoji} {sign}{leveraged:.1f}%\n"
                         f"{streak_str + chr(10) if streak_str else ''}"
-                        f"\n🤖 ATRb v2 $1k → $100k — /bot\\_challenge"
+                        f"\n🤖 ATRb v2 $1k → $100k — `/bot_challenge`"
                     )
 
             elif cur["has_position"] and prev["has_position"]:
