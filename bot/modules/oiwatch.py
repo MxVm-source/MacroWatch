@@ -2,7 +2,7 @@
 """
 OIWatch — Open Interest Spike Monitor
 
-Fires when OI changes significantly in a short window on ETH/BNB/SOL.
+Fires when OI changes significantly in a short window on BTC/ETH.
 OI spike + price rising = trend strengthening (bullish conviction)
 OI spike + price falling = capitulation / forced liquidations
 OI dropping + price rising = short covering rally

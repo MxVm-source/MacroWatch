@@ -2,7 +2,7 @@
 """
 FundingWatch — Extreme Funding Rate Monitor
 
-Fires when funding rates cross extreme thresholds on ETH/BNB/SOL.
+Fires when funding rates cross extreme thresholds on BTC/ETH.
 Extreme longs = squeeze risk. Extreme shorts = short squeeze risk.
 
 Polls every 30 minutes. Cooldown 4h per asset to avoid spam.
