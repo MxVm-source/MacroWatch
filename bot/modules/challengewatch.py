@@ -74,7 +74,7 @@ LIVE_CONFIG = {
     "signer":       "elite",
     "footer_lines": [
         "_Live discretionary trades by Maxime. Real risk, real PnL._",
-        "_ATRb v2 (systematic) runs separately - see /bot\\_challenge._",
+        "_ATRb v2 (systematic) runs separately — see_ `/bot_challenge`",
     ],
     "follow_link":  None,
     "link_label":   None,
@@ -329,7 +329,9 @@ def show_live_challenge():
     """Maxime LIVE Challenge - private only."""
     try:
         msg = build_challenge(LIVE_CONFIG)
+        log.info(f"Live challenge built — {len(msg)} chars")
         send_text(msg)
+        log.info("Live challenge sent")
     except Exception as e:
         log.exception(f"Live challenge failed: {e}")
         send_text(f"🎯 [Live Challenge] ⚠️ Error: {str(e)[:200]}")
