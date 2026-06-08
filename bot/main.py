@@ -1144,28 +1144,35 @@ def _build_health_msg() -> str:
         "",
         "💸 *FundingWatch*",
         f"  Last check: {fw_check.strftime('%H:%M UTC') if fw_check else '—'}",
-        f"  ETH: {fw_rates.get('ETHUSDT', '—')}%  BNB: {fw_rates.get('BNBUSDT', '—')}%  SOL: {fw_rates.get('SOLUSDT', '—')}%",
+        f"  BTC: {fw_rates.get('BTCUSDT', '—')}%  ETH: {fw_rates.get('ETHUSDT', '—')}%",
     ]
 
     # OIWatch state
     oi_check = oiwatch.STATE.get("last_check")
     oi_data  = oiwatch.STATE.get("last_oi", {})
+    btc_oi   = '${:.2f}B'.format(oi_data['BTCUSDT']/1e9) if oi_data.get('BTCUSDT') else '—'
+    eth_oi   = '${:.2f}B'.format(oi_data['ETHUSDT']/1e9) if oi_data.get('ETHUSDT') else '—'
     lines += [
         "",
         "📊 *OIWatch*",
         f"  Last check: {oi_check.strftime('%H:%M UTC') if oi_check else '—'}",
-        f"  ETH OI: {'${:.2f}B'.format(oi_data['ETHUSDT']/1e9) if oi_data.get('ETHUSDT') else '—'}",
+        f"  BTC OI: {btc_oi}  |  ETH OI: {eth_oi}",
     ]
 
-    # OptionsWatch state
-    opt_last = optionswatch.STATE.get("last_alert_utc")
-    opt_exp  = optionswatch.STATE.get("last_expiry_str")
-    opt_pain = optionswatch.STATE.get("last_max_pain")
+    # OptionsWatch state (BTC + ETH)
+    opt_last  = optionswatch.STATE.get("last_alert_utc")
+    btc_state = optionswatch.STATE.get("btc", {}) or {}
+    eth_state = optionswatch.STATE.get("eth", {}) or {}
+    btc_pain  = btc_state.get("max_pain")
+    eth_pain  = eth_state.get("max_pain")
+    btc_exp   = btc_state.get("expiry_str") or "—"
+    eth_exp   = eth_state.get("expiry_str") or "—"
     lines += [
         "",
         "⚙️ *OptionsWatch*",
         f"  Last alert: {opt_last.strftime('%Y-%m-%d %H:%M UTC') if opt_last else '—'}",
-        f"  Expiry: {opt_exp or '—'}  Max pain: {'${:,.0f}'.format(opt_pain) if opt_pain else '—'}",
+        f"  BTC: {btc_exp}  Max pain: {'${:,.0f}'.format(btc_pain) if btc_pain else '—'}",
+        f"  ETH: {eth_exp}  Max pain: {'${:,.0f}'.format(eth_pain) if eth_pain else '—'}",
     ]
 
     return "\n".join(lines)
