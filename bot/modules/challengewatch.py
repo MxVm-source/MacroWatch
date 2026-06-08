@@ -76,8 +76,8 @@ LIVE_CONFIG = {
         "_Live discretionary trades by Maxime. Real risk, real PnL._",
         "_ATRb v2 (systematic) runs separately — see_ `/bot_challenge`",
     ],
-    "follow_link":  None,
-    "link_label":   None,
+    "follow_link":  BITGET_URL,
+    "link_label":   "Follow on Bitget",
 }
 
 
@@ -236,11 +236,12 @@ def build_challenge(config: dict) -> str:
     losses    = sum(1 for t in trades if t["pnl"] <= 0)
     win_rate  = round(wins / len(trades) * 100) if trades else 0
 
-    daily_avg = gain_usd / max(days_running, 1)
-    if equity > 0 and days_running >= 1:
-        daily_pct = ((equity / VIRTUAL_START) ** (1 / days_running) - 1) * 100
+    weeks_running = max(days_running / 7, 1/7)  # min ~1 day to avoid div by zero
+    weekly_avg    = gain_usd / weeks_running
+    if equity > 0 and weeks_running > 0:
+        weekly_pct = ((equity / VIRTUAL_START) ** (1 / weeks_running) - 1) * 100
     else:
-        daily_pct = 0
+        weekly_pct = 0
     avg_trade = gain_usd / len(trades) if trades else 0
 
     milestone_lines = [f"✅ ${VIRTUAL_START:,.0f} - Start 🚀"]
@@ -279,7 +280,7 @@ def build_challenge(config: dict) -> str:
         f"Trades:        `{len(trades)}` ({wins}W / {losses}L)",
         f"Win rate:      `{win_rate}%`",
         f"Avg per trade: `{gain_sign}${avg_trade:,.2f}`",
-        f"Daily avg:     `{gain_sign}${daily_avg:,.2f}`  ({gain_sign}{daily_pct:.2f}% compounding)",
+        f"Weekly avg:    `{gain_sign}${weekly_avg:,.2f}`  ({gain_sign}{weekly_pct:.2f}% compounding)",
         "",
     ]
     lines += config["footer_lines"]
