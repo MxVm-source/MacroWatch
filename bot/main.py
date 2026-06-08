@@ -227,183 +227,206 @@ def _job_positionwatch():
         _err("PositionWatch", e)
 
 
+
 def _poll_positions():
+    """
+    Dual-account PositionWatch.
+
+    Main / sub-account (BITGET_API_KEY) — ATRb v2 systematic bot:
+      Lightweight alerts only — Position Opened + Position Closed.
+      No TradeWatch plan card (bot has its own internal risk discipline).
+      No per-TP / per-SL alerts.
+
+    Elite account (ELITE_API_KEY) — Maxime LIVE discretionary:
+      Full alerts — Position Opened, Position Closed, TP Hit, SL Hit.
+      TradeWatch enriched plan card (R:R, risk %, liq check, ratchet)
+      fires automatically 4 seconds after position opens.
+
+    Both feed to private group only. Snapshot keyed by (account, symbol)
+    so the two books never collide.
+    """
     global _POS_INITIALISED, _POS_SNAPSHOT
 
-    symbols = BITGET_SYMBOLS or ["BTCUSDT", "ETHUSDT"]
+    from bot.datafeed_bitget import (
+        _fetch_current_futures_position,
+        _fetch_pending_tp_sl_orders,
+        _fetch_current_futures_position_elite,
+        _fetch_pending_tp_sl_orders_elite,
+        BITGET_API_KEY,
+        ELITE_API_KEY,
+    )
 
-    for sym in symbols:
-        sym = sym.strip().upper()
-        try:
-            pos    = _fetch_current_futures_position(sym)
-            orders = _fetch_pending_tp_sl_orders(sym)
-            tps    = sorted([_to_float(x) for x in (orders.get("tp") or [])])
-            sls    = sorted([_to_float(x) for x in (orders.get("sl") or [])])
-            is_open = _position_is_open(pos)
+    accounts = []
+    if BITGET_API_KEY:
+        accounts.append({
+            "name":         "main",
+            "label":        "🤖 ATRb v2",
+            "fetch_pos":    _fetch_current_futures_position,
+            "fetch_orders": _fetch_pending_tp_sl_orders,
+            "symbols":      BITGET_SYMBOLS or ["ETHUSDT"],
+            "rich":         False,  # lightweight alerts only
+        })
+    if ELITE_API_KEY:
+        accounts.append({
+            "name":         "elite",
+            "label":        "🎯 Maxime LIVE",
+            "fetch_pos":    _fetch_current_futures_position_elite,
+            "fetch_orders": _fetch_pending_tp_sl_orders_elite,
+            "symbols":      ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+            "rich":         True,   # TradeWatch plan + TP/SL alerts
+        })
 
-            cur = {
-                "has_position": is_open,
-                "side":  (pos.get("holdSide") or "").upper() if pos else "",
-                "size":  _to_float(pos.get("total") or pos.get("available") or 0) if pos else 0.0,
-                "entry": _to_float(pos.get("openPriceAvg") or pos.get("openPrice") or 0) if pos else 0.0,
-                "lev":   pos.get("leverage", "?") if pos else "?",
-                "tp":    tps,
-                "sl":    sls,
-            }
+    for acct in accounts:
+        for sym in acct["symbols"]:
+            sym = sym.strip().upper()
+            try:
+                pos    = acct["fetch_pos"](sym)
+                orders = acct["fetch_orders"](sym) or {}
+                tps    = sorted([_to_float(x) for x in (orders.get("tp") or [])])
+                sls    = sorted([_to_float(x) for x in (orders.get("sl") or [])])
+                is_open = _position_is_open(pos)
 
-            prev = _POS_SNAPSHOT.get(sym)
+                cur = {
+                    "has_position": is_open,
+                    "side":  (pos.get("holdSide") or "").upper() if pos else "",
+                    "size":  _to_float(pos.get("total") or pos.get("available") or 0) if pos else 0.0,
+                    "entry": _to_float(pos.get("openPriceAvg") or pos.get("openPrice") or 0) if pos else 0.0,
+                    "lev":   pos.get("leverage", "?") if pos else "?",
+                    "tp":    tps,
+                    "sl":    sls,
+                }
 
-            # First run — seed baseline silently
-            if not _POS_INITIALISED:
-                _POS_SNAPSHOT[sym] = cur
-                continue
+                key  = (acct["name"], sym)
+                prev = _POS_SNAPSHOT.get(key)
 
-            if prev is None:
-                _POS_SNAPSHOT[sym] = cur
-                continue
+                # First pass — seed baseline silently
+                if not _POS_INITIALISED or prev is None:
+                    _POS_SNAPSHOT[key] = cur
+                    continue
 
-            # ── Detect changes ───────────────────────────────────────────
-            side_emoji = "🟢" if cur["side"] == "LONG" else "🔴"
+                side_emoji = "🟢" if cur["side"] == "LONG" else "🔴"
+                label      = acct["label"]
+                rich       = acct["rich"]
 
-            # Position opened
-            if not prev["has_position"] and cur["has_position"]:
-                cur["opened_at"] = datetime.now(timezone.utc)
-                send_text(
-                    f"🤖 *ATRb v2 — Position Opened*\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Pair: {sym}\n"
-                    f"Side: {side_emoji} {cur['side']}\n"
-                    f"Entry: {cur['entry']:.2f}\n"
-                    f"Size: {cur['size']}\n"
-                    f"Leverage: {cur['lev']}x\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🕐 {iso_utc_now()}"
-                )
-                # TradeWatch — enriched plan (R:R, risk %, liq, ratchet).
-                # Delayed post so TP/SL bracket orders have time to land.
-                tradewatch.on_position_opened(sym)
-
-            # Position closed
-            elif prev["has_position"] and not cur["has_position"]:
-                prev_side = prev.get("side") or "?"
-                prev_emoji = "🟢" if prev_side == "LONG" else "🔴"
-                entry = prev.get("entry", 0.0)
-
-                # Fetch last price for PnL estimate
-                try:
-                    from bot.datafeed_bitget import get_ticker
-                    last_px = get_ticker(sym) or 0.0
-                except Exception:
-                    last_px = 0.0
-
-                # PnL % from entry to close price
-                pnl_pct = ""
-                pnl_sign = ""
-                leveraged = 0.0
-                if entry and last_px:
-                    raw = (last_px - entry) / entry * 100
-                    if prev_side == "SHORT":
-                        raw = -raw
-                    lev = _to_float(prev.get("lev") or 1)
-                    leveraged = raw * lev
-                    sign = "🟢 +" if leveraged >= 0 else "🔴 "
-                    pnl_pct = f"\nEst. PnL: {sign}{leveraged:.1f}% (@ {last_px:.2f})"
-
-                # Hold duration
-                duration = ""
-                opened_at = prev.get("opened_at")
-                if opened_at:
-                    delta = datetime.now(timezone.utc) - opened_at
-                    h, rem = divmod(int(delta.total_seconds()), 3600)
-                    m = rem // 60
-                    duration = f"\nHeld: {h}h {m:02d}m"
-
-                # Streak
-                streak_str = ""
-                if entry and last_px:
-                    s = _update_streak(leveraged >= 0)
-                    if s:
-                        streak_str = s
-
-                # ── Text alert (PnL card removed for memory) ──────────────
-                streak_line = f"\n{streak_str}" if streak_str else ""
-                send_text(
-                    f"🤖 *ATRb v2 — Position Closed*\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Pair: {sym}\n"
-                    f"Side: {prev_emoji} {prev_side}"
-                    f"{pnl_pct}"
-                    f"{duration}"
-                    f"{streak_line}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🕐 {iso_utc_now()}"
-                )
-
-                # ── Public channel post ───────────────────────────────────
-                if PUBLIC_CHAT_ID and entry and last_px:
-                    sign      = "+" if leveraged >= 0 else ""
-                    pub_emoji = "🟢" if leveraged >= 0 else "🔴"
-                    side_icon = "📈" if prev_side == "LONG" else "📉"
-                    send_public(
-                        f"🤖 *Infinex Capital — ATRb v2 Trade Closed*\n"
-                        f"_Intelligence provided by MacroWatch 🧠_\n\n"
+                # ── Position opened ──────────────────────────────────────
+                if not prev["has_position"] and cur["has_position"]:
+                    cur["opened_at"] = datetime.now(timezone.utc)
+                    send_text(
+                        f"*{label} — Position Opened*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"Pair: {sym}\n"
-                        f"Side: {side_icon} {prev_side}\n"
-                        f"Entry: ${entry:,.2f}\n"
-                        f"Exit: ${last_px:,.2f}\n"
-                        f"Est. PnL: {pub_emoji} {sign}{leveraged:.1f}%\n"
-                        f"{streak_str + chr(10) if streak_str else ''}"
-                        f"\n🤖 ATRb v2 $1k → $100k — `/bot_challenge`"
+                        f"Side: {side_emoji} {cur['side']}\n"
+                        f"Entry: {cur['entry']:.2f}\n"
+                        f"Size: {cur['size']}\n"
+                        f"Leverage: {cur['lev']}x\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🕐 {iso_utc_now()}"
+                    )
+                    if rich:
+                        # Elite only — enriched TradeWatch plan card
+                        tradewatch.on_position_opened(sym, account=acct["name"])
+
+                # ── Position closed ──────────────────────────────────────
+                elif prev["has_position"] and not cur["has_position"]:
+                    prev_side  = prev.get("side") or "?"
+                    prev_emoji = "🟢" if prev_side == "LONG" else "🔴"
+                    entry      = prev.get("entry", 0.0)
+
+                    # Fetch last price for PnL estimate
+                    try:
+                        from bot.datafeed_bitget import get_ticker
+                        last_px = get_ticker(sym) or 0.0
+                    except Exception:
+                        last_px = 0.0
+
+                    pnl_pct_line = ""
+                    leveraged    = 0.0
+                    if entry and last_px:
+                        raw = (last_px - entry) / entry * 100
+                        if prev_side == "SHORT":
+                            raw = -raw
+                        leveraged = raw * _to_float(prev.get("lev") or 1)
+                        sign      = "🟢 +" if leveraged >= 0 else "🔴 "
+                        pnl_pct_line = f"\nEst. PnL: {sign}{leveraged:.1f}% (@ {last_px:.2f})"
+
+                    duration_line = ""
+                    opened_at = prev.get("opened_at")
+                    if opened_at:
+                        delta = datetime.now(timezone.utc) - opened_at
+                        h, rem = divmod(int(delta.total_seconds()), 3600)
+                        m = rem // 60
+                        duration_line = f"\nHeld: {h}h {m:02d}m"
+
+                    streak_line = ""
+                    if rich and entry and last_px:
+                        s = _update_streak(leveraged >= 0)
+                        if s:
+                            streak_line = f"\n{s}"
+
+                    send_text(
+                        f"*{label} — Position Closed*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Pair: {sym}\n"
+                        f"Side: {prev_emoji} {prev_side}"
+                        f"{pnl_pct_line}"
+                        f"{duration_line}"
+                        f"{streak_line}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🕐 {iso_utc_now()}"
                     )
 
-            elif cur["has_position"] and prev["has_position"]:
-                prev_tps = prev.get("tp") or []
-                cur_tps  = cur.get("tp") or []
-                prev_sls = prev.get("sl") or []
-                cur_sls  = cur.get("sl") or []
+                # ── TP / SL hit detection (Elite only) ───────────────────
+                elif rich and cur["has_position"] and prev["has_position"]:
+                    prev_tps = prev.get("tp") or []
+                    cur_tps  = cur.get("tp") or []
+                    prev_sls = prev.get("sl") or []
+                    cur_sls  = cur.get("sl") or []
 
-                # TP hit — a TP price disappeared from the order list
-                for tp in prev_tps:
-                    if tp not in cur_tps:
-                        send_text(
-                            f"✅ *ATRb v2 — TP Hit*\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"Pair: {sym}\n"
-                            f"Side: {side_emoji} {cur['side']}\n"
-                            f"TP: {tp}\n"
-                            f"🕐 {iso_utc_now()}"
-                        )
+                    # TP hit — a TP price disappeared
+                    for tp in prev_tps:
+                        if tp not in cur_tps:
+                            send_text(
+                                f"✅ *{label} — TP Hit*\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"Pair: {sym}\n"
+                                f"Side: {side_emoji} {cur['side']}\n"
+                                f"TP: {tp}\n"
+                                f"🕐 {iso_utc_now()}"
+                            )
 
-                # SL hit — SL price disappeared and position still open (partial fill)
-                # or position closed handles full SL — detect via SL disappearing
-                for sl in prev_sls:
-                    if sl not in cur_sls and not cur["has_position"]:
-                        send_text(
-                            f"❌ *ATRb v2 — SL Hit*\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"Pair: {sym}\n"
-                            f"Side was: {side_emoji} {prev['side']}\n"
-                            f"SL: {sl}\n"
-                            f"🕐 {iso_utc_now()}"
-                        )
+                    # SL hit — a SL price disappeared and position still open
+                    for sl in prev_sls:
+                        if sl not in cur_sls:
+                            send_text(
+                                f"❌ *{label} — SL Moved/Hit*\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"Pair: {sym}\n"
+                                f"Side: {side_emoji} {cur['side']}\n"
+                                f"SL: {sl}\n"
+                                f"🕐 {iso_utc_now()}"
+                            )
 
-            _POS_SNAPSHOT[sym] = cur
+                # Preserve opened_at across snapshots
+                if cur["has_position"] and prev and prev.get("opened_at"):
+                    cur["opened_at"] = prev["opened_at"]
 
-        except Exception as e:
-            print(f"[PositionWatch] Error for {sym}: {e}", flush=True)
+                _POS_SNAPSHOT[key] = cur
+
+            except Exception as e:
+                log.warning(f"PositionWatch {acct['name']} {sym}: {e}")
 
     # Mark initialised after first full pass
     if not _POS_INITIALISED:
         _POS_INITIALISED = True
         print("📘 PositionWatch baseline set ✅", flush=True)
 
-    # ── Milestone check — runs every 10s alongside position watch ────────────
+    # ── Milestone check (legacy — kept for backwards compat) ─────────────────
     if _POS_INITIALISED:
         try:
             bal = _fetch_account_balance_eur()
             if bal is not None:
                 _check_milestones(bal)
-        except Exception as _me:
+        except Exception:
             pass
 
 
