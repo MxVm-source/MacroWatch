@@ -237,7 +237,7 @@ def _poll_positions():
       No TradeWatch plan card (bot has its own internal risk discipline).
       No per-TP / per-SL alerts.
 
-    Elite account (ELITE_API_KEY) — Maxime LIVE discretionary:
+    Elite account (ELITE_API_KEY) — TraderWatch discretionary:
       Full alerts — Position Opened, Position Closed, TP Hit, SL Hit.
       TradeWatch enriched plan card (R:R, risk %, liq check, ratchet)
       fires automatically 4 seconds after position opens.
@@ -269,7 +269,7 @@ def _poll_positions():
     if ELITE_API_KEY:
         accounts.append({
             "name":         "elite",
-            "label":        "🎯 Maxime LIVE",
+            "label":        "🎯 TraderWatch",
             "fetch_pos":    _fetch_current_futures_position_elite,
             "fetch_orders": _fetch_pending_tp_sl_orders_elite,
             "symbols":      ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
@@ -454,7 +454,7 @@ def _job_challenge_update():
     except Exception as e:
         _err("BotChallengeUpdate", e)
 
-    # Live (Maxime discretionary) challenge -> private only
+    # Live (TraderWatch discretionary) challenge -> private only
     try:
         challengewatch.show_live_challenge()
     except Exception as e:
@@ -1298,9 +1298,9 @@ def _handle_command(text: str, text_raw: str):
             "/restart — Trigger clean poll of all modules\n"
             "/status — ATRb v2 live strategy status (indicators + regime)\n"
             "/bot — ATRb v2 current open position(s)\n"
-            "/live — Maxime LIVE current open position(s)\n"
+            "/live — TraderWatch current open position(s)\n"
             "/bot_challenge — ATRb v2 $1k → $100k progress\n"
-            "/live_challenge — Maxime LIVE $1k → $10k progress\n"
+            "/live_challenge — TraderWatch $1k → $10k progress\n"
             "/report — Last 7 days trades + P&L\n"
             "/plan — Post enriched plan for the open position (R:R, risk %, liq, ratchet)\n"
         )
@@ -1493,7 +1493,7 @@ def _handle_command(text: str, text_raw: str):
             send_text(f"🤖 [Bot Challenge] Error: {e}")
         return
 
-    # ── /live_challenge → Maxime discretionary ($1k → $10k) ───────────────────
+    # ── /live_challenge → TraderWatch discretionary ($1k → $10k) ───────────────────
     if text.startswith("/live_challenge"):
         try:
             challengewatch.show_live_challenge()
@@ -1525,7 +1525,7 @@ def _handle_command(text: str, text_raw: str):
             send_text(f"🤖 [Bot State] Error: {e}")
         return
 
-    # ── /live → Maxime LIVE discretionary live state ──────────────────────────
+    # ── /live → TraderWatch discretionary live state ──────────────────────────
     if text.startswith("/live") and not text.startswith("/live_challenge"):
         try:
             tradewatch.show_live_state()
