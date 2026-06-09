@@ -7,8 +7,8 @@ ChallengeWatch — Two parallel challenges:
      - Signed with BITGET_API_KEY credentials
      - Fires to PUBLIC + PRIVATE channels (Tuesday cadence handled in main.py)
 
-  2. Maxime LIVE Challenge ($1k -> $10k)
-     - Tracks Maxime's discretionary trading on the standard/Elite account
+  2. TraderWatch Challenge ($1k -> $10k)
+     - Tracks TraderWatch's discretionary trading on the standard/Elite account
      - Signed with ELITE_API_KEY credentials
      - Fires to PRIVATE channel only - exclusive content for active traders
 
@@ -20,7 +20,7 @@ Both challenges:
 Commands:
   /challenge         -> Live challenge (backwards compat alias)
   /bot_challenge     -> ATRb v2 systematic challenge
-  /live_challenge    -> Maxime discretionary challenge
+  /live_challenge    -> TraderWatch discretionary challenge
   /challenge_diag    -> Raw API debug dump
 """
 
@@ -58,26 +58,27 @@ BOT_CONFIG = {
     "signer":       "main",
     "footer_lines": [
         "_Fully automated. No discretion. No emotion._",
-        "_Maxime's LIVE discretionary trading is separate - private group._",
+        "_TraderWatch discretionary trading is separate — private group._",
     ],
-    "follow_link":  BITGET_URL,
-    "link_label":   "Copy on Bitget",
+    "follow_link":  None,        # ATRb v2 copy-trading not yet live
+    "link_label":   None,
 }
 
 LIVE_CONFIG = {
-    "name":         "Maxime LIVE Challenge",
-    "header":       "🎯 *$1k → $10k — Maxime LIVE Challenge*",
+    "name":         "TraderWatch Challenge",
+    "header":       "🎯 *$1k → $10k — TraderWatch Challenge*",
     "target":       10000.00,
     "milestones":   [2000, 3000, 5000, 7500, 10000],
     "start_date":   os.getenv("LIVE_CHALLENGE_START_DATE", "2026-05-01"),
     "symbols":      ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
     "signer":       "elite",
     "footer_lines": [
-        "_Live discretionary trades by Maxime. Real risk, real PnL._",
+        "_Live discretionary trades by TraderWatch. Real risk, real PnL._",
         "_ATRb v2 (systematic) runs separately — see_ `/bot_challenge`",
+        "_Copy-trading goes live once Elite-qualified._",
     ],
-    "follow_link":  BITGET_URL,
-    "link_label":   "Follow on Bitget",
+    "follow_link":  None,
+    "link_label":   None,
 }
 
 
@@ -327,7 +328,7 @@ def show_bot_challenge():
 
 
 def show_live_challenge():
-    """Maxime LIVE Challenge - private only."""
+    """TraderWatch Challenge - private only."""
     try:
         msg = build_challenge(LIVE_CONFIG)
         log.info(f"Live challenge built — {len(msg)} chars")
@@ -339,7 +340,7 @@ def show_live_challenge():
 
 
 def show_challenge():
-    """Legacy /challenge command - defaults to LIVE (Maxime discretionary)."""
+    """Legacy /challenge command - defaults to LIVE (TraderWatch discretionary)."""
     show_live_challenge()
 
 

@@ -356,5 +356,5 @@ def show_bot_state():
 
 
 def show_live_state():
-    """/live — current Maxime LIVE discretionary position(s) on Elite account."""
-    _show_account_state("elite", "🎯 Maxime LIVE", ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    """/live — current TraderWatch discretionary position(s) on Elite account."""
+    _show_account_state("elite", "🎯 TraderWatch", ["BTCUSDT", "ETHUSDT", "SOLUSDT"])

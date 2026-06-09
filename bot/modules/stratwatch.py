@@ -247,7 +247,7 @@ def build_status() -> str:
 
     # Account balance — ATRb v2 lives on the BITGET_API_KEY account
     # (currently the sub-account, eventually sub/elite). Never read Elite here —
-    # Elite is Maxime's discretionary LIVE Trading book, separate product.
+    # Elite is TraderWatch's discretionary book, separate product.
     balance_str = "—"
     try:
         from bot.datafeed_bitget import _signed_request, BITGET_PRODUCT_TYPE as _PT
