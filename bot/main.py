@@ -35,6 +35,7 @@ from bot.utils import send_text, get_updates
 
 
 import bot.modules.fedwatch        as fedwatch
+import bot.modules.market_structure_module as market_structure
 import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.correlwatch     as correlwatch
 import bot.modules.whalewatch      as whalewatch
@@ -47,6 +48,7 @@ import bot.modules.vixwatch        as vixwatch
 import bot.modules.intelwatch      as intelwatch
 import bot.modules.reportwatch     as reportwatch
 import bot.modules.tradewatch      as tradewatch
+import bot.modules.market_structure_module as market_structure
 
 log = logging.getLogger("main")
 
@@ -1054,6 +1056,14 @@ def start_scheduler():
     )
     print("🧠 IntelWatch auto-trigger scheduled (30min) ✅", flush=True)
 
+    # ── MarketStructure — 4H close + 2 min (BTC + ETH, 1 min apart)
+    SCHED.add_job(
+        market_structure.poll_all, "cron",
+        hour="0,4,8,12,16,20", minute=2,
+        id="market_structure", max_instances=1, misfire_grace_time=300,
+    )
+    print("📊 MarketStructure scheduled (4H close +2min) ✅", flush=True)
+
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
@@ -1299,6 +1309,7 @@ def _handle_command(text: str, text_raw: str):
             "/status — ATRb v2 live strategy status (indicators + regime)\n"
             "/bot — ATRb v2 current open position(s)\n"
             "/live — TraderWatch current open position(s)\n"
+            "/structure [BTC|ETH] — 4H S/R + regime + funding/OI\n"
             "/bot_challenge — ATRb v2 $1k → $100k progress\n"
             "/live_challenge — TraderWatch $1k → $10k progress\n"
             "/report — Last 7 days trades + P&L\n"
@@ -1531,6 +1542,16 @@ def _handle_command(text: str, text_raw: str):
             tradewatch.show_live_state()
         except Exception as e:
             send_text(f"🎯 [Live State] Error: {e}")
+        return
+
+    # ── /structure [BTC|ETH] — live 4H S/R + regime + funding/OI ─────────────
+    if text.startswith("/structure"):
+        try:
+            parts = text.split()
+            sym = parts[1].upper() if len(parts) > 1 else "BTC"
+            market_structure.show_structure(sym)
+        except Exception as e:
+            send_text(f"📊 [MarketStructure] Error: {e}")
         return
 
     # ── /plan ─────────────────────────────────────────────────────────────────
