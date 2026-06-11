@@ -31,11 +31,13 @@ log = logging.getLogger("market_structure")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-FAPI            = "https://fapi.binance.com/fapi/v1/klines"
-FAPI_FUNDING    = "https://fapi.binance.com/fapi/v1/fundingRate"
-FAPI_PREMIUM    = "https://fapi.binance.com/fapi/v1/premiumIndex"
-FAPI_OI         = "https://fapi.binance.com/fapi/v1/openInterest"
-FAPI_OI_HIST    = "https://fapi.binance.com/futures/data/openInterestHist"
+# Bitget endpoints (geo-friendly from Render's IPs; Binance returns HTTP 451)
+BITGET_BASE     = "https://api.bitget.com"
+BITGET_CANDLES  = f"{BITGET_BASE}/api/v2/mix/market/candles"
+BITGET_FUNDING  = f"{BITGET_BASE}/api/v2/mix/market/current-fund-rate"
+BITGET_FUND_HIST= f"{BITGET_BASE}/api/v2/mix/market/history-fund-rate"
+BITGET_OI       = f"{BITGET_BASE}/api/v2/mix/market/open-interest"
+PRODUCT_TYPE    = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 
 NBARS           = int(os.getenv("MS_NBARS", "1000"))
 FRACTAL_N       = int(os.getenv("MS_FRACTAL_N", "3"))
@@ -57,8 +59,10 @@ def _load_state():
     try:
         with open(STATE_PATH, "r") as f:
             data = json.load(f)
-        # Convert ISO timestamps back to datetimes
+        # Convert ISO timestamps back to datetimes (skip OI history lists)
         for sym, s in data.items():
+            if sym.startswith("_oi_hist_"):
+                continue
             if s.get("last_fire_utc"):
                 s["last_fire_utc"] = datetime.fromisoformat(s["last_fire_utc"])
         STATE = data
@@ -74,6 +78,10 @@ def _save_state():
         os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
         out = {}
         for sym, s in STATE.items():
+            if sym.startswith("_oi_hist_"):
+                # Rolling OI history — store as plain list
+                out[sym] = s
+                continue
             out[sym] = {
                 "last_fire_utc":  s["last_fire_utc"].isoformat() if s.get("last_fire_utc") else None,
                 "last_regime":    s.get("last_regime"),
@@ -92,26 +100,43 @@ _load_state()
 
 # ─── Data fetch (mirrors btc_4h_levels.py) ────────────────────────────────────
 
-def fetch_klines(sym: str, interval: str = "4h", limit: int = NBARS) -> pd.DataFrame:
-    """Fetch OHLCV bars from Binance USDT-M perp, paginated backwards if needed."""
+def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataFrame:
+    """
+    Fetch 4H OHLCV from Bitget USDT perp.
+    Bitget v2 caps each request at 200 candles, so we paginate backwards by endTime.
+    Response shape: [timestamp, open, high, low, close, base_vol, quote_vol]
+    """
     out, end = [], None
+    BATCH = 200
     while len(out) < limit:
-        p = {"symbol": sym, "interval": interval, "limit": min(1000, limit - len(out))}
+        params = {
+            "symbol":      sym,
+            "granularity": interval,
+            "limit":       str(min(BATCH, limit - len(out))),
+            "productType": PRODUCT_TYPE,
+        }
         if end:
-            p["endTime"] = end
-        r = requests.get(FAPI, params=p, timeout=15)
+            params["endTime"] = str(end)
+        r = requests.get(BITGET_CANDLES, params=params, timeout=15)
         r.raise_for_status()
-        k = r.json()
-        if not k:
+        data = r.json()
+        if data.get("code") != "00000":
+            raise RuntimeError(f"Bitget candles err {data.get('code')}: {data.get('msg')}")
+        candles = data.get("data") or []
+        if not candles:
             break
-        out = k + out
-        end = k[0][0] - 1
+        # Bitget returns oldest first per page; prepend to maintain order
+        out = candles + out
+        # next page: end at the oldest timestamp - 1
+        end = int(candles[0][0]) - 1
         time.sleep(0.2)
-    df = pd.DataFrame(out, columns=["ot","o","h","l","c","v","ct","q","n","tb","tq","ig"])
-    df = df[["ot","o","h","l","c","v"]].astype(
+
+    df = pd.DataFrame(out, columns=["ot", "o", "h", "l", "c", "v", "qv"])
+    df = df[["ot", "o", "h", "l", "c", "v"]].astype(
         {"o": float, "h": float, "l": float, "c": float, "v": float}
     )
-    df["t"] = pd.to_datetime(df["ot"], unit="ms", utc=True)
+    df["ot"] = df["ot"].astype(np.int64)
+    df["t"]  = pd.to_datetime(df["ot"], unit="ms", utc=True)
     return df.drop_duplicates("ot").sort_values("ot").reset_index(drop=True)
 
 
@@ -148,30 +173,62 @@ def fit_tl(idx, prices):
 
 
 def funding_data(sym: str, limit: int = 42):
-    """Last N funding prints (8h cadence) + current premium index rate."""
+    """
+    Current funding rate + recent history from Bitget.
+    Returns (fr_df with 'fundingRate' column, current_rate_float).
+    """
     try:
-        r = requests.get(FAPI_FUNDING, params={"symbol": sym, "limit": limit}, timeout=15)
-        r.raise_for_status()
-        fr = pd.DataFrame(r.json())
-        fr["fundingRate"] = fr["fundingRate"].astype(float)
-        cur = requests.get(FAPI_PREMIUM, params={"symbol": sym}, timeout=15).json()
-        return fr, float(cur["lastFundingRate"])
+        cur = requests.get(BITGET_FUNDING,
+                           params={"symbol": sym, "productType": PRODUCT_TYPE},
+                           timeout=15).json()
+        cur_data = (cur.get("data") or [{}])[0]
+        cur_rate = float(cur_data.get("fundingRate", 0) or 0)
+
+        hist = requests.get(BITGET_FUND_HIST,
+                            params={"symbol": sym, "productType": PRODUCT_TYPE,
+                                    "pageSize": str(limit)},
+                            timeout=15).json()
+        rows = hist.get("data") or []
+        fr = pd.DataFrame(rows)
+        if not fr.empty and "fundingRate" in fr.columns:
+            fr["fundingRate"] = fr["fundingRate"].astype(float)
+        else:
+            fr = pd.DataFrame({"fundingRate": []})
+
+        return fr, cur_rate
     except Exception as e:
         log.warning(f"funding fetch failed for {sym}: {e}")
-        return pd.DataFrame(), 0.0
+        return pd.DataFrame({"fundingRate": []}), 0.0
 
 
 def open_interest_data(sym: str, period: str = "4h", limit: int = 120):
-    """Current OI + 4H history for trend computation."""
+    """
+    Current OI from Bitget. Bitget v2 doesn't expose OI history the way
+    Binance does, so we approximate the trend by sampling current OI
+    against a stored rolling history kept in STATE.
+    """
     try:
-        now = requests.get(FAPI_OI, params={"symbol": sym}, timeout=15).json()
-        hist = requests.get(FAPI_OI_HIST,
-                            params={"symbol": sym, "period": period, "limit": limit},
-                            timeout=15)
-        oh = pd.DataFrame(hist.json()) if hist.ok else pd.DataFrame()
-        if not oh.empty:
-            oh["sumOpenInterest"] = oh["sumOpenInterest"].astype(float)
-        return float(now["openInterest"]), oh
+        now = requests.get(BITGET_OI,
+                           params={"symbol": sym, "productType": PRODUCT_TYPE},
+                           timeout=15).json()
+        rows = now.get("data") or []
+        oi_now = 0.0
+        for row in rows:
+            if row.get("symbol") == sym:
+                oi_now = float(row.get("amount") or row.get("size") or 0)
+                break
+        if not oi_now and rows:
+            oi_now = float(rows[0].get("amount") or rows[0].get("size") or 0)
+
+        # Rolling OI history kept in persistent STATE (bar-by-bar, capped at `limit`)
+        hist_key = f"_oi_hist_{sym}"
+        oi_hist = STATE.get(hist_key, [])
+        oi_hist.append(oi_now)
+        oi_hist = oi_hist[-limit:]
+        STATE[hist_key] = oi_hist
+
+        oh = pd.DataFrame({"sumOpenInterest": oi_hist})
+        return oi_now, oh
     except Exception as e:
         log.warning(f"OI fetch failed for {sym}: {e}")
         return 0.0, pd.DataFrame()
@@ -265,7 +322,7 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
       tl_desc_now, tl_desc_slope, tl_asc_now, tl_asc_slope,
       trade_zone_status, trade_zone_text
     """
-    df = fetch_klines(symbol, "4h", nbars)
+    df = fetch_klines(symbol, "4H", nbars)
     sh, sl = fractals(df, n)
     spot = float(df["c"].iloc[-1])
     i_last = len(df) - 1
