@@ -420,12 +420,20 @@ def format_telegram(s: dict) -> str:
     near_price = s.get("trade_zone_near")
     regime_emoji = _REGIME_EMOJI.get(regime, "⚪")
 
+    AGGR_URL = "https://aggr.trade/6zn3"
+
     lines = [
         f"📊 *{sym} 4H* — `${spot:,.0f}`",
         f"🕐 {ts_str}",
         "",
         f"{regime_emoji} *{regime}*",
         f"{s['trade_zone_status']} {s['trade_zone_text']}",
+    ]
+
+    if s["trade_zone_status"] == "✅":
+        lines.append(f"   → [Check aggr 15m CVD]({AGGR_URL})")
+
+    lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
