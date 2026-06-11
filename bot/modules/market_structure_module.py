@@ -277,10 +277,12 @@ def _classify_regime(df: pd.DataFrame) -> str:
     return "CHOP"
 
 
-def _trade_zone_verdict(spot: float, res_levels, sup_levels) -> tuple[str, str]:
+def _trade_zone_verdict(spot: float, res_levels, sup_levels) -> tuple[str, str, float | None]:
     """
     Are we AT a tradeable level (within proximity), or mid-range no-trade?
-    Returns (emoji_status, text).
+    Returns (emoji_status, text, near_price_or_None).
+    near_price marks which level (if any) the spot is currently sitting at,
+    so format_telegram can flag it with "← HERE" without re-deriving it.
     """
     near_res = None
     near_sup = None
@@ -294,16 +296,16 @@ def _trade_zone_verdict(spot: float, res_levels, sup_levels) -> tuple[str, str]:
             break
 
     if near_res:
-        return "✅", f"At resistance {near_res[0]:,.0f} (x{near_res[1]}) — fade/breakout zone"
+        return "✅", f"At resistance {near_res[0]:,.0f} (×{near_res[1]}) — fade or breakout watch", near_res[0]
     if near_sup:
-        return "✅", f"At support {near_sup[0]:,.0f} (x{near_sup[1]}) — bounce/breakdown zone"
+        return "✅", f"At support {near_sup[0]:,.0f} (×{near_sup[1]}) — bounce or breakdown watch", near_sup[0]
 
     # Mid-range — compute distance to closest level
-    candidates = [(p, n, "R") for p, n in res_levels] + [(p, n, "S") for p, n in sup_levels]
+    candidates = [(p, n, "resistance") for p, n in res_levels] + [(p, n, "support") for p, n in sup_levels]
     if candidates:
         closest = min(candidates, key=lambda x: abs(x[0] - spot))
-        return "❌", f"Mid-range — wait for {closest[0]:,.0f} ({closest[2]})"
-    return "❌", "No nearby levels"
+        return "⏳", f"Mid-range — next level {closest[0]:,.0f} ({closest[2]})", None
+    return "⏳", "Mid-range — no nearby levels", None
 
 
 # ─── Main data function ──────────────────────────────────────────────────────
@@ -363,7 +365,7 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
     tl_asc_slope  = tl_asc[0] if tl_asc else None
 
     regime = _classify_regime(df)
-    tz_status, tz_text = _trade_zone_verdict(spot, res_levels, sup_levels)
+    tz_status, tz_text, tz_near_price = _trade_zone_verdict(spot, res_levels, sup_levels)
 
     return {
         "symbol":              symbol,
@@ -384,60 +386,83 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
         "tl_asc_slope":        tl_asc_slope,
         "trade_zone_status":   tz_status,
         "trade_zone_text":     tz_text,
+        "trade_zone_near":     tz_near_price,
     }
 
 
 # ─── Format Telegram message ─────────────────────────────────────────────────
 
-def _fmt_level(p: float, count: int, spot: float, mark_near: bool = True) -> str:
-    pct = (p / spot - 1) * 100
+def _fmt_level(p: float, count: int, spot: float, near_price: float | None) -> str:
+    """One level line: price, touch count, distance, and HERE marker if it's
+    the level the trade-zone verdict is referencing."""
+    pct  = (p / spot - 1) * 100
     sign = "+" if pct >= 0 else ""
-    near = ""
-    if mark_near and abs(pct) <= PROXIMITY_PCT * 100:
-        near = " ← NEAR"
-    return f"{p:,.0f} ×{count} ({sign}{pct:.1f}%){near}"
+    here = "  ← HERE" if (near_price is not None and abs(p - near_price) < 1e-6) else ""
+    return f"  {p:>10,.0f}  ×{count}  ({sign}{pct:.1f}%){here}"
+
+
+_REGIME_EMOJI = {
+    "BULL-EXP":   "🟢",
+    "BULL-RANGE": "🟡",
+    "BEAR-EXP":   "🔴",
+    "BEAR-RANGE": "🟡",
+    "CHOP":       "⚪",
+    "UNKNOWN":    "⚪",
+}
 
 
 def format_telegram(s: dict) -> str:
-    """Build the compact broadcast message."""
-    sym       = s["symbol"]
-    spot      = s["spot"]
-    regime    = s["regime"]
-    ts_str    = s["ts"].strftime("%d-%b %H:%M UTC")
-
-    # Resistance line
-    res_parts = [_fmt_level(p, c, spot) for p, c in s["res_levels"]]
-    res_str   = " | ".join(res_parts) if res_parts else "—"
-
-    # Support line
-    sup_parts = [_fmt_level(p, c, spot) for p, c in s["sup_levels"]]
-    sup_str   = " | ".join(sup_parts) if sup_parts else "—"
-
-    # Trendlines
-    tl_parts = []
-    if s["tl_desc_now"]:
-        tl_parts.append(f"desc: {s['tl_desc_now']:,.0f}")
-    if s["tl_asc_now"]:
-        tl_parts.append(f"asc: {s['tl_asc_now']:,.0f}")
-    tl_str = " | ".join(tl_parts) if tl_parts else "—"
-
-    # Funding + OI
-    f_sign = "+" if s["funding_now_pct"] >= 0 else ""
-    oi_sign = "+" if s["oi_trend_pct"] >= 0 else ""
-    funding_oi = (f"Funding: {f_sign}{s['funding_now_pct']:.4f}%/8h {s['funding_bias']} | "
-                  f"OI: {oi_sign}{s['oi_trend_pct']:.1f}% (120 bars)")
+    """Build the broadcast message — verdict-first, scannable level lists."""
+    sym        = s["symbol"]
+    spot       = s["spot"]
+    regime     = s["regime"]
+    ts_str     = s["ts"].strftime("%d-%b %H:%M UTC")
+    near_price = s.get("trade_zone_near")
+    regime_emoji = _REGIME_EMOJI.get(regime, "⚪")
 
     lines = [
-        f"📊 *{sym} 4H* | `{spot:,.0f}` | {ts_str}",
-        f"Regime: *{regime}* | {s['trade_zone_status']} {s['trade_zone_text']}",
+        f"📊 *{sym} 4H* — `${spot:,.0f}`",
+        f"🕐 {ts_str}",
+        "",
+        f"{regime_emoji} *{regime}*",
+        f"{s['trade_zone_status']} {s['trade_zone_text']}",
+        "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"R: {res_str}",
-        f"S: {sup_str}",
-        f"TL {tl_str}",
-        funding_oi,
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"Trade zone: {s['trade_zone_status']} {s['trade_zone_text']}",
     ]
+
+    # Resistance block
+    if s["res_levels"]:
+        lines.append("🔴 *RESISTANCE*")
+        for p, c in s["res_levels"]:
+            lines.append(_fmt_level(p, c, spot, near_price))
+        lines.append("")
+
+    # Support block
+    if s["sup_levels"]:
+        lines.append("🟢 *SUPPORT*")
+        for p, c in s["sup_levels"]:
+            lines.append(_fmt_level(p, c, spot, near_price))
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    # Trendlines — plain English
+    tl_lines = []
+    if s["tl_desc_now"]:
+        tl_lines.append(f"  Descending cap:  ${s['tl_desc_now']:,.0f}")
+    if s["tl_asc_now"]:
+        tl_lines.append(f"  Ascending base:  ${s['tl_asc_now']:,.0f}")
+    if tl_lines:
+        lines.append("📐 *Trendlines*")
+        lines += tl_lines
+        lines.append("")
+
+    # Funding + OI — separate lines
+    f_sign  = "+" if s["funding_now_pct"] >= 0 else ""
+    oi_sign = "+" if s["oi_trend_pct"] >= 0 else ""
+    lines.append(f"📡 Funding: {f_sign}{s['funding_now_pct']:.4f}%/8h ({s['funding_bias']})")
+    lines.append(f"📊 OI trend: {oi_sign}{s['oi_trend_pct']:.1f}% (120 bars)")
+
     return "\n".join(lines)
 
 
