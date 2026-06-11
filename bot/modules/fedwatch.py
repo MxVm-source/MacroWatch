@@ -23,6 +23,7 @@ Architecture fix vs original:
 import os
 import re
 import time
+import json
 import logging
 import requests
 from datetime import datetime, timedelta, timezone
@@ -41,22 +42,17 @@ ET_TZ       = ZoneInfo("America/New_York")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
+# Two-stage briefing cycle: T-24h pre-event scenarios, T-15m final reminder.
+# (Post-event reaction windows removed — T-15m is enough.)
 ALERT_OFFSETS = [
     ("T-24h", timedelta(hours=24)),
     ("T-15m", timedelta(minutes=15)),
 ]
 
-# Two reaction windows: immediate spike (30min) + confirmation (2h)
-REACTION_WINDOWS = [
-    ("T+30m",  timedelta(minutes=30)),
-    ("T+2h",   timedelta(hours=2)),
-]
-
-REACTION_THRESH_PC  = 0.5
 BTC_SYM = "BTCUSDT_UMCBL"
 ETH_SYM = "ETHUSDT_UMCBL"
 
-# Only high-impact events get the full 3-stage briefing cycle
+# Only high-impact events get the full briefing cycle
 HIGH_IMPACT_CATEGORIES = {"FOMC", "CPI", "NFP", "ECB", "PPI"}
 
 # BLS series IDs for economic data (free, no key required)
@@ -72,10 +68,7 @@ YAHOO_ZQ_URL = "https://query1.finance.yahoo.com/v8/finance/chart/ZQ=F?interval=
 STATE = {
     "events":          [],
     "alert_queue":     [],
-    "reaction_queue":  [],
     "fired_alerts":    set(),   # set of (event_id, label) already sent
-    "fired_reactions": set(),   # set of (event_id, window_label) already sent
-    "pre_prices":      {},      # ev_id → {"btc": float, "eth": float}
     "warned":          False,
     "source_ok":       False,
     "last_refresh":    None,
@@ -371,15 +364,14 @@ def refresh_calendar():
 
 
 def _rebuild_queues():
-    alerts    = []
-    reactions = []
-    now       = _now()
+    alerts = []
+    now    = _now()
 
     for ev in STATE["events"]:
-        if ev["start"] <= now:
-            continue
-        # Only high-impact events get full 3-stage cycle
+        # Only high-impact events get the full briefing cycle
         if ev.get("category") not in HIGH_IMPACT_CATEGORIES:
+            continue
+        if ev["start"] <= now:
             continue
         ev_id = _event_id(ev)
 
@@ -388,22 +380,8 @@ def _rebuild_queues():
             if when > now:
                 alerts.append({"when": when, "label": label, "event": ev, "event_id": ev_id})
 
-        # Schedule both reaction windows (T+30min, T+2h)
-        for window_label, delta in REACTION_WINDOWS:
-            react_when = ev["start"] + delta
-            if react_when > now:
-                reactions.append({
-                    "when":     react_when,
-                    "window":   window_label,
-                    "event":    ev,
-                    "event_id": ev_id,
-                })
-
     alerts.sort(key=lambda a: a["when"])
-    reactions.sort(key=lambda a: a["when"])
-
-    STATE["alert_queue"]    = alerts
-    STATE["reaction_queue"] = reactions
+    STATE["alert_queue"] = alerts
 
 
 # ─── Pre-event price capture ─────────────────────────────────────────────────
@@ -463,17 +441,6 @@ Be specific. No fluff. No emojis. No disclaimers. JSON only."""
         return {}
 
 
-def _capture_pre_prices(ev_id: str):
-    try:
-        btc = get_ticker(BTC_SYM)
-        eth = get_ticker(ETH_SYM)
-        if btc and eth:
-            STATE["pre_prices"][ev_id] = {"btc": float(btc), "eth": float(eth)}
-            log.info(f"FedWatch: pre-event prices captured for {ev_id}")
-    except Exception as e:
-        log.warning(f"Pre-price capture failed: {e}")
-
-
 # ─── Category emoji ──────────────────────────────────────────────────────────
 
 CATEGORY_EMOJI = {
@@ -522,6 +489,7 @@ def _send_alert(alert: dict):
     if fire_key in STATE["fired_alerts"]:
         return
     STATE["fired_alerts"].add(fire_key)
+    _save_persisted_state()
 
     emoji    = _cat_emoji(ev)
     category = ev.get("category", "")
@@ -589,97 +557,7 @@ def _send_alert(alert: dict):
         lines.append("_Strap in._ 🎢")
 
         _send_to_both("\n".join(lines))
-        _capture_pre_prices(ev_id)
         return
-
-
-# ─── Post-event reaction ─────────────────────────────────────────────────────
-
-def _send_reaction(ev: dict, ev_id: str, window_label: str = "T+30m"):
-    """Send post-event market reaction analysis.
-
-    window_label: 'T+30m' (immediate spike) or 'T+2h' (confirmation move)
-    """
-    fire_key = (ev_id, window_label)
-    if fire_key in STATE["fired_reactions"]:
-        return
-    STATE["fired_reactions"].add(fire_key)
-
-    ref = STATE["pre_prices"].get(ev_id)
-    if not ref:
-        log.warning(f"FedWatch: no pre-prices for {ev_id} — skipping {window_label} reaction")
-        return
-
-    try:
-        btc_now = float(get_ticker(BTC_SYM))
-        eth_now = float(get_ticker(ETH_SYM))
-    except Exception as e:
-        log.warning(f"FedWatch reaction price fetch failed: {e}")
-        return
-
-    def pct(now, before):
-        return (now - before) / before * 100 if before else 0
-
-    def tag(pc):
-        if pc >= REACTION_THRESH_PC:   return "🟢"
-        if pc <= -REACTION_THRESH_PC:  return "🔴"
-        return "⚪"
-
-    btc_pc = pct(btc_now, ref["btc"])
-    eth_pc = pct(eth_now, ref["eth"])
-    emoji  = _cat_emoji(ev)
-
-    # Generate verdict
-    avg_pc = (btc_pc + eth_pc) / 2
-    if avg_pc >= 1.0:
-        verdict = "🟢 *BULLISH MARKET RESPONSE*"
-        verdict_note = "Risk-on confirmed."
-    elif avg_pc <= -1.0:
-        verdict = "🔴 *BEARISH MARKET RESPONSE*"
-        verdict_note = "Risk-off — defensive flow."
-    elif abs(avg_pc) < 0.3:
-        verdict = "⚪ *MUTED REACTION*"
-        verdict_note = "Already priced in. No surprise."
-    elif avg_pc > 0:
-        verdict = "🟡 *MILDLY BULLISH*"
-        verdict_note = "Slight risk-on tilt."
-    else:
-        verdict = "🟡 *MILDLY BEARISH*"
-        verdict_note = "Slight risk-off tilt."
-
-    # Window-specific framing
-    if window_label == "T+30m":
-        section_title = "📊 *Initial Reaction (30 min)*"
-        footer_note = "_Watch for follow-through over next 90 min._"
-    else:
-        section_title = "📊 *Confirmation (2 hours)*"
-        # Compare with what T+30m showed
-        footer_note = "_Real move confirmed. Initial spike vs sustained move tells the story._"
-
-    lines = [
-        f"{emoji} *FedWatch — {window_label} Post-Event*",
-        f"📅 {ev['title']}",
-        f"🕒 {_fmt(ev['start'])}",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        section_title,
-        f"₿ BTC: `{btc_pc:+.2f}%`  {tag(btc_pc)}",
-        f"Ξ ETH: `{eth_pc:+.2f}%`  {tag(eth_pc)}",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"🤖 Verdict: {verdict}",
-        f"_{verdict_note}_",
-    ]
-
-    # For FOMC: add updated rate probability (post-decision)
-    if ev.get("category") == "FOMC" and window_label == "T+2h":
-        lines.append("")
-        lines.append(_rate_prob_line())
-        lines.append("_Rate probability now reflects post-decision pricing._")
-
-    lines += ["", footer_note]
-
-    _send_to_both("\n".join(lines))
 
 
 # ─── poll_once — called by APScheduler ───────────────────────────────────────
@@ -702,11 +580,6 @@ def poll_once():
     while STATE["alert_queue"] and now >= STATE["alert_queue"][0]["when"]:
         _send_alert(STATE["alert_queue"].pop(0))
         fired_any = True
-
-    # Fire due reactions
-    while STATE["reaction_queue"] and now >= STATE["reaction_queue"][0]["when"]:
-        nxt = STATE["reaction_queue"].pop(0)
-        _send_reaction(nxt["event"], nxt["event_id"], nxt.get("window", "T+30m"))
 
     if fired_any:
         log.info("Alerts fired this poll")
@@ -752,7 +625,7 @@ def show_diag(n: int = 8):
         "🏦 *[FedWatch] Diagnostics*",
         f"Source status: {'✅ OK' if STATE['source_ok'] else '⚠️ DEGRADED'}",
         f"Last refresh: {_fmt(STATE['last_refresh']) if STATE['last_refresh'] else 'Never'}",
-        f"Queued alerts: {len(STATE['alert_queue'])} | Reactions: {len(STATE['reaction_queue'])}",
+        f"Queued alerts: {len(STATE['alert_queue'])}",
         "",
         "📅 *Upcoming Events:*",
     ]
