@@ -32,43 +32,16 @@ from bot.utils import send_text
 log = logging.getLogger("intelwatch")
 
 PUBLIC_CHAT_ID   = os.getenv("PUBLIC_CHAT_ID", "")
-AUTO_COOLDOWN_H  = 4   # cooldown for state-based fires (event fires bypass this)
-AUTO_FIRE_NET    = 5   # min |net| to fire on weighted score (was 3, too sensitive)
 BITGET_BASE      = "https://api.bitget.com"
 PRODUCT_TYPE     = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 
 STATE = {
     "last_intel_utc":    None,
-    "last_auto_utc":     None,
     "last_score":        None,
     "last_bias":         None,
     # V2: history tracking for "vs 4h ago" comparison
     "history":           [],   # list of {"utc": dt, "net": float, "bias": str}
-    "last_regime":       None,
-    # V2.1: transition tracking — only fire when bias *changes*
-    "last_fired_bias":   None, # last bias label we sent an auto-trigger for
 }
-
-# ─── Auto-trigger conditions ──────────────────────────────────────────────────
-
-AUTO_TRIGGER_RULES = [
-    # (condition_name, description)
-    ("fedwatch_imminent",   "Major macro event within 3h"),
-    ("vix_elevated",        "VIX > 25"),
-    ("sr_hit",              "BTC hit key S/R level"),
-    ("funding_extreme",     "Extreme funding rate"),
-    ("trump_high",          "TrumpWatch score >= 7"),
-    ("btc_volatile",        "BTC moving > 2% in 4H"),
-    ("correl_diverge",      "DXY/BTC divergence active"),
-    ("liq_large",           "Large liquidation this hour"),
-]
-
-
-def _auto_cooldown_ok():
-    last = STATE["last_auto_utc"]
-    if not last:
-        return True
-    return datetime.now(timezone.utc) - last > timedelta(hours=AUTO_COOLDOWN_H)
 
 
 # ─── BTC price fetch ──────────────────────────────────────────────────────────
@@ -575,101 +548,6 @@ def build_intel(modules: dict, is_auto: bool = False, custom_header: str | None 
         lines.append(f"_{vs_prior}_")
 
     return "\n".join([l for l in lines if l is not None])
-
-
-# ─── Auto-trigger check ───────────────────────────────────────────────────────
-
-def check_auto_trigger(modules: dict) -> bool:
-    """
-    V2.1 auto-trigger. Distinguishes EVENT-based (always fire) vs STATE-based
-    (only fire on bias *transitions*, not just absolute level).
-
-    EVENT-based fires (bypass cooldown, always fire):
-      - Trump score ≥ 9 in last hour
-      - High-impact macro event within 30 minutes
-      - Regime flip (e.g. CHOP → TRENDING UP)
-
-    STATE-based fires (4h cooldown + transition required):
-      - Weighted net score crosses |±AUTO_FIRE_NET| AND bias label is different
-        from the last bias we fired about
-    """
-    now     = datetime.now(timezone.utc)
-    event_reasons = []   # bypass cooldown
-    state_reasons = []   # require cooldown + transition
-
-    # Evaluate signals
-    try:
-        result = _evaluate_signals(modules)
-        net    = result["net"]
-    except Exception as e:
-        log.warning(f"Auto-trigger eval failed: {e}")
-        return False
-
-    current_bias_emoji, current_bias_label = _bias_verdict(net)
-
-    # ── Event triggers (always fire) ─────────────────────────────────────────
-
-    # Trump ≥ 9
-    try:
-        tw         = modules["trumpwatch"].STATE
-        last_score = tw.get("last_score") or tw.get("last_ai_score")
-        last_alert = tw.get("last_alert_utc")
-        if last_score and last_score >= 9 and last_alert:
-            if (now - last_alert) < timedelta(hours=1):
-                event_reasons.append(f"trump_critical ({last_score}/10)")
-    except Exception:
-        pass
-
-    # Imminent macro event
-    try:
-        fw_events = modules["fedwatch"].STATE.get("events", [])
-        for ev in fw_events:
-            start  = ev.get("start")
-            impact = (ev.get("impact") or "").lower()
-            if start and impact == "high":
-                delta_min = (start - now).total_seconds() / 60
-                if 0 < delta_min <= 30:
-                    event_reasons.append(f"macro_imminent ({ev.get('title', 'event')})")
-                    break
-    except Exception:
-        pass
-
-    # Regime flip
-    try:
-        current_regime = _detect_regime(modules)
-        last_regime    = STATE.get("last_regime")
-        if last_regime and current_regime != "—" and current_regime != last_regime:
-            event_reasons.append(f"regime_flip ({last_regime} → {current_regime})")
-        if current_regime != "—":
-            STATE["last_regime"] = current_regime
-    except Exception:
-        pass
-
-    # ── State-based trigger (transition + cooldown required) ─────────────────
-
-    if abs(net) >= AUTO_FIRE_NET:
-        last_fired = STATE.get("last_fired_bias")
-        # Only fire if bias label has CHANGED since last auto-fire
-        if current_bias_label != last_fired:
-            if _auto_cooldown_ok():
-                state_reasons.append(
-                    f"bias_change (was {last_fired or 'none'} → now {current_bias_label}, net {net:+.1f})"
-                )
-            else:
-                log.info(f"IntelWatch: bias change to {current_bias_label} suppressed by cooldown")
-
-    # Decide whether to fire
-    all_reasons = event_reasons + state_reasons
-    if not all_reasons:
-        return False
-
-    log.info(f"IntelWatch auto-trigger: {all_reasons}")
-    msg = build_intel(modules, is_auto=True)
-    send_text(msg)
-    STATE["last_auto_utc"]   = now
-    STATE["last_bias"]       = all_reasons
-    STATE["last_fired_bias"] = current_bias_label
-    return True
 
 
 # ─── Entry points ─────────────────────────────────────────────────────────────
