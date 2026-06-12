@@ -23,7 +23,6 @@ from bot.utils import send_text
 from bot.datafeed_bitget import (
     _signed_request, _to_float, _position_is_open,
     BITGET_PRODUCT_TYPE, BITGET_API_KEY, BITGET_BASE_URL,
-    get_elite_usdt_balance, ELITE_API_KEY,
 )
 
 log = logging.getLogger("strategyrecap")
@@ -36,9 +35,9 @@ ASCENT_SYMBOLS = ["ETHUSDT"]
 # ─── Balance fetch (elite preferred) ──────────────────────────────────────────
 
 def _fetch_balance() -> float | None:
+    """ATRb v2 bot recap — always reads the sub-account (BITGET_API_KEY),
+    never Elite. This recap reports the systematic bot's balance only."""
     try:
-        if ELITE_API_KEY:
-            return get_elite_usdt_balance()
         res = _signed_request(
             "GET", "/api/v2/mix/account/accounts",
             params={"productType": BITGET_PRODUCT_TYPE, "marginCoin": "USDT"}
@@ -203,7 +202,7 @@ def build_recap() -> str:
     trade_count = len(closed)
 
     lines = [
-        "🤖 *Infinex Capital — Ascent ETH Weekly Recap*",
+        "🤖 *Infinex Capital — ATRb v2 Weekly Recap*",
         "_Intelligence provided by MacroWatch 🧠_",
         f"📅 {week_start} → {week_end}",
         "",
@@ -277,11 +276,11 @@ def build_recap() -> str:
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-    lines.append("🤖 *Ascent ETH*")
+    lines.append("🤖 *ATRb v2*")
     lines.append("ETH 100%  |  4H timeframe")
     lines.append("Fully automated. No discretion. No screen time.")
     lines.append("")
-    lines.append("🔗 Copy on Bitget — /challenge")
+    lines.append("🔗 Copy on Bitget — `/bot_challenge`")
 
     return "\n".join(lines)
 
