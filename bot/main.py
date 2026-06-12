@@ -1391,16 +1391,6 @@ def _handle_command(text: str, text_raw: str):
             send_text(f"📊 [WeeklyBrief] Error: {e}")
         return
 
-    # ── /recap ────────────────────────────────────────────────────────────────
-    if text.startswith("/recap"):
-        try:
-            send_text("🤖 Building strategy recap...")
-            from bot.modules.strategyrecap import send_strategy_recap
-            send_strategy_recap()
-        except Exception as e:
-            send_text(f"🤖 [StrategyRecap] Error: {e}")
-        return
-
     # ── /correl_diag ─────────────────────────────────────────────────────────
     if text.startswith("/correl_diag"):
         try:
