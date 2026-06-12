@@ -12,6 +12,7 @@ Added for Telegram broadcasting:
   - persistent state at /var/data/market_structure_state.json
 
 Schedule: 4H close + 2 min (cron hour="0,4,8,12,16,20", minute=2)
+Auto-broadcasts BTC only. ETH available on-demand via /structure ETH.
 Fires to PRIVATE group only.
 """
 
@@ -351,7 +352,8 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
         funding_bias = "flat"
 
     oi_now, oh = open_interest_data(symbol)
-    if not oh.empty:
+    oi_samples = len(oh)
+    if oi_samples >= 2:
         oi_trend_pct = (oh["sumOpenInterest"].iloc[-1] / oh["sumOpenInterest"].iloc[0] - 1) * 100
     else:
         oi_trend_pct = 0.0
@@ -380,6 +382,7 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
         "funding_bias":        funding_bias,
         "oi_now":              oi_now,
         "oi_trend_pct":        oi_trend_pct,
+        "oi_samples":          oi_samples,
         "tl_desc_now":         tl_desc_now,
         "tl_desc_slope":       tl_desc_slope,
         "tl_asc_now":          tl_asc_now,
@@ -469,7 +472,12 @@ def format_telegram(s: dict) -> str:
     f_sign  = "+" if s["funding_now_pct"] >= 0 else ""
     oi_sign = "+" if s["oi_trend_pct"] >= 0 else ""
     lines.append(f"📡 Funding: {f_sign}{s['funding_now_pct']:.4f}%/8h ({s['funding_bias']})")
-    lines.append(f"📊 OI trend: {oi_sign}{s['oi_trend_pct']:.1f}% (120 bars)")
+
+    oi_samples = s.get("oi_samples", 0)
+    if oi_samples < 20:
+        lines.append(f"📊 OI trend: building history ({oi_samples}/120 bars)")
+    else:
+        lines.append(f"📊 OI trend: {oi_sign}{s['oi_trend_pct']:.1f}% ({oi_samples} bars)")
 
     return "\n".join(lines)
 
@@ -545,10 +553,9 @@ def poll_and_maybe_fire(symbol: str = "BTCUSDT"):
 
 
 def poll_all():
-    """Called by the scheduler. Polls BTC and ETH 1 minute apart."""
+    """Called by the scheduler. BTC only — ETH remains available on-demand
+    via /structure ETH but is not auto-broadcast."""
     poll_and_maybe_fire("BTCUSDT")
-    time.sleep(60)
-    poll_and_maybe_fire("ETHUSDT")
 
 
 # ─── Command entrypoint ──────────────────────────────────────────────────────
