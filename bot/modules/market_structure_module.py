@@ -202,28 +202,31 @@ def funding_data(sym: str, limit: int = 42):
         return pd.DataFrame({"fundingRate": []}), 0.0
 
 
-def open_interest_data(sym: str, period: str = "4h", limit: int = 120):
+def open_interest_data(sym: str, limit: int = 120):
     """
-    Current OI from Bitget. Bitget v2 doesn't expose OI history the way
-    Binance does, so we approximate the trend by sampling current OI
-    against a stored rolling history kept in STATE.
+    Current OI from Bitget. Handles both single-dict and list response shapes.
+    Builds a rolling history in STATE since Bitget doesn't expose OI history.
     """
     try:
-        now = requests.get(BITGET_OI,
-                           params={"symbol": sym, "productType": PRODUCT_TYPE},
-                           timeout=15).json()
-        rows = now.get("data") or []
-        oi_now = 0.0
-        for row in rows:
-            if row.get("symbol") == sym:
-                oi_now = float(row.get("amount") or row.get("size") or 0)
-                break
-        if not oi_now and rows:
-            oi_now = float(rows[0].get("amount") or rows[0].get("size") or 0)
+        resp = requests.get(BITGET_OI,
+                            params={"symbol": sym, "productType": PRODUCT_TYPE},
+                            timeout=15).json()
+        data = resp.get("data") or {}
 
-        # Rolling OI history kept in persistent STATE (bar-by-bar, capped at `limit`)
+        # data can be a single dict {"symbol":..,"amount":..} or a list of dicts
+        if isinstance(data, dict):
+            oi_now = float(data.get("amount") or data.get("size") or data.get("openInterest") or 0)
+        elif isinstance(data, list) and data:
+            row = next((r for r in data if isinstance(r, dict) and r.get("symbol") == sym), data[0])
+            oi_now = float(row.get("amount") or row.get("size") or row.get("openInterest") or 0)
+        else:
+            oi_now = 0.0
+
+        # Rolling OI history kept in persistent STATE (bar-by-bar, capped at limit)
         hist_key = f"_oi_hist_{sym}"
-        oi_hist = STATE.get(hist_key, [])
+        oi_hist  = STATE.get(hist_key, [])
+        if not isinstance(oi_hist, list):
+            oi_hist = []
         oi_hist.append(oi_now)
         oi_hist = oi_hist[-limit:]
         STATE[hist_key] = oi_hist
