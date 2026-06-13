@@ -414,8 +414,15 @@ _REGIME_EMOJI = {
 }
 
 
-def format_telegram(s: dict) -> str:
-    """Build the broadcast message — verdict-first, scannable level lists."""
+def format_telegram(s: dict, trigger_line: str | None = None) -> str:
+    """
+    Build the broadcast message — verdict-first, scannable level lists.
+
+    trigger_line: optional pre-computed CVD gate verdict line from
+    trigger.format_trigger_line(). Passed in (rather than computed here)
+    so format_telegram stays a pure formatter — the caller decides whether
+    to run the CVD gate (extra network call) and handles its failure mode.
+    """
     sym        = s["symbol"]
     spot       = s["spot"]
     regime     = s["regime"]
@@ -433,7 +440,12 @@ def format_telegram(s: dict) -> str:
         f"{s['trade_zone_status']} {s['trade_zone_text']}",
     ]
 
-    if s["trade_zone_status"] == "✅":
+    # CVD gate verdict (if provided) replaces the generic aggr nudge —
+    # it tells you what the gate concluded, not just "go check".
+    if trigger_line:
+        lines.append("")
+        lines.append(trigger_line)
+    elif s["trade_zone_status"] == "✅":
         lines.append(f"   → [Check aggr 15m CVD]({AGGR_URL})")
 
     lines += [
@@ -526,6 +538,23 @@ def should_fire(cur: dict, prev: dict | None) -> tuple[bool, str]:
 
 # ─── Job entry points ────────────────────────────────────────────────────────
 
+def _get_trigger_line(struct: dict, symbol: str) -> str | None:
+    """
+    Run the CVD gate (trigger.evaluate) and return its formatted line.
+    Isolated try/except — a CVD/network failure must never break the
+    underlying structure broadcast, just omit this line.
+    """
+    try:
+        from bot.modules.trigger import evaluate, format_trigger_line
+        verdict = evaluate(struct, symbol=symbol)
+        if verdict["cvd"].get("direction") == "unavailable":
+            return None
+        return format_trigger_line(verdict)
+    except Exception as e:
+        log.warning(f"CVD trigger gate failed for {symbol}: {e}")
+        return None
+
+
 def poll_and_maybe_fire(symbol: str = "BTCUSDT"):
     """Pull structure, apply noise gate, fire to private if triggered."""
     try:
@@ -536,7 +565,8 @@ def poll_and_maybe_fire(symbol: str = "BTCUSDT"):
         log.info(f"MarketStructure {symbol}: regime={struct['regime']} fire={fire} ({reason})")
 
         if fire:
-            msg = format_telegram(struct)
+            trigger_line = _get_trigger_line(struct, symbol)
+            msg = format_telegram(struct, trigger_line=trigger_line)
             send_text(msg)
 
             # Save state
@@ -571,7 +601,8 @@ def show_structure(symbol: str = "BTC"):
 
     try:
         struct = get_structure(sym)
-        msg = format_telegram(struct)
+        trigger_line = _get_trigger_line(struct, sym)
+        msg = format_telegram(struct, trigger_line=trigger_line)
         send_text(msg)
     except Exception as e:
         log.exception(f"show_structure failed: {e}")
