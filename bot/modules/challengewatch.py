@@ -39,6 +39,39 @@ from bot.datafeed_bitget import (
 
 log = logging.getLogger("challengewatch")
 
+# ----- Persistent state (milestone dedup) -----------------------------------
+
+import json
+
+STATE_PATH = os.getenv("CHALLENGEWATCH_STATE_PATH", "/var/data/challengewatch_state.json")
+
+# In-memory: {"bot_celebrated": [2500], "live_celebrated": [2000]}
+_CELEBRATED: dict = {"bot_celebrated": [], "live_celebrated": []}
+
+
+def _load_celebrated():
+    global _CELEBRATED
+    try:
+        with open(STATE_PATH) as f:
+            _CELEBRATED = json.load(f)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning(f"ChallengeWatch: state load failed: {e}")
+
+
+def _save_celebrated():
+    try:
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+        with open(STATE_PATH, "w") as f:
+            json.dump(_CELEBRATED, f)
+    except Exception as e:
+        log.warning(f"ChallengeWatch: state save failed: {e}")
+
+
+_load_celebrated()
+
+
 # ----- Configs --------------------------------------------------------------
 
 VIRTUAL_START = float(os.getenv("CHALLENGE_START_USD", "1000.00"))
@@ -176,9 +209,78 @@ def _progress_bar(pct: float, width: int = 10) -> str:
     return "▓" * filled + "░" * (width - filled)
 
 
+# ----- Milestone celebration ------------------------------------------------
+
+_MILESTONE_EMOJIS = {
+    2000:   "🥇",
+    2500:   "🥇",
+    3000:   "🔥",
+    5000:   "🔥🔥",
+    7500:   "💎",
+    10000:  "🏆",
+    25000:  "🏆🏆",
+    50000:  "🚀",
+    100000: "👑",
+}
+
+_MILESTONE_MSGS = {
+    2000:   "First double. The account is breathing.",
+    2500:   "First double. The system is working.",
+    3000:   "3× from the start. Staying disciplined.",
+    5000:   "Halfway to $10k. 5× in the books.",
+    7500:   "Three-quarters there. Eyes on the prize.",
+    10000:  "CHALLENGE COMPLETE. $1k → $10k. 🎯",
+    25000:  "25× from the start. This is real.",
+    50000:  "Halfway to $100k. No days off.",
+    100000: "CHALLENGE COMPLETE. $1k → $100k. 👑",
+}
+
+
+def _check_and_celebrate(config: dict, equity: float, send_fn):
+    """
+    Check if equity crossed any new milestone since last celebration.
+    Fires a celebration message for each newly crossed milestone.
+    Persists the celebrated list so it never re-fires.
+    """
+    state_key = "bot_celebrated" if config["signer"] == "main" else "live_celebrated"
+    already   = set(_CELEBRATED.get(state_key, []))
+    newly_hit = []
+
+    for ms in config["milestones"]:
+        if equity >= ms and ms not in already:
+            newly_hit.append(ms)
+
+    if not newly_hit:
+        return
+
+    for ms in newly_hit:
+        emoji = _MILESTONE_EMOJIS.get(ms, "🎯")
+        msg   = _MILESTONE_MSGS.get(ms, f"${ms:,.0f} milestone reached.")
+        celebration = (
+            f"{emoji} *MILESTONE HIT — ${ms:,.0f}*\n"
+            f"\n"
+            f"{config['header']}\n"
+            f"Equity: `${equity:,.2f}`\n"
+            f"\n"
+            f"{msg}"
+        )
+        try:
+            send_fn(celebration)
+        except Exception as e:
+            log.warning(f"Celebration send failed for ${ms:,.0f}: {e}")
+        already.add(ms)
+
+    _CELEBRATED[state_key] = list(already)
+    _save_celebrated()
+
+
 # ----- Message builder ------------------------------------------------------
 
-def build_challenge(config: dict) -> str:
+def build_challenge(config: dict, send_fn=None) -> str:
+    """Build the challenge message. send_fn is used for milestone celebrations
+    (fires separately from the main message, to the right channel)."""
+    if send_fn is None:
+        send_fn = send_text
     now    = datetime.now(timezone.utc)
     target = config["target"]
 
@@ -225,6 +327,7 @@ def build_challenge(config: dict) -> str:
         trades = []
 
     equity   = _compound(trades)
+    _check_and_celebrate(config, equity, send_fn)
     gain_usd = equity - VIRTUAL_START
     gain_pct = (gain_usd / VIRTUAL_START) * 100
     progress = min(max((equity - VIRTUAL_START) / (target - VIRTUAL_START) * 100, 0), 100)
@@ -320,7 +423,7 @@ def _send_to_both(msg: str):
 def show_bot_challenge():
     """ATRb v2 Bot Challenge - public + private."""
     try:
-        msg = build_challenge(BOT_CONFIG)
+        msg = build_challenge(BOT_CONFIG, send_fn=_send_to_both)
         _send_to_both(msg)
     except Exception as e:
         log.exception(f"Bot challenge failed: {e}")
@@ -330,7 +433,7 @@ def show_bot_challenge():
 def show_live_challenge():
     """TraderWatch Challenge - private only."""
     try:
-        msg = build_challenge(LIVE_CONFIG)
+        msg = build_challenge(LIVE_CONFIG, send_fn=send_text)
         log.info(f"Live challenge built — {len(msg)} chars")
         send_text(msg)
         log.info("Live challenge sent")
