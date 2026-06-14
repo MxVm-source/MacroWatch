@@ -1136,8 +1136,6 @@ def _handle_command(text: str, text_raw: str):
             "`/tw_recent` — Last 10 alerts\n"
             "`/tw_diag` — Source health + dedup stats\n"
             "`/tw_clear` — Clear dedup cache (re-enables old posts)\n\n"
-            "🌐 *TariffWatch*\n"
-            "`/tariff_diag` — Source health\n\n"
             "🏦 *FedWatch*\n"
             "`/fedwatch` — Next Fed event\n"
             "`/fed_diag` — Calendar + rate probability\n\n"
