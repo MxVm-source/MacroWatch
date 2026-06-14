@@ -49,6 +49,13 @@ TOP_LEVELS      = int(os.getenv("MS_TOP_LEVELS", "3"))
 
 STATE_PATH      = os.getenv("MS_STATE_PATH", "/var/data/market_structure_state.json")
 
+# CVD trigger fire log — append-only JSONL, one line per LIVE/NO_TAKE verdict.
+# Supports Phase 0 validation: compare bot verdicts against manual aggr 15m
+# reads over the next 20-30 level-touches before promoting this to a real
+# pre-filter. MID_RANGE verdicts are not logged (too frequent, not useful
+# for this comparison).
+CVD_LOG_PATH    = os.getenv("CVD_LOG_PATH", "/var/data/cvd_trigger_log.jsonl")
+
 # Persistent state — survives Render redeploys, keyed by symbol
 STATE = {}
 
@@ -559,6 +566,33 @@ def should_fire(cur: dict, prev: dict | None) -> tuple[bool, str]:
 
 # ─── Job entry points ────────────────────────────────────────────────────────
 
+def _log_trigger_fire(verdict: dict, symbol: str):
+    """
+    Append a JSONL entry for LIVE/NO_TAKE verdicts only — supports Phase 0
+    validation (compare against manual aggr 15m reads). Isolated try/except,
+    a logging failure must never affect the broadcast itself.
+    """
+    if verdict["state"] not in ("LIVE", "NO_TAKE"):
+        return
+    try:
+        os.makedirs(os.path.dirname(CVD_LOG_PATH), exist_ok=True)
+        entry = {
+            "ts":            datetime.now(timezone.utc).isoformat(),
+            "symbol":        symbol,
+            "spot":          verdict.get("spot"),
+            "level":         verdict.get("level"),
+            "side":          verdict.get("side"),
+            "state":         verdict.get("state"),
+            "cvd_direction": verdict["cvd"].get("direction"),
+            "divergence":    verdict["cvd"].get("divergence"),
+            "reason":        verdict.get("reason"),
+        }
+        with open(CVD_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        log.warning(f"CVD trigger log write failed: {e}")
+
+
 def _get_trigger_line(struct: dict, symbol: str) -> str | None:
     """
     Run the CVD gate (trigger.evaluate) and return its formatted line.
@@ -570,6 +604,7 @@ def _get_trigger_line(struct: dict, symbol: str) -> str | None:
         verdict = evaluate(struct, symbol=symbol)
         if verdict["cvd"].get("direction") == "unavailable":
             return None
+        _log_trigger_fire(verdict, symbol)
         return format_trigger_line(verdict)
     except Exception as e:
         log.warning(f"CVD trigger gate failed for {symbol}: {e}")

@@ -69,6 +69,16 @@ def evaluate(structure: dict, symbol: str = "BTCUSDT", cvd_period: str = "15m", 
     elif funding_apr < -CROWD_APR:
         crowd = " | funding crowded SHORT (squeeze-tilt)"
 
+    # Price/CVD divergence — surfaced regardless of state, including
+    # MID_RANGE. This is the "flag early, before reaching a level" signal:
+    # momentum can be quietly fading well before price gets anywhere near
+    # a validated S/R zone.
+    div_note = ""
+    if cvd.divergence == "bearish":
+        div_note = " | ⚠️ price rising but CVD not confirming (possible exhaustion)"
+    elif cvd.divergence == "bullish":
+        div_note = " | ⚠️ price falling but CVD not confirming (possible exhaustion)"
+
     state, side, level, reason = "MID_RANGE", None, None, "mid-range, no level in play"
 
     if cvd.direction == "unavailable":
@@ -100,7 +110,7 @@ def evaluate(structure: dict, symbol: str = "BTCUSDT", cvd_period: str = "15m", 
         "state": state,            # LIVE | NO_TAKE | MID_RANGE
         "side": side,              # long | short | None
         "level": level,
-        "reason": reason + crowd,
+        "reason": reason + crowd + div_note,
         "cvd": cvd.as_dict(),
         "spot": spot,
     }
