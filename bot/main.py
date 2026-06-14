@@ -842,6 +842,7 @@ def start_scheduler():
     SCHED.add_job(
         _job_correlwatch, "interval", minutes=30,
         id="correlwatch", max_instances=1, misfire_grace_time=60,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=25),
     )
     print("📡 CorrelWatch scheduled (30min) ✅", flush=True)
 
@@ -849,6 +850,7 @@ def start_scheduler():
     SCHED.add_job(
         _job_vixwatch, "interval", minutes=30,
         id="vixwatch", max_instances=1, misfire_grace_time=60,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=35),
     )
     print("😱 VixWatch scheduled (30min) ✅", flush=True)
 
@@ -881,6 +883,7 @@ def start_scheduler():
     SCHED.add_job(
         _job_fundingwatch, "interval", minutes=30,
         id="fundingwatch", max_instances=1, misfire_grace_time=60,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=15),
     )
     print("💸 FundingWatch scheduled (30min) ✅", flush=True)
 
@@ -888,6 +891,7 @@ def start_scheduler():
     SCHED.add_job(
         _job_oiwatch, "interval", minutes=30,
         id="oiwatch", max_instances=1, misfire_grace_time=60,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=20),
     )
     print("📊 OIWatch scheduled (30min) ✅", flush=True)
 
