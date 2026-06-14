@@ -53,26 +53,12 @@ log = logging.getLogger("main")
 
 STARTED_AT_UTC = datetime.now(timezone.utc)
 
-# ─── Public channel + Challenge config ───────────────────────────────────────
-PUBLIC_CHAT_ID       = os.getenv("PUBLIC_CHAT_ID", "")
-CHALLENGE_START_USD  = float(os.getenv("CHALLENGE_START_USD", "1000.00"))
-CHALLENGE_TARGET_USD = float(os.getenv("CHALLENGE_TARGET_USD", "100000"))
-CHALLENGE_MILESTONES = [2500, 5000, 10000, 25000, 50000, 100000]
-
-def send_public(text: str):
-    """Send a message to the public channel."""
-    if not PUBLIC_CHAT_ID:
-        return
-    try:
-        import requests as _req
-        _req.post(
-            f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN', '')}/sendMessage",
-            json={"chat_id": PUBLIC_CHAT_ID, "text": text, "parse_mode": "Markdown",
-                  "disable_web_page_preview": True},
-            timeout=10,
-        )
-    except Exception as e:
-        print(f"[send_public] Error: {e}", flush=True)
+# ─── Public channel config ───────────────────────────────────────────────────
+# PUBLIC_CHAT_ID used by challengewatch._send_to_both (ATRb v2 bot challenge)
+# and the weekly brief / strategy recap / weekly intel deep dive — all of
+# which read os.getenv("PUBLIC_CHAT_ID") directly in their own modules.
+# main.py itself no longer sends to public directly.
+PUBLIC_CHAT_ID = os.getenv("PUBLIC_CHAT_ID", "")
 
 # ─── PositionWatch state ─────────────────────────────────────────────────────
 # Tracks last known snapshot per symbol so we can detect changes.
@@ -84,60 +70,10 @@ from bot.datafeed_bitget import (
     _to_float,
     iso_utc_now,
     BITGET_SYMBOLS,
-    get_elite_usdt_balance,
 )
 
 _POS_SNAPSHOT: dict = {}   # { "BTCUSDT": { has_position, side, size, entry, tp, sl }, ... }
 _POS_INITIALISED = False
-
-# ─── Milestone tracker ───────────────────────────────────────────────────────
-# Tracks which milestones have already fired so they never repeat.
-_MILESTONES_HIT: set = set()
-
-def _check_milestones(balance: float):
-    """Check if any milestone has been crossed and fire once."""
-    for ms in CHALLENGE_MILESTONES:
-        if ms in _MILESTONES_HIT:
-            continue
-        if balance >= ms:
-            _MILESTONES_HIT.add(ms)
-            _fire_milestone(ms, balance)
-
-def _fire_milestone(ms: float, balance: float):
-    gain_pct = (balance - CHALLENGE_START_USD) / CHALLENGE_START_USD * 100
-    is_target = ms >= CHALLENGE_TARGET_USD
-
-    if is_target:
-        msg = (
-            f"🏆 *Infinex Capital — CHALLENGE COMPLETE!*\n"
-            f"_Intelligence provided by MacroWatch 🧠_\n\n"
-            f"$1,000 → $100,000 ✅\n\n"
-            f"Balance: ${balance:,.2f}\n"
-            f"Total gain: +{gain_pct:.1f}%\n\n"
-            f"Built it. Turned it on. Let it compound.\n"
-            f"Zero emotion. Pure execution.\n\n"
-            f"💎 Copy trading live on Bitget\n"
-            f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
-        )
-    else:
-        # Milestone emoji per level
-        emojis = {2500: "🔥", 5000: "🚀", 10000: "💎", 25000: "⚡", 50000: "🌙"}
-        emoji  = emojis.get(int(ms), "📈")
-        msg = (
-            f"{emoji} *Infinex Capital — Milestone Hit ${ms:,.0f}*\n"
-            f"_Intelligence provided by MacroWatch 🧠_\n\n"
-            f"$1,000 → $100,000\n"
-            f"Current: ${balance:,.2f} (+{gain_pct:.1f}%)\n\n"
-            f"Next target: ${next((m for m in CHALLENGE_MILESTONES if m > ms), 100000):,.0f}\n\n"
-            f"🤖 Copy trading live on Bitget\n"
-            f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
-        )
-
-    # Fire to both private group and public channel
-    send_text(msg)
-    send_public(msg)
-    print(f"[Milestone] EUR {ms:,.0f} hit — balance EUR {balance:,.2f}", flush=True)
-
 
 # ─── Trade streak tracker ─────────────────────────────────────────────────────
 _STREAK: dict = {
@@ -421,31 +357,8 @@ def _poll_positions():
         _POS_INITIALISED = True
         print("📘 PositionWatch baseline set ✅", flush=True)
 
-    # ── Milestone check (legacy — kept for backwards compat) ─────────────────
-    if _POS_INITIALISED:
-        try:
-            bal = _fetch_account_balance_eur()
-            if bal is not None:
-                _check_milestones(bal)
-        except Exception:
-            pass
 
-
-# ─── WeeklyPerf ──────────────────────────────────────────────────────────────
-
-def _fetch_account_balance_eur() -> float | None:
-    """
-    Fetch ELITE account (scalper) USDT balance for the challenge tracker.
-    The challenge tracks the scalper account — AVAX · LIT · PENDLE.
-    Uses ELITE_API_KEY / ELITE_API_SECRET / ELITE_API_PASSPHRASE env vars.
-    """
-    try:
-        balance = get_elite_usdt_balance()
-        return balance
-    except Exception as e:
-        print(f"[ChallengeUpdate] Elite balance fetch failed: {e}", flush=True)
-        return None
-
+# ─── Challenge updates ───────────────────────────────────────────────────────
 
 def _job_challenge_update():
     """Tuesday 09:15 — fire both challenges to their respective channels."""
@@ -460,51 +373,6 @@ def _job_challenge_update():
         challengewatch.show_live_challenge()
     except Exception as e:
         _err("LiveChallengeUpdate", e)
-
-
-def _send_challenge_update():
-    """Monday 09:15 — post challenge progress to public channel."""
-    balance = _fetch_account_balance_eur()
-
-    start  = CHALLENGE_START_USD
-    target = CHALLENGE_TARGET_USD
-    now    = datetime.now(timezone.utc)
-
-    if balance is None:
-        send_public(
-            f"🎯 *Challenge Update — {now.strftime('%b %d')}*\n\n"
-            f"Could not fetch balance — check back soon."
-        )
-        return
-
-    gain_eur = balance - start
-    gain_pct = (balance - start) / start * 100
-    progress = (balance - start) / (target - start) * 100
-    progress = min(progress, 100)
-
-    # Emoji based on performance
-    trend = "📈" if gain_eur >= 0 else "📉"
-    sign  = "+" if gain_eur >= 0 else ""
-
-    # Progress bar (10 blocks)
-    filled = int(progress / 10)
-    bar    = "█" * filled + "░" * (10 - filled)
-
-    # Next milestone
-    next_ms = next((m for m in CHALLENGE_MILESTONES if m > balance), None)
-    ms_line = f"Next milestone: ${next_ms:,.0f}" if next_ms else "🏆 TARGET REACHED!"
-
-    send_public(
-        f"🎯 *Challenge Update — {now.strftime('%b %d, %Y')}*\n\n"
-        f"$1,000 → $100,000\n\n"
-        f"Balance: *${balance:,.2f}*\n"
-        f"{trend} {sign}${abs(gain_eur):,.2f} ({sign}{gain_pct:.1f}%) since start\n\n"
-        f"Progress: {progress:.1f}%\n"
-        f"`{bar}`\n\n"
-        f"{ms_line}\n\n"
-        f"🤖 Copy trading live on Bitget\n"
-        f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
-    )
 
 
 def _job_weekly_perf():
@@ -1264,42 +1132,42 @@ def _handle_command(text: str, text_raw: str):
         send_text(
             "🤖 *MacroWatch — Command Guide*\n\n"
             "🍊 *TrumpWatch*\n"
-            "/trumpwatch — Trigger immediate live poll\n"
-            "/tw_recent — Last 10 alerts\n"
-            "/tw_diag — Source health + dedup stats\n"
-            "/tw_clear — Clear dedup cache (re-enables old posts)\n\n"
+            "`/trumpwatch` — Trigger immediate live poll\n"
+            "`/tw_recent` — Last 10 alerts\n"
+            "`/tw_diag` — Source health + dedup stats\n"
+            "`/tw_clear` — Clear dedup cache (re-enables old posts)\n\n"
             "🌐 *TariffWatch*\n"
-            "/tariff_diag — Source health\n\n"
+            "`/tariff_diag` — Source health\n\n"
             "🏦 *FedWatch*\n"
-            "/fedwatch — Next Fed event\n"
-            "/fed_diag — Calendar + rate probability\n\n"
+            "`/fedwatch` — Next Fed event\n"
+            "`/fed_diag` — Calendar + rate probability\n\n"
             "📊 *MacroWatch Weekly*\n"
-            "/weekly — Full weekly market brief\n\n"
+            "`/weekly` — Full weekly market brief\n\n"
             "📡 *CorrelWatch*\n"
-            "/correl_diag — DXY vs BTC last reading\n\n"
+            "`/correl_diag` — DXY vs BTC last reading\n\n"
             "💸 *FundingWatch*\n"
-            "/funding_diag — Current funding rates\n\n"
+            "`/funding_diag` — Current funding rates\n\n"
             "📊 *OIWatch*\n"
-            "/oi_diag — Current open interest\n\n"
+            "`/oi_diag` — Current open interest\n\n"
             "⚙️ *OptionsWatch*\n"
-            "/options_diag — Last expiry analysis\n"
-            "/options_now — Run analysis now\n\n"
+            "`/options_diag` — Last expiry analysis\n"
+            "`/options_now` — Run analysis now\n\n"
             "🧠 *IntelWatch*\n"
-            "/intel — Full market intelligence briefing\n\n"
+            "`/intel` — Full market intelligence briefing\n\n"
             "😱 *VixWatch*\n"
-            "/vix — Current VIX reading + market context\n"
-            "/vix_diag — Last value + alert state\n\n"
+            "`/vix` — Current VIX reading + market context\n"
+            "`/vix_diag` — Last value + alert state\n\n"
             "🩺 *System*\n"
-            "/health — Full system status\n"
-            "/restart — Trigger clean poll of all modules\n"
-            "/status — ATRb v2 live strategy status (indicators + regime)\n"
-            "/bot — ATRb v2 current open position(s)\n"
-            "/live — TraderWatch current open position(s)\n"
-            "/structure [BTC|ETH] — 4H S/R + regime + funding/OI\n"
-            "/bot_challenge — ATRb v2 $1k → $100k progress\n"
-            "/live_challenge — TraderWatch $1k → $10k progress\n"
-            "/report — Last 7 days trades + P&L\n"
-            "/plan — Post enriched plan for the open position (R:R, risk %, liq, ratchet)\n"
+            "`/health` — Full system status\n"
+            "`/restart` — Trigger clean poll of all modules\n"
+            "`/status` — ATRb v2 live strategy status (indicators + regime)\n"
+            "`/bot` — ATRb v2 current open position(s)\n"
+            "`/live` — TraderWatch current open position(s)\n"
+            "`/structure` — 4H S/R + regime + funding/OI (BTC or ETH)\n"
+            "`/bot_challenge` — ATRb v2 $1k → $100k progress\n"
+            "`/live_challenge` — TraderWatch $1k → $10k progress\n"
+            "`/report` — Last 7 days trades + P&L\n"
+            "`/plan` — Post enriched plan for the open position (R:R, risk %, liq, ratchet)\n"
         )
         return
 
