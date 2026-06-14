@@ -457,27 +457,9 @@ def _cat_emoji(ev: dict) -> str:
 
 
 # ─── Alert sending ────────────────────────────────────────────────────────────
-
-def _send_to_both(msg: str):
-    """Send to private group AND public channel."""
-    send_text(msg)
-    public_id = os.getenv("PUBLIC_CHAT_ID", "")
-    tg_token  = os.getenv("TELEGRAM_TOKEN", "")
-    if public_id and tg_token:
-        try:
-            import requests as _req
-            _req.post(
-                f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                json={
-                    "chat_id":      public_id,
-                    "text":         msg,
-                    "parse_mode":   "Markdown",
-                    "disable_web_page_preview": True,
-                },
-                timeout=10,
-            )
-        except Exception as e:
-            log.warning(f"FedWatch public send failed: {e}")
+# FedWatch is private-only: macro briefings (T-24h scenarios, T-15m reminders)
+# are trader-facing analysis, not public-facing reports. send_text() goes to
+# the private group (CHAT_ID).
 
 
 def _send_alert(alert: dict):
@@ -541,7 +523,7 @@ def _send_alert(alert: dict):
                 lines.append(_rate_prob_line())
             lines.append("_High-impact event ahead — expect volatility._")
 
-        _send_to_both("\n".join(lines))
+        send_text("\n".join(lines))
         return
 
     # ── T-15m: Quick final reminder ────────────────────────────────────────
@@ -556,7 +538,7 @@ def _send_alert(alert: dict):
         lines.append("")
         lines.append("_Strap in._ 🎢")
 
-        _send_to_both("\n".join(lines))
+        send_text("\n".join(lines))
         return
 
 
