@@ -283,19 +283,36 @@ def _classify_regime(df: pd.DataFrame) -> str:
 
 def _trade_zone_verdict(spot: float, res_levels, sup_levels) -> tuple[str, str, float | None]:
     """
-    Are we AT a tradeable level (within proximity), or mid-range no-trade?
+    Are we AT a tradeable level (within proximity AND validated by touch
+    count), or mid-range no-trade?
+
+    Thresholds are imported from trigger.py so the headline verdict (✅/⏳)
+    and the CVD gate verdict (LIVE/NO_TAKE/MID_RANGE) always agree on
+    whether spot is "at a level" — a ×1 level within 2% but failing
+    trigger.py's MIN_TOUCHES would otherwise produce a confusing
+    "✅ At support..." + "➖ TRIGGER: none, mid-range" combination.
+
     Returns (emoji_status, text, near_price_or_None).
     near_price marks which level (if any) the spot is currently sitting at,
     so format_telegram can flag it with "← HERE" without re-deriving it.
     """
+    try:
+        from bot.modules.trigger import PROXIMITY_PCT as GATE_PROXIMITY_PCT, MIN_TOUCHES as GATE_MIN_TOUCHES
+        proximity = GATE_PROXIMITY_PCT / 100.0   # trigger.py uses percent units (0.6 = 0.6%)
+        min_touches = GATE_MIN_TOUCHES
+    except Exception:
+        # Fallback if trigger.py is unavailable — keep prior behaviour
+        proximity = PROXIMITY_PCT
+        min_touches = 1
+
     near_res = None
     near_sup = None
     for p, n in res_levels:
-        if abs(p - spot) / spot <= PROXIMITY_PCT:
+        if n >= min_touches and abs(p - spot) / spot <= proximity:
             near_res = (p, n)
             break
     for p, n in sup_levels:
-        if abs(p - spot) / spot <= PROXIMITY_PCT:
+        if n >= min_touches and abs(p - spot) / spot <= proximity:
             near_sup = (p, n)
             break
 
@@ -304,7 +321,8 @@ def _trade_zone_verdict(spot: float, res_levels, sup_levels) -> tuple[str, str, 
     if near_sup:
         return "✅", f"At support {near_sup[0]:,.0f} (×{near_sup[1]}) — bounce or breakdown watch", near_sup[0]
 
-    # Mid-range — compute distance to closest level
+    # Mid-range — compute distance to closest level (any touch count, for
+    # the "next level" hint — this part doesn't need to match the gate)
     candidates = [(p, n, "resistance") for p, n in res_levels] + [(p, n, "support") for p, n in sup_levels]
     if candidates:
         closest = min(candidates, key=lambda x: abs(x[0] - spot))
