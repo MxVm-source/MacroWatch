@@ -915,12 +915,17 @@ def start_scheduler():
     print("⚙️ OptionsWatch state refresh scheduled (30min silent) ✅", flush=True)
 
     # ── MarketStructure — 4H close + 2 min (BTC + ETH, 1 min apart)
+    # Bitget's 4H candles close at 00/04/08/12/16/20:00 UTC. The scheduler's
+    # default timezone is Europe/Brussels (correct for human-facing reports
+    # like the Monday brief / Friday recap), so this job needs an explicit
+    # UTC override or it fires 2h early (Brussels = UTC+2 in summer, UTC+1
+    # in winter) and reads a still-forming candle.
     SCHED.add_job(
         market_structure.poll_all, "cron",
-        hour="0,4,8,12,16,20", minute=2,
+        hour="0,4,8,12,16,20", minute=2, timezone="UTC",
         id="market_structure", max_instances=1, misfire_grace_time=300,
     )
-    print("📊 MarketStructure scheduled (4H close +2min) ✅", flush=True)
+    print("📊 MarketStructure scheduled (4H close +2min UTC) ✅", flush=True)
 
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
