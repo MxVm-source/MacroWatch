@@ -145,7 +145,32 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
     )
     df["ot"] = df["ot"].astype(np.int64)
     df["t"]  = pd.to_datetime(df["ot"], unit="ms", utc=True)
-    return df.drop_duplicates("ot").sort_values("ot").reset_index(drop=True)
+    df = df.drop_duplicates("ot").sort_values("ot").reset_index(drop=True)
+
+    # Diagnostic: dataset shape, time range, and gap check. A 4H candle is
+    # 14,400,000 ms; any consecutive diff != that means a missing bar
+    # somewhere in the Bitget pagination, which would shift/break fractal
+    # detection downstream. Cheap, always logged.
+    n_bars = len(df)
+    if n_bars >= 2:
+        diffs = df["ot"].diff().dropna()
+        expected_ms = 14_400_000  # 4H
+        n_gaps = int((diffs != expected_ms).sum())
+        log.info(
+            f"fetch_klines {sym}: {n_bars} bars, "
+            f"{df['t'].iloc[0].isoformat()} -> {df['t'].iloc[-1].isoformat()}, "
+            f"gaps={n_gaps}"
+        )
+        if n_gaps > 0:
+            bad = diffs[diffs != expected_ms]
+            for idx, d in bad.items():
+                log.warning(
+                    f"fetch_klines {sym}: gap at index {idx} "
+                    f"({df['t'].iloc[idx-1].isoformat()} -> {df['t'].iloc[idx].isoformat()}, "
+                    f"diff={d}ms)"
+                )
+
+    return df
 
 
 def fractals(df: pd.DataFrame, n: int):
@@ -229,14 +254,18 @@ def open_interest_data(sym: str, limit: int = 120):
         else:
             oi_now = 0.0
 
-        # Rolling OI history kept in persistent STATE (bar-by-bar, capped at limit)
+        # Rolling OI history kept in persistent STATE (bar-by-bar, capped at limit).
+        # Skip recording oi_now==0 — real BTC OI is never 0, so a 0.0 reading
+        # means Bitget returned empty/malformed data this round. Recording it
+        # would poison the trend ratio (X/0 -> inf/nan) for up to `limit` bars.
         hist_key = f"_oi_hist_{sym}"
         oi_hist  = STATE.get(hist_key, [])
         if not isinstance(oi_hist, list):
             oi_hist = []
-        oi_hist.append(oi_now)
-        oi_hist = oi_hist[-limit:]
-        STATE[hist_key] = oi_hist
+        if oi_now > 0:
+            oi_hist.append(oi_now)
+            oi_hist = oi_hist[-limit:]
+            STATE[hist_key] = oi_hist
 
         oh = pd.DataFrame({"sumOpenInterest": oi_hist})
         return oi_now, oh
@@ -381,7 +410,7 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
 
     oi_now, oh = open_interest_data(symbol)
     oi_samples = len(oh)
-    if oi_samples >= 2:
+    if oi_samples >= 2 and oh["sumOpenInterest"].iloc[0] > 0:
         oi_trend_pct = (oh["sumOpenInterest"].iloc[-1] / oh["sumOpenInterest"].iloc[0] - 1) * 100
     else:
         oi_trend_pct = 0.0
