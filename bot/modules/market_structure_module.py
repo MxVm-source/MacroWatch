@@ -45,7 +45,7 @@ FRACTAL_N       = int(os.getenv("MS_FRACTAL_N", "3"))
 ZONE_TOL        = float(os.getenv("MS_ZONE_TOL", "0.006"))      # 0.6% clustering
 PROXIMITY_PCT   = float(os.getenv("MS_PROXIMITY_PCT", "0.02"))  # 2% noise gate
 HEARTBEAT_HOURS = int(os.getenv("MS_HEARTBEAT_HOURS", "24"))    # min daily fire
-TOP_LEVELS      = int(os.getenv("MS_TOP_LEVELS", "3"))
+TOP_LEVELS      = int(os.getenv("MS_TOP_LEVELS", "4"))
 
 STATE_PATH      = os.getenv("MS_STATE_PATH", "/var/data/market_structure_state.json")
 
@@ -162,29 +162,14 @@ def fractals(df: pd.DataFrame, n: int):
 
 
 def zones(prices, tol: float = ZONE_TOL):
-    """Fixed-anchor clustering — the first swing in a zone is its anchor and
-    never moves; later swings within `tol` of that anchor increment the
-    touch count but don't shift the reported price. Processes `prices` in
-    chronological order (as produced by fractals()) — do NOT sort.
-    (Was: sorted(prices) + chain-to-z[-1][-1] + np.mean — single-linkage
-    chaining that let a zone drift across many small steps and get reported
-    at a mean price nothing ever actually touched. Confirmed live on
-    2026-06-15: 65,805 ×19 vanished entirely on a $43 spot move because the
-    chain it belonged to recomputed differently. Fixed in btc_4h_levels.py
-    the same day — anchor logic recovered 65,718.5 x9 in that zone, stable
-    across 1000-3000 bar windows.)"""
-    anchors, counts = [], []
-    for p in prices:
-        matched = False
-        for i, a in enumerate(anchors):
-            if abs(p - a) / a < tol:
-                counts[i] += 1
-                matched = True
-                break
-        if not matched:
-            anchors.append(p)
-            counts.append(1)
-    return [(float(a), c) for a, c in zip(anchors, counts)]
+    """Cluster sorted prices within tol% -> list of (mean_price, touch_count)."""
+    z = []
+    for p in sorted(prices):
+        if z and abs(p - z[-1][-1]) / z[-1][-1] < tol:
+            z[-1].append(p)
+        else:
+            z.append([p])
+    return [(float(np.mean(c)), len(c)) for c in z]
 
 
 def fit_tl(idx, prices):
@@ -378,19 +363,8 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
     sw_lo_idx = df.index[sl].to_numpy()
     sw_lo_p   = df["l"].values[sl]
 
-    # UNIFIED pool: cluster swing highs AND lows together, chronologically,
-    # then split into res/sup by CURRENT spot. Same fix as btc_4h_levels.py
-    # (2026-06-15) — separate hi-only/lo-only pools make a level vanish
-    # entirely the instant spot crosses it (a swing-low anchor can't appear
-    # in res_levels once spot drops below it, since it was never in
-    # sw_hi_p). That's why 65,718.5 x9 disappeared from /structure right
-    # as price crossed it — twice today.
-    _swings = sorted(zip(list(sw_hi_idx) + list(sw_lo_idx),
-                          list(sw_hi_p) + list(sw_lo_p)),
-                      key=lambda t: t[0])
-    _levels = zones([p for _, p in _swings])
-    res_levels = [(p, c) for p, c in _levels if p > spot]
-    sup_levels = [(p, c) for p, c in _levels if p < spot]
+    res_levels = [(p, c) for p, c in zones(sw_hi_p) if p > spot]
+    sup_levels = [(p, c) for p, c in zones(sw_lo_p) if p < spot]
     res_levels.sort(key=lambda x: x[0])           # ascending — closest first
     sup_levels.sort(key=lambda x: -x[0])          # descending — closest first
 
@@ -413,11 +387,6 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
         oi_trend_pct = 0.0
 
     # Trendlines (last 3 swings each)
-    # TODO(patch list, same as btc_4h_levels.py): tl_desc/tl_asc labels are
-    # fixed regardless of measured slope sign — in an uptrend the last-3
-    # swing highs can be rising, giving tl_desc a positive slope while still
-    # printed as "Descending cap". Not fixed here on purpose, isolated to
-    # the zones() change above.
     tl_desc = fit_tl(sw_hi_idx[-3:], sw_hi_p[-3:]) if len(sw_hi_idx) >= 3 else None
     tl_asc  = fit_tl(sw_lo_idx[-3:], sw_lo_p[-3:]) if len(sw_lo_idx) >= 3 else None
     tl_desc_now   = (tl_desc[0] * i_last + tl_desc[1]) if tl_desc else None
