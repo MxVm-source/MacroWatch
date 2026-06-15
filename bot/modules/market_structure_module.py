@@ -378,8 +378,19 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
     sw_lo_idx = df.index[sl].to_numpy()
     sw_lo_p   = df["l"].values[sl]
 
-    res_levels = [(p, c) for p, c in zones(sw_hi_p) if p > spot]
-    sup_levels = [(p, c) for p, c in zones(sw_lo_p) if p < spot]
+    # UNIFIED pool: cluster swing highs AND lows together, chronologically,
+    # then split into res/sup by CURRENT spot. Same fix as btc_4h_levels.py
+    # (2026-06-15) — separate hi-only/lo-only pools make a level vanish
+    # entirely the instant spot crosses it (a swing-low anchor can't appear
+    # in res_levels once spot drops below it, since it was never in
+    # sw_hi_p). That's why 65,718.5 x9 disappeared from /structure right
+    # as price crossed it — twice today.
+    _swings = sorted(zip(list(sw_hi_idx) + list(sw_lo_idx),
+                          list(sw_hi_p) + list(sw_lo_p)),
+                      key=lambda t: t[0])
+    _levels = zones([p for _, p in _swings])
+    res_levels = [(p, c) for p, c in _levels if p > spot]
+    sup_levels = [(p, c) for p, c in _levels if p < spot]
     res_levels.sort(key=lambda x: x[0])           # ascending — closest first
     sup_levels.sort(key=lambda x: -x[0])          # descending — closest first
 
