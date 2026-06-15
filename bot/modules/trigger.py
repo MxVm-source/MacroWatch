@@ -5,7 +5,7 @@ trigger.py — combine market structure + CVD into a single gated verdict.
 Encodes the discretionary gate rules so the bot names whether a level is a
 LIVE trigger or a passed-but-valid NO-TAKE.
 
-  at resistance + CVD rolling_over        -> FADE SHORT trigger LIVE
+  at resistance + CVD rolling-over        -> FADE SHORT trigger LIVE
   at resistance + CVD rising / flat        -> absorption, NO-TAKE (named)
   at support    + CVD rising / flat (hold) -> LONG trigger LIVE
   at support    + CVD falling / rolling    -> sellers in control, NO-TAKE (named)
@@ -90,7 +90,7 @@ def evaluate(structure: dict, symbol: str = "BTCUSDT", cvd_period: str = "15m", 
 
     if near_res is not None:
         level = near_res["price"]
-        if cvd.direction == "rolling_over":
+        if cvd.direction == "rolling-over":
             state, side = "LIVE", "short"
             reason = "CVD rolling over into resistance = absorption confirmed"
         else:  # rising / flat / falling-but-still-below
@@ -102,7 +102,7 @@ def evaluate(structure: dict, symbol: str = "BTCUSDT", cvd_period: str = "15m", 
         if cvd.direction in ("rising", "flat"):
             state, side = "LIVE", "long"
             reason = f"CVD {cvd.direction}/holding at support = buyers defending"
-        else:  # falling / rolling_over
+        else:  # falling / rolling-over
             state, side = "NO_TAKE", "long"
             reason = f"CVD {cvd.direction} at support = sellers in control, no long"
 

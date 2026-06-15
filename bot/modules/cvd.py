@@ -14,7 +14,7 @@ signal, not a tick-level replica of aggr.trade.
 
 Gate vocabulary (direction):
   rising        - aggressive buyers in control over the recent window
-  rolling_over  - was rising, now turning down (fade-confirmation signal)
+  rolling-over  - was rising, now turning down (fade-confirmation signal)
   falling       - aggressive sellers in control
   flat          - no clear pressure
   unavailable   - data fetch failed; caller should omit the trigger line
@@ -45,7 +45,7 @@ PRODUCT_TYPE      = "USDT-FUTURES"
 class CVDResult:
     cvd_now: float        # running cumulative delta over the lookback window
     slope_recent: float   # CVD change over the recent window (signed)
-    direction: str        # rising | rolling_over | falling | flat | unavailable
+    direction: str        # rising | rolling-over | falling | flat | unavailable
     price_slope: float    # close change over the recent window (signed)
     divergence: str       # bearish | bullish | none
     last_price: float      # most recent close (0.0 if closes fetch failed)
@@ -153,7 +153,7 @@ def get_cvd(symbol: str = "BTCUSDT", period: str = "15m", lookback: int = 96,
         direction = "rising"
     elif slope_recent < -flat_eps:
         prev_slope = cvd_series[-1 - recent] - cvd_series[-1 - 2 * recent]
-        direction = "rolling_over" if prev_slope > flat_eps else "falling"
+        direction = "rolling-over" if prev_slope > flat_eps else "falling"
     else:
         direction = "flat"
 
