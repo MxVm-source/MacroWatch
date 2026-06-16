@@ -48,6 +48,7 @@ import bot.modules.vixwatch        as vixwatch
 import bot.modules.intelwatch      as intelwatch
 import bot.modules.reportwatch     as reportwatch
 import bot.modules.tradewatch      as tradewatch
+import bot.modules.stagewatch      as stagewatch
 
 log = logging.getLogger("main")
 
@@ -346,6 +347,13 @@ def _poll_positions():
                 # Preserve opened_at across snapshots
                 if cur["has_position"] and prev and prev.get("opened_at"):
                     cur["opened_at"] = prev["opened_at"]
+
+                # Stage loop: drive the ratchet off the elite diff
+                if acct["name"] == "elite" and prev is not None:
+                    try:
+                        stagewatch.on_position_change(sym, prev, cur)
+                    except Exception as e:
+                        log.warning(f"stagewatch {sym}: {e}")
 
                 _POS_SNAPSHOT[key] = cur
 
@@ -1085,6 +1093,20 @@ def command_loop():
             data = get_updates(offset=offset, timeout=20)
             for upd in data.get("result", []):
                 offset   = upd["update_id"] + 1
+
+                # ── Button tap (approve/skip) ────────────────────────
+                cb = upd.get("callback_query")
+                if cb:
+                    if chat_allow:
+                        cb_chat = str(((cb.get("message") or {}).get("chat") or {}).get("id") or "")
+                        if cb_chat and cb_chat != chat_allow:
+                            continue
+                    try:
+                        stagewatch.handle_callback(cb)
+                    except Exception as e:
+                        print(f"[callback] {e}", flush=True)
+                    continue
+
                 msg      = upd.get("message") or {}
                 text_raw = (msg.get("text") or "").strip()
                 if not text_raw:
@@ -1413,6 +1435,23 @@ def _handle_command(text: str, text_raw: str):
             tradewatch.show_plan(sym)
         except Exception as e:
             send_text(f"📋 [TradeWatch] Error: {e}")
+        return
+
+    # ── /stage ────────────────────────────────────────────────────────────────
+    if text.startswith("/stage"):
+        try:
+            stagewatch.stage(text_raw)
+        except Exception as e:
+            send_text(f"📋 [Stage] {e}")
+        return
+
+    # ── /flatten ──────────────────────────────────────────────────────────────
+    if text.startswith("/flatten"):
+        try:
+            parts = text_raw.split()
+            stagewatch.flatten_cmd(parts[1] if len(parts) > 1 else "")
+        except Exception as e:
+            send_text(f"🛑 [Stage] {e}")
         return
 
 
