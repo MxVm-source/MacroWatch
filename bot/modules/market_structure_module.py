@@ -90,6 +90,10 @@ def _save_state():
                 # Rolling OI history — store as plain list
                 out[sym] = s
                 continue
+            if sym.startswith("_last_cvd_state_"):
+                # CVD transition state — plain string (LIVE/NO_TAKE/MID_RANGE)
+                out[sym] = s
+                continue
             out[sym] = {
                 "last_fire_utc":  s["last_fire_utc"].isoformat() if s.get("last_fire_utc") else None,
                 "last_regime":    s.get("last_regime"),
@@ -646,6 +650,7 @@ def _check_cvd_transition(verdict: dict, symbol: str):
     new_state  = verdict["state"]
 
     STATE[state_key] = new_state
+    _save_state()  # persist immediately — must survive redeploys
 
     actionable = {
         ("NO_TAKE",  "LIVE"),
