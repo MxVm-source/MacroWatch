@@ -625,79 +625,90 @@ def _log_trigger_fire(verdict: dict, symbol: str):
 def _check_cvd_transition(verdict: dict, symbol: str):
     """
     Detect LIVE <-> NO_TAKE state transitions and fire a dedicated alert.
-    Runs on every 4H check (not just when the structure broadcast fires) so
-    a flip is never missed because "no change" suppressed the main message.
 
-    Transitions that fire an alert:
-      NO_TAKE  -> LIVE      (new entry signal confirmed)
-      LIVE     -> NO_TAKE   (signal withdrawn — absorption/sellers stepping in)
-      LIVE     -> MID_RANGE (price moved away from level while signal was live)
-      NO_TAKE  -> MID_RANGE (level no longer in play)
+    CADENCE: called ONLY from poll_and_maybe_fire (the 4H cron job).
+    Never called from show_structure (/structure command) — that's a read-only
+    view, not a state-machine tick. One evaluation per 4H candle, max.
+    This prevents LIVE->NO_TAKE->LIVE chop alerts in sideways markets.
 
-    MID_RANGE -> LIVE/NO_TAKE is the normal "approaching a level" path and
-    is already covered by the structure broadcast, so no extra alert is fired
-    for that transition.
+    PHASE-0 LANGUAGE: bot CVD is an unvalidated Bitget-perp proxy.
+    Alerts say "check aggr" not "act" until 20-30 trades of agreement
+    are logged in cvd_trigger_log.jsonl and the proxy is promoted.
+
+    Transitions that fire:
+      NO_TAKE  -> LIVE      check aggr — CVD now confirms
+      LIVE     -> NO_TAKE   check aggr — CVD withdrawn
+      LIVE     -> MID_RANGE level left while signal was live
+      NO_TAKE  -> MID_RANGE level no longer in play
     """
-    state_key = f"_last_cvd_state_{symbol}"
+    state_key  = f"_last_cvd_state_{symbol}"
     prev_state = STATE.get(state_key)
     new_state  = verdict["state"]
 
-    # Update state regardless of whether we fire
     STATE[state_key] = new_state
 
-    # Define which transitions are worth a dedicated alert
     actionable = {
-        ("NO_TAKE",   "LIVE"),       # flip to entry signal
-        ("LIVE",      "NO_TAKE"),    # signal withdrawn
-        ("LIVE",      "MID_RANGE"),  # level left while live
-        ("NO_TAKE",   "MID_RANGE"),  # level left
+        ("NO_TAKE",  "LIVE"),
+        ("LIVE",     "NO_TAKE"),
+        ("LIVE",     "MID_RANGE"),
+        ("NO_TAKE",  "MID_RANGE"),
     }
 
     if prev_state is None or (prev_state, new_state) not in actionable:
         return
 
-    spot  = verdict.get("spot", 0)
-    level = verdict.get("level")
-    side  = verdict.get("side", "")
+    spot   = verdict.get("spot", 0)
+    level  = verdict.get("level")
+    side   = verdict.get("side") or ""
     reason = verdict.get("reason", "")
+    lvl_s  = f"@ `{level:,.0f}`" if level else ""
+    AGGR_URL = "https://aggr.trade/6zn3"
 
-    # Emoji set
     if new_state == "LIVE":
         icon = "🟢"
-        head = f"CVD FLIPPED LIVE — {side.upper()} @ {level:,.0f}" if level else f"CVD FLIPPED LIVE"
+        head = f"CVD → LIVE — {side.upper()} {lvl_s}"
+        action = f"→ [Check aggr 15m CVD]({AGGR_URL}) before acting (Phase-0: proxy unvalidated)"
     elif new_state == "NO_TAKE":
         icon = "⚪"
-        head = f"CVD FLIPPED NO-TAKE — {side.upper()} @ {level:,.0f}" if level else "CVD FLIPPED NO-TAKE"
+        head = f"CVD → NO-TAKE — {side.upper()} {lvl_s}"
+        action = f"→ [Check aggr 15m CVD]({AGGR_URL}) — bot says absorption, confirm or override"
     else:  # MID_RANGE
         icon = "➖"
-        head = "CVD LEVEL LEFT — mid-range"
+        head = "CVD → MID-RANGE — level left"
+        action = "→ Level no longer in play"
 
     msg = (
         f"{icon} *{symbol} — {head}*\n"
-        f"`${spot:,.0f}` | was: `{prev_state}` → now: `{new_state}`\n"
-        f"→ {reason}"
+        f"`${spot:,.0f}` | `{prev_state}` → `{new_state}`\n"
+        f"{reason}\n"
+        f"{action}"
     )
 
     try:
         send_text(msg)
-        log.info(f"CVD transition alert fired: {symbol} {prev_state} -> {new_state}")
+        log.info(f"CVD transition alert: {symbol} {prev_state} -> {new_state}")
     except Exception as e:
         log.warning(f"CVD transition alert send failed: {e}")
 
 
-def _get_trigger_line(struct: dict, symbol: str) -> str | None:
+def _get_trigger_line(struct: dict, symbol: str, state_update: bool = True) -> str | None:
     """
-    Run the CVD gate (trigger.evaluate) and return its formatted line.
-    Also handles logging and transition detection — both isolated so a
-    CVD/network failure never breaks the underlying structure broadcast.
+    Run the CVD gate and return its formatted line for the broadcast message.
+
+    state_update=True  (default, 4H cron path): also logs the verdict and
+                       runs transition detection. One state tick per candle.
+    state_update=False (/structure command path): compute and display only —
+                       never advances the state machine or fires transition
+                       alerts. The command is a read-only view, not a tick.
     """
     try:
         from bot.modules.trigger import evaluate, format_trigger_line
         verdict = evaluate(struct, symbol=symbol)
         if verdict["cvd"].get("direction") == "unavailable":
             return None
-        _log_trigger_fire(verdict, symbol)
-        _check_cvd_transition(verdict, symbol)
+        if state_update:
+            _log_trigger_fire(verdict, symbol)
+            _check_cvd_transition(verdict, symbol)
         return format_trigger_line(verdict)
     except Exception as e:
         log.warning(f"CVD trigger gate failed for {symbol}: {e}")
@@ -790,7 +801,7 @@ def show_structure(symbol: str = "BTC"):
 
     try:
         struct = get_structure(sym)
-        trigger_line = _get_trigger_line(struct, sym)
+        trigger_line = _get_trigger_line(struct, sym, state_update=False)
         msg = format_telegram(struct, trigger_line=trigger_line)
         send_text(msg)
     except Exception as e:
