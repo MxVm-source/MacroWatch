@@ -622,11 +622,74 @@ def _log_trigger_fire(verdict: dict, symbol: str):
         log.warning(f"CVD trigger log write failed: {e}")
 
 
+def _check_cvd_transition(verdict: dict, symbol: str):
+    """
+    Detect LIVE <-> NO_TAKE state transitions and fire a dedicated alert.
+    Runs on every 4H check (not just when the structure broadcast fires) so
+    a flip is never missed because "no change" suppressed the main message.
+
+    Transitions that fire an alert:
+      NO_TAKE  -> LIVE      (new entry signal confirmed)
+      LIVE     -> NO_TAKE   (signal withdrawn — absorption/sellers stepping in)
+      LIVE     -> MID_RANGE (price moved away from level while signal was live)
+      NO_TAKE  -> MID_RANGE (level no longer in play)
+
+    MID_RANGE -> LIVE/NO_TAKE is the normal "approaching a level" path and
+    is already covered by the structure broadcast, so no extra alert is fired
+    for that transition.
+    """
+    state_key = f"_last_cvd_state_{symbol}"
+    prev_state = STATE.get(state_key)
+    new_state  = verdict["state"]
+
+    # Update state regardless of whether we fire
+    STATE[state_key] = new_state
+
+    # Define which transitions are worth a dedicated alert
+    actionable = {
+        ("NO_TAKE",   "LIVE"),       # flip to entry signal
+        ("LIVE",      "NO_TAKE"),    # signal withdrawn
+        ("LIVE",      "MID_RANGE"),  # level left while live
+        ("NO_TAKE",   "MID_RANGE"),  # level left
+    }
+
+    if prev_state is None or (prev_state, new_state) not in actionable:
+        return
+
+    spot  = verdict.get("spot", 0)
+    level = verdict.get("level")
+    side  = verdict.get("side", "")
+    reason = verdict.get("reason", "")
+
+    # Emoji set
+    if new_state == "LIVE":
+        icon = "🟢"
+        head = f"CVD FLIPPED LIVE — {side.upper()} @ {level:,.0f}" if level else f"CVD FLIPPED LIVE"
+    elif new_state == "NO_TAKE":
+        icon = "⚪"
+        head = f"CVD FLIPPED NO-TAKE — {side.upper()} @ {level:,.0f}" if level else "CVD FLIPPED NO-TAKE"
+    else:  # MID_RANGE
+        icon = "➖"
+        head = "CVD LEVEL LEFT — mid-range"
+
+    msg = (
+        f"{icon} *{symbol} — {head}*\n"
+        f"`${spot:,.0f}` | was: `{prev_state}` → now: `{new_state}`\n"
+        f"→ {reason}"
+    )
+
+    try:
+        send_text(msg)
+        log.info(f"CVD transition alert fired: {symbol} {prev_state} -> {new_state}")
+    except Exception as e:
+        log.warning(f"CVD transition alert send failed: {e}")
+
+
 def _get_trigger_line(struct: dict, symbol: str) -> str | None:
     """
     Run the CVD gate (trigger.evaluate) and return its formatted line.
-    Isolated try/except — a CVD/network failure must never break the
-    underlying structure broadcast, just omit this line.
+    Also handles logging and transition detection — both isolated so a
+    CVD/network failure never breaks the underlying structure broadcast.
     """
     try:
         from bot.modules.trigger import evaluate, format_trigger_line
@@ -634,6 +697,7 @@ def _get_trigger_line(struct: dict, symbol: str) -> str | None:
         if verdict["cvd"].get("direction") == "unavailable":
             return None
         _log_trigger_fire(verdict, symbol)
+        _check_cvd_transition(verdict, symbol)
         return format_trigger_line(verdict)
     except Exception as e:
         log.warning(f"CVD trigger gate failed for {symbol}: {e}")
@@ -663,6 +727,12 @@ def poll_and_maybe_fire(symbol: str = "BTCUSDT"):
                 "last_sup_top":   struct["sup_levels"][0][0] if struct["sup_levels"] else None,
             }
             _save_state()
+        else:
+            # Even when the full structure broadcast is suppressed, still run
+            # the CVD gate for transition detection — a LIVE→NO_TAKE flip is
+            # important to catch regardless of whether anything else changed.
+            _get_trigger_line(struct, symbol)
+
     except Exception as e:
         log.exception(f"MarketStructure poll failed for {symbol}: {e}")
 
@@ -674,6 +744,40 @@ def poll_all():
 
 
 # ─── Command entrypoint ──────────────────────────────────────────────────────
+
+def show_cvd_log(n: int = 10):
+    """Handler for /cvd_log [N] — dump the last N trigger fire entries."""
+    try:
+        if not os.path.exists(CVD_LOG_PATH):
+            send_text("📊 CVD log is empty — no LIVE/NO_TAKE verdicts recorded yet.")
+            return
+        with open(CVD_LOG_PATH) as f:
+            lines = [l.strip() for l in f if l.strip()]
+        if not lines:
+            send_text("📊 CVD log is empty.")
+            return
+        entries = [json.loads(l) for l in lines[-n:]]
+        parts = [f"📊 *CVD Trigger Log* — last {len(entries)} entries\n"]
+        for e in reversed(entries):
+            ts  = e.get("ts", "")[:16].replace("T", " ")
+            sym = e.get("symbol", "")
+            st  = e.get("state", "")
+            sd  = e.get("side", "") or ""
+            lvl = e.get("level")
+            cvd = e.get("cvd_direction", "")
+            div = e.get("divergence", "none")
+            icon = "🟢" if st == "LIVE" else "⚪"
+            lvl_s = f"@ `{lvl:,.0f}`" if lvl else ""
+            div_s = f" | div: {div}" if div and div != "none" else ""
+            parts.append(
+                f"{icon} `{ts}` — {sym}\n"
+                f"  {st} {sd.upper()} {lvl_s}\n"
+                f"  CVD: {cvd}{div_s}"
+            )
+        send_text("\n\n".join(parts))
+    except Exception as e:
+        send_text(f"📊 [CVD Log] Error: {str(e)[:200]}")
+
 
 def show_structure(symbol: str = "BTC"):
     """Handler for /structure [BTC|ETH] — fire immediately regardless of gate."""
