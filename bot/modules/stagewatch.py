@@ -25,7 +25,53 @@ import uuid
 import logging
 from datetime import datetime, timezone, timedelta
 
-from bot.utils import send_text, send_buttons, edit_message_text, answer_callback_query
+from bot.utils import send_text
+try:
+    from bot.utils import send_buttons, edit_message_text, answer_callback_query
+except ImportError:
+    # utils.py not updated with the button helpers — define them inline so the
+    # stage loop is self-contained and the import never fails.
+    import requests as _rq
+    _TG   = os.getenv("TELEGRAM_TOKEN", "")
+    _CHAT = os.getenv("CHAT_ID", "")
+    _API  = f"https://api.telegram.org/bot{_TG}" if _TG else ""
+
+    def send_buttons(text, buttons):
+        if not _TG or not _CHAT:
+            print("send_buttons (dry-run):", text, buttons)
+            return {"result": {"message_id": 0}}
+        keyboard = [[{"text": l, "callback_data": d} for (l, d) in row] for row in buttons]
+        try:
+            r = _rq.post(f"{_API}/sendMessage", json={
+                "chat_id": _CHAT, "text": text, "parse_mode": "Markdown",
+                "disable_web_page_preview": True,
+                "reply_markup": {"inline_keyboard": keyboard}}, timeout=10)
+            return r.json() if r.ok else {"result": {"message_id": 0}}
+        except Exception as e:
+            print("send_buttons exc:", e)
+            return {"result": {"message_id": 0}}
+
+    def edit_message_text(mid, text):
+        if not _TG or not _CHAT or not mid:
+            print("edit_message_text (dry-run):", mid, text)
+            return
+        try:
+            _rq.post(f"{_API}/editMessageText", json={
+                "chat_id": _CHAT, "message_id": mid, "text": text,
+                "parse_mode": "Markdown", "disable_web_page_preview": True}, timeout=10)
+        except Exception as e:
+            print("edit_message_text exc:", e)
+
+    def answer_callback_query(cid, text=""):
+        if not _TG or not cid:
+            return
+        p = {"callback_query_id": cid}
+        if text:
+            p["text"] = text
+        try:
+            _rq.post(f"{_API}/answerCallbackQuery", json=p, timeout=10)
+        except Exception as e:
+            print("answer_callback_query exc:", e)
 from bot.datafeed_bitget import (
     get_ticker,
     _fetch_all_futures_positions_elite,
