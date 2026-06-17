@@ -112,31 +112,30 @@ _load_state()
 
 # ─── Data fetch (mirrors btc_4h_levels.py) ────────────────────────────────────
 
-def fetch_klines(sym: str, interval: str = "4h", limit: int = NBARS) -> pd.DataFrame:
+def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataFrame:
     """
     Fetch 4H OHLCV from Bitget USDT perp.
 
-    CRITICAL: Bitget returns candles NEWEST-FIRST (descending timestamps).
-      candles[0]  = most recent bar
-      candles[-1] = oldest bar in this page
-
-    Pagination: endTime = int(batch[-1][0]) - 1
-    (matches atrb_multi_bot_v2.py fetch_daily_candles exactly)
-
-    After collecting all pages, sort ascending before returning.
+    Mirrors the PROVEN production pattern from atrb_multi_bot_v2.py
+    fetch_daily_candles (which runs live without issue):
+      - granularity is UPPERCASE ("4H", not "4h") — Bitget /candles rejects
+        lowercase with 400 Bad Request on this endpoint
+      - Bitget returns NEWEST-FIRST: batch[-1] is the oldest bar in a page
+      - paginate backward: end_ms = oldest_ts - BAR_MS (full interval step)
+      - sort ascending before returning
     """
-    URL      = f"{BITGET_BASE}/api/v2/mix/market/candles"
-    BATCH    = 200
-    MS_4H    = 14_400_000
+    URL    = f"{BITGET_BASE}/api/v2/mix/market/candles"
+    BAR_MS = 14_400_000  # 4H in ms
+    BATCH  = 200
     all_rows = []
     end_ms   = None
 
     while len(all_rows) < limit:
         params = {
             "symbol":      sym,
-            "granularity": interval,
-            "limit":       str(min(BATCH, limit - len(all_rows))),
             "productType": PRODUCT_TYPE,
+            "granularity": interval,
+            "limit":       str(BATCH),
         }
         if end_ms:
             params["endTime"] = str(end_ms)
@@ -151,11 +150,8 @@ def fetch_klines(sym: str, interval: str = "4h", limit: int = NBARS) -> pd.DataF
             break
 
         all_rows.extend(batch)
-
-        # Newest-first: batch[-1] is the oldest bar in this page
-        oldest_ts = int(batch[-1][0])
-        end_ms    = oldest_ts - 1
-
+        oldest_ts = int(batch[-1][0])   # newest-first: last row is oldest
+        end_ms    = oldest_ts - BAR_MS
         if len(batch) < BATCH:
             break
         time.sleep(0.2)
@@ -170,18 +166,19 @@ def fetch_klines(sym: str, interval: str = "4h", limit: int = NBARS) -> pd.DataF
     df["ot"] = df["ot"].astype(np.int64)
     df["t"]  = pd.to_datetime(df["ot"], unit="ms", utc=True)
     df = df.drop_duplicates("ot").sort_values("ot").reset_index(drop=True)
+    df = df.tail(limit).reset_index(drop=True)
 
     n_bars = len(df)
     if n_bars >= 2:
         diffs  = df["ot"].diff().dropna()
-        n_gaps = int((diffs != MS_4H).sum())
+        n_gaps = int((diffs != BAR_MS).sum())
         log.info(
             f"fetch_klines {sym}: {n_bars} bars, "
             f"{df['t'].iloc[0].isoformat()} -> {df['t'].iloc[-1].isoformat()}, "
             f"gaps={n_gaps}"
         )
         if n_gaps > 0:
-            bad = diffs[diffs != MS_4H]
+            bad = diffs[diffs != BAR_MS]
             for idx, d in bad.items():
                 log.warning(
                     f"fetch_klines {sym}: gap at bar {idx} "
@@ -401,7 +398,7 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
       tl_desc_now, tl_desc_slope, tl_asc_now, tl_asc_slope,
       trade_zone_status, trade_zone_text
     """
-    df = fetch_klines(symbol, "4h", nbars)
+    df = fetch_klines(symbol, "4H", nbars)
     log.info(f"get_structure DIAG-v4 {symbol}: fetched {len(df)} bars, computing levels")
     sh, sl = fractals(df, n)
     spot = float(df["c"].iloc[-1])
