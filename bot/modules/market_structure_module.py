@@ -154,7 +154,11 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
     all_rows.extend(batch)
     # Bitget /candles returns OLDEST-FIRST: batch[0] is oldest, batch[-1] is newest
     oldest_ts = int(batch[0][0])
-    end_ms = oldest_ts - 1  # 1ms before oldest bar (not BAR_MS — that skips a bar)
+    # Set endTime to include an overlap with the current page's oldest bar.
+    # endTime = oldest_ts + BAR_MS - 1 means "give me bars ending up to one
+    # bar after our current oldest" — Bitget will include that bar in the
+    # next page, and drop_duplicates() later removes the overlap cleanly.
+    end_ms = oldest_ts + BAR_MS - 1
     log.info(
         f"fetch_klines /candles: {len(batch)} bars oldest={oldest_ts} "
         f"-> next endTime={end_ms} ({pd.Timestamp(end_ms, unit='ms', tz='UTC').isoformat()})"
@@ -185,12 +189,11 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
             break
 
         all_rows.extend(batch)
-        # Check ordering of history-candles response
         h_first = int(batch[0][0])
         h_last  = int(batch[-1][0])
-        # Use whichever is older as next endTime, subtract 1ms to avoid skipping a bar
         oldest_in_batch = min(h_first, h_last)
-        end_ms = oldest_in_batch - 1
+        # Overlap by one bar to prevent page-boundary gaps
+        end_ms = oldest_in_batch + BAR_MS - 1
         log.info(
             f"fetch_klines /history-candles page {pages}: {len(batch)} bars, "
             f"batch[0]={h_first} batch[-1]={h_last}, next endTime={end_ms}"
