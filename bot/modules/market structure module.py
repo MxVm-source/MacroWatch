@@ -126,8 +126,10 @@ def fetch_klines(sym: str, interval: str = "4h", limit: int = NBARS) -> pd.DataF
     """
     URL   = f"{BITGET_BASE}/api/v2/mix/market/candles"
     BATCH = 1000
-    MS_4H = 14_400_000          # 4h in milliseconds
-    MS_90D = 90 * 24 * 3600 * 1000  # 90-day window max
+    MS_4H = 14_400_000
+    MS_90D = 90 * 24 * 3600 * 1000
+
+    log.info(f"fetch_klines v3 {sym}: startTime/endTime pagination, target={limit} bars")
 
     # Work out how far back we need to go
     now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
