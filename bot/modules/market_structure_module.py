@@ -152,15 +152,12 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
         raise RuntimeError(f"fetch_klines: no recent data for {sym}")
 
     all_rows.extend(batch)
-    # newest-first: batch[-1] is oldest bar in this page
-    oldest_ts = int(batch[-1][0])
-    newest_ts = int(batch[0][0])
+    # Bitget /candles returns OLDEST-FIRST: batch[0] is oldest, batch[-1] is newest
+    oldest_ts = int(batch[0][0])
     end_ms = oldest_ts - BAR_MS
     log.info(
-        f"fetch_klines /candles page: {len(batch)} bars, "
-        f"batch[0]={batch[0][0]} batch[-1]={batch[-1][0]}, "
-        f"newest={newest_ts} oldest={oldest_ts}, "
-        f"next endTime={end_ms} ({pd.Timestamp(end_ms, unit='ms', tz='UTC').isoformat()})"
+        f"fetch_klines /candles: {len(batch)} bars oldest={oldest_ts} "
+        f"-> next endTime={end_ms} ({pd.Timestamp(end_ms, unit='ms', tz='UTC').isoformat()})"
     )
     time.sleep(0.2)
 
@@ -184,10 +181,20 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
             break
         batch = data.get("data") or []
         if not batch:
+            log.info(f"fetch_klines /history-candles: empty at page {pages}, endTime={end_ms}")
             break
 
         all_rows.extend(batch)
-        end_ms = int(batch[-1][0]) - BAR_MS
+        # Check ordering of history-candles response
+        h_first = int(batch[0][0])
+        h_last  = int(batch[-1][0])
+        # Use whichever is older as next endTime
+        oldest_in_batch = min(h_first, h_last)
+        end_ms = oldest_in_batch - BAR_MS
+        log.info(
+            f"fetch_klines /history-candles page {pages}: {len(batch)} bars, "
+            f"batch[0]={h_first} batch[-1]={h_last}, next endTime={end_ms}"
+        )
         time.sleep(0.2)
 
     if not all_rows:
