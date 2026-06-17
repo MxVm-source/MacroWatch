@@ -116,26 +116,49 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
     """
     Fetch 4H OHLCV from Bitget USDT perp.
 
-    Mirrors the PROVEN production pattern from atrb_multi_bot_v2.py
-    fetch_daily_candles (which runs live without issue):
-      - granularity is UPPERCASE ("4H", not "4h") — Bitget /candles rejects
-        lowercase with 400 Bad Request on this endpoint
-      - Bitget returns NEWEST-FIRST: batch[-1] is the oldest bar in a page
-      - paginate backward: end_ms = oldest_ts - BAR_MS (full interval step)
-      - sort ascending before returning
-    """
-    URL    = f"{BITGET_BASE}/api/v2/mix/market/candles"
-    BAR_MS = 14_400_000  # 4H in ms
-    BATCH  = 90          # MUST be 90: Bitget /candles honors endTime pagination
-                         # at limit=90 (proven in atrb_multi_bot_v2 fetch_daily_candles)
-                         # but caps/ignores endTime at limit=200, returning only
-                         # the most recent ~200 bars and refusing to go further back.
-    all_rows = []
-    end_ms   = None
-    max_pages = (limit // BATCH) + 5   # safety cap (~16 pages for 1000 bars)
-    pages     = 0
-    log.info(f"fetch_klines START {sym} v5: BATCH={BATCH}, limit={limit}, max_pages={max_pages}")
+    Two-endpoint strategy (confirmed by Bitget v2 docs and behavior):
+    - /api/v2/mix/market/candles       -> recent data only, ignores endTime,
+                                          always returns the most recent ~100 bars
+    - /api/v2/mix/market/history-candles -> historical data, honors endTime
+                                            pagination, newest-first per page
 
+    Strategy:
+    1. Fetch most recent page from /candles (no params needed)
+    2. Paginate older pages from /history-candles using endTime = oldest_ts - BAR_MS
+    3. Stop when we have `limit` bars or history-candles returns empty
+    """
+    RECENT_URL  = f"{BITGET_BASE}/api/v2/mix/market/candles"
+    HISTORY_URL = f"{BITGET_BASE}/api/v2/mix/market/history-candles"
+    BAR_MS      = 14_400_000  # 4H in ms
+    BATCH       = 100
+    all_rows    = []
+
+    log.info(f"fetch_klines START {sym} v6: two-endpoint, limit={limit}")
+
+    # Step 1: most recent page from /candles
+    params = {
+        "symbol":      sym,
+        "productType": PRODUCT_TYPE,
+        "granularity": interval,
+        "limit":       str(BATCH),
+    }
+    r = requests.get(RECENT_URL, params=params, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("code") != "00000":
+        raise RuntimeError(f"Bitget candles err {data.get('code')}: {data.get('msg')}")
+    batch = data.get("data") or []
+    if not batch:
+        raise RuntimeError(f"fetch_klines: no recent data for {sym}")
+
+    all_rows.extend(batch)
+    # newest-first: batch[-1] is oldest bar in this page
+    end_ms = int(batch[-1][0]) - BAR_MS
+    time.sleep(0.2)
+
+    # Step 2: paginate older pages from /history-candles
+    max_pages = (limit // BATCH) + 5
+    pages = 0
     while len(all_rows) < limit and pages < max_pages:
         pages += 1
         params = {
@@ -143,25 +166,20 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
             "productType": PRODUCT_TYPE,
             "granularity": interval,
             "limit":       str(BATCH),
+            "endTime":     str(end_ms),
         }
-        if end_ms:
-            params["endTime"] = str(end_ms)
-
-        r = requests.get(URL, params=params, timeout=15)
+        r = requests.get(HISTORY_URL, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         if data.get("code") != "00000":
-            raise RuntimeError(f"Bitget candles err {data.get('code')}: {data.get('msg')}")
+            log.warning(f"history-candles err {data.get('code')}: {data.get('msg')}")
+            break
         batch = data.get("data") or []
         if not batch:
             break
 
         all_rows.extend(batch)
-        oldest_ts = int(batch[-1][0])   # newest-first: last row is oldest
-        end_ms    = oldest_ts - BAR_MS
-        # Only break if Bitget returned nothing — don't break on partial pages
-        # since Bitget caps 4H responses at ~50 bars per request regardless of
-        # the limit param, so every page looks "partial" but more data exists.
+        end_ms = int(batch[-1][0]) - BAR_MS
         time.sleep(0.2)
 
     if not all_rows:
