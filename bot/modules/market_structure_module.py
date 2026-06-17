@@ -134,6 +134,7 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
     end_ms   = None
     max_pages = (limit // BATCH) + 5   # safety cap (~16 pages for 1000 bars)
     pages     = 0
+    log.info(f"fetch_klines START {sym} v5: BATCH={BATCH}, limit={limit}, max_pages={max_pages}")
 
     while len(all_rows) < limit and pages < max_pages:
         pages += 1
