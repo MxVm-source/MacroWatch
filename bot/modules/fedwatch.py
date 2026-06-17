@@ -180,6 +180,43 @@ def _rate_prob_line() -> str:
 
 FED_HTML_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 
+# Hardcoded fallback — decision-day dates (2nd day of each 2-day meeting),
+# statement at 14:00 ET, press conference 14:30 ET. Source: Federal Reserve
+# official 2026/2027 tentative schedule announcements.
+# This is the SAFETY NET: the HTML scrape is fragile (today's June 17 FOMC
+# was missed when the page structure changed), so these known dates are
+# always merged in. Updated annually when the Fed publishes the next year.
+FOMC_FALLBACK_DATES = [
+    # 2026 — (year, month, decision_day)
+    (2026, 1, 28), (2026, 3, 18), (2026, 4, 29), (2026, 6, 17),
+    (2026, 7, 29), (2026, 9, 16), (2026, 10, 28), (2026, 12, 9),
+    # 2027
+    (2027, 1, 27), (2027, 3, 17), (2027, 4, 28), (2027, 6, 9),
+    (2027, 7, 28), (2027, 9, 15), (2027, 10, 27), (2027, 12, 8),
+]
+
+
+def _fomc_fallback_events() -> list:
+    """Known FOMC decision dates as a guaranteed baseline (HTML-scrape-independent)."""
+    events = []
+    for year, month, day in FOMC_FALLBACK_DATES:
+        try:
+            base = datetime(year, month, day, tzinfo=ET_TZ)
+        except Exception:
+            continue
+        for title, hour, minute in [
+            ("FOMC Statement",        14, 0),
+            ("FOMC Press Conference", 14, 30),
+        ]:
+            events.append({
+                "title":    title,
+                "start":    base.replace(hour=hour, minute=minute).astimezone(timezone.utc),
+                "category": "FOMC",
+                "location": "Federal Reserve",
+            })
+    return events
+
+
 def _fetch_fomc_events() -> list:
     try:
         r = requests.get(FED_HTML_URL, timeout=12,
@@ -332,8 +369,13 @@ def refresh_calendar():
     log.info("Refreshing calendar...")
     all_events = []
 
-    # FOMC + speeches
-    all_events += _fetch_fomc_events()
+    # FOMC: HTML scrape + hardcoded fallback (merged & deduped below).
+    # The fallback guarantees known FOMC dates are present even if the
+    # Fed HTML structure changes and the scrape returns nothing.
+    scraped_fomc = _fetch_fomc_events()
+    all_events += scraped_fomc
+    all_events += _fomc_fallback_events()
+    log.info(f"FOMC: {len(scraped_fomc)} scraped + {len(FOMC_FALLBACK_DATES)*2} fallback")
 
     # BLS economic releases
     for rtype in ["CPI", "PPI", "NFP"]:
