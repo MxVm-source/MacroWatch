@@ -116,60 +116,54 @@ def fetch_klines(sym: str, interval: str = "4h", limit: int = NBARS) -> pd.DataF
     """
     Fetch 4H OHLCV from Bitget USDT perp.
 
-    Uses /api/v2/mix/market/candles with startTime/endTime pagination.
-    - Max 1000 bars per request (confirmed from Bitget v2 docs)
-    - Max 90-day window per request
-    - Returns oldest-first (ascending timestamps)
-    - 1000 bars x 4h = ~166 days = 2 pages of 90 days each
+    CRITICAL: Bitget returns candles NEWEST-FIRST (descending timestamps).
+      candles[0]  = most recent bar
+      candles[-1] = oldest bar in this page
 
-    Granularity: lowercase "4h" per Bitget v2 docs.
+    Pagination: endTime = int(batch[-1][0]) - 1
+    (matches atrb_multi_bot_v2.py fetch_daily_candles exactly)
+
+    After collecting all pages, sort ascending before returning.
     """
-    URL   = f"{BITGET_BASE}/api/v2/mix/market/candles"
-    BATCH = 1000
-    MS_4H = 14_400_000
-    MS_90D = 90 * 24 * 3600 * 1000
+    URL      = f"{BITGET_BASE}/api/v2/mix/market/candles"
+    BATCH    = 200
+    MS_4H    = 14_400_000
+    all_rows = []
+    end_ms   = None
 
-    log.info(f"fetch_klines v3 {sym}: startTime/endTime pagination, target={limit} bars")
-
-    # Work out how far back we need to go
-    now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
-    # target start: limit bars back from now
-    target_start_ms = now_ms - limit * MS_4H
-
-    all_candles = []
-    window_end = now_ms
-
-    while len(all_candles) < limit:
-        window_start = max(target_start_ms, window_end - MS_90D)
+    while len(all_rows) < limit:
         params = {
             "symbol":      sym,
             "granularity": interval,
-            "startTime":   str(window_start),
-            "endTime":     str(window_end),
-            "limit":       str(BATCH),
+            "limit":       str(min(BATCH, limit - len(all_rows))),
             "productType": PRODUCT_TYPE,
         }
+        if end_ms:
+            params["endTime"] = str(end_ms)
+
         r = requests.get(URL, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         if data.get("code") != "00000":
             raise RuntimeError(f"Bitget candles err {data.get('code')}: {data.get('msg')}")
-        candles = data.get("data") or []
-        if not candles:
+        batch = data.get("data") or []
+        if not batch:
             break
-        # Oldest-first: prepend this page (it covers older bars than what we have)
-        all_candles = list(candles) + all_candles
-        # Move window backward: next page ends just before this page's oldest bar
-        oldest_ts = int(candles[0][0])
-        window_end = oldest_ts - 1
-        if window_end <= target_start_ms:
+
+        all_rows.extend(batch)
+
+        # Newest-first: batch[-1] is the oldest bar in this page
+        oldest_ts = int(batch[-1][0])
+        end_ms    = oldest_ts - 1
+
+        if len(batch) < BATCH:
             break
         time.sleep(0.2)
 
-    # Trim to exactly `limit` bars (keep most recent)
-    all_candles = all_candles[-limit:]
+    if not all_rows:
+        raise RuntimeError(f"fetch_klines: no data returned for {sym}")
 
-    df = pd.DataFrame(all_candles, columns=["ot", "o", "h", "l", "c", "v", "qv"])
+    df = pd.DataFrame(all_rows, columns=["ot", "o", "h", "l", "c", "v", "qv"])
     df = df[["ot", "o", "h", "l", "c", "v"]].astype(
         {"o": float, "h": float, "l": float, "c": float, "v": float}
     )
@@ -177,10 +171,9 @@ def fetch_klines(sym: str, interval: str = "4h", limit: int = NBARS) -> pd.DataF
     df["t"]  = pd.to_datetime(df["ot"], unit="ms", utc=True)
     df = df.drop_duplicates("ot").sort_values("ot").reset_index(drop=True)
 
-    # Diagnostic: bar count, time range, gap check
     n_bars = len(df)
     if n_bars >= 2:
-        diffs = df["ot"].diff().dropna()
+        diffs  = df["ot"].diff().dropna()
         n_gaps = int((diffs != MS_4H).sum())
         log.info(
             f"fetch_klines {sym}: {n_bars} bars, "
@@ -194,39 +187,6 @@ def fetch_klines(sym: str, interval: str = "4h", limit: int = NBARS) -> pd.DataF
                     f"fetch_klines {sym}: gap at bar {idx} "
                     f"({df['t'].iloc[idx-1].isoformat()} -> "
                     f"{df['t'].iloc[idx].isoformat()}, diff={d}ms)"
-                )
-
-    return df
-
-    df = pd.DataFrame(out, columns=["ot", "o", "h", "l", "c", "v", "qv"])
-    df = df[["ot", "o", "h", "l", "c", "v"]].astype(
-        {"o": float, "h": float, "l": float, "c": float, "v": float}
-    )
-    df["ot"] = df["ot"].astype(np.int64)
-    df["t"]  = pd.to_datetime(df["ot"], unit="ms", utc=True)
-    df = df.drop_duplicates("ot").sort_values("ot").reset_index(drop=True)
-
-    # Diagnostic: dataset shape, time range, and gap check. A 4H candle is
-    # 14,400,000 ms; any consecutive diff != that means a missing bar
-    # somewhere in the Bitget pagination, which would shift/break fractal
-    # detection downstream. Cheap, always logged.
-    n_bars = len(df)
-    if n_bars >= 2:
-        diffs = df["ot"].diff().dropna()
-        expected_ms = 14_400_000  # 4H
-        n_gaps = int((diffs != expected_ms).sum())
-        log.info(
-            f"fetch_klines {sym}: {n_bars} bars, "
-            f"{df['t'].iloc[0].isoformat()} -> {df['t'].iloc[-1].isoformat()}, "
-            f"gaps={n_gaps}"
-        )
-        if n_gaps > 0:
-            bad = diffs[diffs != expected_ms]
-            for idx, d in bad.items():
-                log.warning(
-                    f"fetch_klines {sym}: gap at index {idx} "
-                    f"({df['t'].iloc[idx-1].isoformat()} -> {df['t'].iloc[idx].isoformat()}, "
-                    f"diff={d}ms)"
                 )
 
     return df
