@@ -126,11 +126,17 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
     """
     URL    = f"{BITGET_BASE}/api/v2/mix/market/candles"
     BAR_MS = 14_400_000  # 4H in ms
-    BATCH  = 200
+    BATCH  = 90          # MUST be 90: Bitget /candles honors endTime pagination
+                         # at limit=90 (proven in atrb_multi_bot_v2 fetch_daily_candles)
+                         # but caps/ignores endTime at limit=200, returning only
+                         # the most recent ~200 bars and refusing to go further back.
     all_rows = []
     end_ms   = None
+    max_pages = (limit // BATCH) + 5   # safety cap (~16 pages for 1000 bars)
+    pages     = 0
 
-    while len(all_rows) < limit:
+    while len(all_rows) < limit and pages < max_pages:
+        pages += 1
         params = {
             "symbol":      sym,
             "productType": PRODUCT_TYPE,
