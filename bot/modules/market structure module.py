@@ -116,56 +116,85 @@ def fetch_klines(sym: str, interval: str = "4h", limit: int = NBARS) -> pd.DataF
     """
     Fetch 4H OHLCV from Bitget USDT perp.
 
-    Two endpoints needed:
-    - /api/v2/mix/market/candles        → recent bars (most recent 200 max)
-    - /api/v2/mix/market/history-candles → older bars (paginated backwards by endTime)
+    Uses /api/v2/mix/market/candles with startTime/endTime pagination.
+    - Max 1000 bars per request (confirmed from Bitget v2 docs)
+    - Max 90-day window per request
+    - Returns oldest-first (ascending timestamps)
+    - 1000 bars x 4h = ~166 days = 2 pages of 90 days each
 
-    Granularity must be lowercase: "4h" not "4H" per Bitget v2 docs.
+    Granularity: lowercase "4h" per Bitget v2 docs.
     """
-    RECENT_URL = f"{BITGET_BASE}/api/v2/mix/market/candles"
-    HIST_URL   = f"{BITGET_BASE}/api/v2/mix/market/history-candles"
-    BATCH      = 200
-    out        = []
-    end        = None
+    URL   = f"{BITGET_BASE}/api/v2/mix/market/candles"
+    BATCH = 1000
+    MS_4H = 14_400_000          # 4h in milliseconds
+    MS_90D = 90 * 24 * 3600 * 1000  # 90-day window max
 
-    # First page: use recent endpoint (no endTime)
-    params = {
-        "symbol":      sym,
-        "granularity": interval,
-        "limit":       str(min(BATCH, limit)),
-        "productType": PRODUCT_TYPE,
-    }
-    r = requests.get(RECENT_URL, params=params, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    if data.get("code") != "00000":
-        raise RuntimeError(f"Bitget candles err {data.get('code')}: {data.get('msg')}")
-    candles = data.get("data") or []
-    out = list(candles)
-    if candles:
-        end = int(candles[0][0]) - 1
-    time.sleep(0.2)
+    # Work out how far back we need to go
+    now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
+    # target start: limit bars back from now
+    target_start_ms = now_ms - limit * MS_4H
 
-    # Subsequent pages: use history endpoint with endTime
-    while len(out) < limit and end is not None:
+    all_candles = []
+    window_end = now_ms
+
+    while len(all_candles) < limit:
+        window_start = max(target_start_ms, window_end - MS_90D)
         params = {
             "symbol":      sym,
             "granularity": interval,
-            "limit":       str(min(BATCH, limit - len(out))),
+            "startTime":   str(window_start),
+            "endTime":     str(window_end),
+            "limit":       str(BATCH),
             "productType": PRODUCT_TYPE,
-            "endTime":     str(end),
         }
-        r = requests.get(HIST_URL, params=params, timeout=15)
+        r = requests.get(URL, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         if data.get("code") != "00000":
-            raise RuntimeError(f"Bitget history candles err {data.get('code')}: {data.get('msg')}")
+            raise RuntimeError(f"Bitget candles err {data.get('code')}: {data.get('msg')}")
         candles = data.get("data") or []
         if not candles:
             break
-        out = list(candles) + out
-        end = int(candles[0][0]) - 1
+        # Oldest-first: prepend this page (it covers older bars than what we have)
+        all_candles = list(candles) + all_candles
+        # Move window backward: next page ends just before this page's oldest bar
+        oldest_ts = int(candles[0][0])
+        window_end = oldest_ts - 1
+        if window_end <= target_start_ms:
+            break
         time.sleep(0.2)
+
+    # Trim to exactly `limit` bars (keep most recent)
+    all_candles = all_candles[-limit:]
+
+    df = pd.DataFrame(all_candles, columns=["ot", "o", "h", "l", "c", "v", "qv"])
+    df = df[["ot", "o", "h", "l", "c", "v"]].astype(
+        {"o": float, "h": float, "l": float, "c": float, "v": float}
+    )
+    df["ot"] = df["ot"].astype(np.int64)
+    df["t"]  = pd.to_datetime(df["ot"], unit="ms", utc=True)
+    df = df.drop_duplicates("ot").sort_values("ot").reset_index(drop=True)
+
+    # Diagnostic: bar count, time range, gap check
+    n_bars = len(df)
+    if n_bars >= 2:
+        diffs = df["ot"].diff().dropna()
+        n_gaps = int((diffs != MS_4H).sum())
+        log.info(
+            f"fetch_klines {sym}: {n_bars} bars, "
+            f"{df['t'].iloc[0].isoformat()} -> {df['t'].iloc[-1].isoformat()}, "
+            f"gaps={n_gaps}"
+        )
+        if n_gaps > 0:
+            bad = diffs[diffs != MS_4H]
+            for idx, d in bad.items():
+                log.warning(
+                    f"fetch_klines {sym}: gap at bar {idx} "
+                    f"({df['t'].iloc[idx-1].isoformat()} -> "
+                    f"{df['t'].iloc[idx].isoformat()}, diff={d}ms)"
+                )
+
+    return df
 
     df = pd.DataFrame(out, columns=["ot", "o", "h", "l", "c", "v", "qv"])
     df = df[["ot", "o", "h", "l", "c", "v"]].astype(
