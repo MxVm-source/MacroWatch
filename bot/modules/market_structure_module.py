@@ -153,7 +153,15 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
 
     all_rows.extend(batch)
     # newest-first: batch[-1] is oldest bar in this page
-    end_ms = int(batch[-1][0]) - BAR_MS
+    oldest_ts = int(batch[-1][0])
+    newest_ts = int(batch[0][0])
+    end_ms = oldest_ts - BAR_MS
+    log.info(
+        f"fetch_klines /candles page: {len(batch)} bars, "
+        f"batch[0]={batch[0][0]} batch[-1]={batch[-1][0]}, "
+        f"newest={newest_ts} oldest={oldest_ts}, "
+        f"next endTime={end_ms} ({pd.Timestamp(end_ms, unit='ms', tz='UTC').isoformat()})"
+    )
     time.sleep(0.2)
 
     # Step 2: paginate older pages from /history-candles
