@@ -158,8 +158,9 @@ def fetch_klines(sym: str, interval: str = "4H", limit: int = NBARS) -> pd.DataF
         all_rows.extend(batch)
         oldest_ts = int(batch[-1][0])   # newest-first: last row is oldest
         end_ms    = oldest_ts - BAR_MS
-        if len(batch) < BATCH:
-            break
+        # Only break if Bitget returned nothing — don't break on partial pages
+        # since Bitget caps 4H responses at ~50 bars per request regardless of
+        # the limit param, so every page looks "partial" but more data exists.
         time.sleep(0.2)
 
     if not all_rows:
