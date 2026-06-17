@@ -416,6 +416,20 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
     res_levels.sort(key=lambda x: x[0])           # ascending — closest first
     sup_levels.sort(key=lambda x: -x[0])          # descending — closest first
 
+    # Diagnostic: recent price range + pivot detection near spot. Helps
+    # isolate cases where expected levels (visible on chart) don't appear.
+    try:
+        recent = df.tail(60)
+        log.info(
+            f"levels {symbol}: spot={spot:.0f} | "
+            f"recent60 H={recent['h'].max():.0f} L={recent['l'].min():.0f} | "
+            f"n_swing_hi={int(sh.sum())} n_swing_lo={int(sl.sum())} | "
+            f"hi_pivots_near_spot={sorted([round(p) for p in sw_hi_p if abs(p-spot)/spot < 0.04])} | "
+            f"lo_pivots_near_spot={sorted([round(p) for p in sw_lo_p if abs(p-spot)/spot < 0.04])}"
+        )
+    except Exception as _e:
+        log.warning(f"levels diagnostic failed: {_e}")
+
     # Funding + OI
     fr_df, cur_fr = funding_data(symbol)
     funding_now_pct  = cur_fr * 100
