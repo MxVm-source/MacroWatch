@@ -168,7 +168,8 @@ def _build_card(p: dict) -> str:
     emoji = "🟢" if p["side"] == "LONG" else "🔴"
 
     lines = [
-        f"📋 *STAGE — awaiting approval* ({p['grade']}-grade)",
+        ("🤖 *AUTO-PROPOSED — conditions aligned (proxy)*" if p.get("auto")
+         else "📋 *STAGE — awaiting approval*") + f"  ({p['grade']}-grade)",
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
         f"Pair: {p['symbol']}",
         f"Side: {emoji} {p['side']}   Lev: {p['lev']:g}x",
@@ -199,20 +200,39 @@ def _build_card(p: dict) -> str:
     lines += [
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{'🔴 LIVE' if bitget_exec.is_live() else '🧪 DRY-RUN'} · expires in {EXPIRE_MIN}m",
-        f"🕐 {iso_utc_now()}",
     ]
+    if p.get("auto"):
+        lines.append("⚠️ _proxy gate — check aggr 15m before you tap Approve_")
+    lines.append(f"🕐 {iso_utc_now()}")
     return "\n".join(lines)
 
 
 def stage(text_raw: str):
     """Handle the /stage command: build + persist + post the approval card."""
     p = _parse_stage(text_raw)
+    _post_stage(p)
 
+
+def stage_auto(plan: dict, verdict: dict = None):
+    """
+    Auto-propose entry point (called by gatewatch.scan when conditions align).
+    `plan` already has symbol/side/entry/sl/tps/total_size/lev/grade.
+    """
+    p = dict(plan)
+    p["auto"] = True
+    if verdict:
+        p["gate_reason"] = verdict.get("reason", "")
+    _post_stage(p)
+
+
+def _post_stage(p: dict):
+    """Shared: persist a plan and post the approval card with buttons."""
     # one active plan per symbol
     pid_existing, _ = _active_plan_for(p["symbol"])
     if pid_existing:
-        send_text(f"⛔ A {p['symbol']} plan is already active. /flatten or let it close first.")
-        return
+        if not p.get("auto"):
+            send_text(f"⛔ A {p['symbol']} plan is already active. /flatten or let it close first.")
+        return   # auto: stay silent, the debounce + this guard prevent spam
 
     pid = uuid.uuid4().hex[:10]
     p.update({

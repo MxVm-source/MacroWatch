@@ -22,9 +22,21 @@ from bot.modules import trigger as trig
 
 log = logging.getLogger("gatewatch")
 
-# Point this at the SAME file /cvd_log writes to (see note in chat). Move off
-# /tmp onto a persistent disk for Phase-0 integrity.
-CVD_LOG_PATH = os.getenv("CVD_LOG_PATH", "/tmp/cvd_log.jsonl")
+# Same file market_structure._log_trigger_fire / /cvd_log already use.
+CVD_LOG_PATH = os.getenv("CVD_LOG_PATH", "/var/data/cvd_trigger_log.jsonl")
+
+# ── Auto-propose config (the scan that posts a stage card when aligned) ──────
+GATE_SCAN_SYMBOLS = [s.strip().upper() for s in
+                     os.getenv("GATE_SCAN_SYMBOLS", "BTCUSDT").split(",") if s.strip()]
+SL_BUFFER      = float(os.getenv("GATE_SL_BUFFER", "0.005"))     # 0.5% beyond level
+GATE_LEV       = float(os.getenv("GATE_LEV", "10"))
+GATE_CAPITAL   = float(os.getenv("GATE_CAPITAL", "500"))         # capital-first base
+GATE_SIZE_DEC  = int(os.getenv("BITGET_SIZE_DECIMALS", "4"))
+GRADE_ROOM_R   = float(os.getenv("GATE_GRADE_ROOM_R", "2.0"))    # >=2R to TP1 = A-grade
+GATE_AUTO_SCAN = os.getenv("GATE_AUTO_SCAN", "true").lower() in ("1", "true", "yes", "on")
+
+# debounce: one auto-propose per (side, level) arrival, per symbol
+_last_go: dict = {}
 
 
 def _get_structure(symbol: str):
@@ -102,3 +114,87 @@ def run_gate(symbol: str = "BTCUSDT"):
         "reason": verdict["reason"],
         "source": "gate",
     })
+
+
+# ─── Auto-propose: scan → build plan → post a stage card ─────────────────────
+
+def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
+    """
+    Turn a LIVE/intrabar verdict into a full proposed plan from structure.
+      entry = the level · SL = buffer beyond it · TPs = next levels in
+      direction · size = capital-first (capital × lev / entry) · grade by room.
+    Returns a plan dict, or None if there's no structural target to aim at.
+    """
+    side  = "SHORT" if verdict["side"] == "short" else "LONG"
+    entry = float(verdict["level"])
+    sl    = entry * (1 + SL_BUFFER) if side == "SHORT" else entry * (1 - SL_BUFFER)
+
+    if side == "SHORT":
+        targets = [float(p) for (p, _t) in structure.get("sup_levels", []) if p < entry][:3]
+    else:
+        targets = [float(p) for (p, _t) in structure.get("res_levels", []) if p > entry][:3]
+    if not targets:
+        return None   # no defined target in direction — don't propose a target-less trade
+
+    r_sl  = abs(entry - sl)
+    r_tp1 = abs(targets[0] - entry)
+    grade = "A" if (r_sl and r_tp1 / r_sl >= GRADE_ROOM_R) else "B"
+    size  = round(GATE_CAPITAL * GATE_LEV / entry, GATE_SIZE_DEC)
+
+    return {
+        "symbol":     symbol,
+        "side":       side,
+        "entry":      round(entry, 2),
+        "sl":         round(sl, 2),
+        "tps":        [round(x, 2) for x in targets],
+        "total_size": size,
+        "lev":        GATE_LEV,
+        "grade":      grade,
+    }
+
+
+def _scan_one(symbol: str):
+    structure = _get_structure(symbol)
+    verdict   = trig.evaluate(structure, symbol=symbol)
+    state     = verdict["state"]
+
+    # Only a with-trend, intrabar GO auto-proposes. Counter-trend (await_4h),
+    # NO_TAKE and MID_RANGE do not — they stay on the 4H path.
+    if state != "LIVE" or verdict.get("entry_mode") != "intrabar":
+        if state == "MID_RANGE":
+            _last_go.pop(symbol, None)   # left the level → allow a fresh propose later
+        return
+
+    key = (verdict.get("side"), verdict.get("level"))
+    if _last_go.get(symbol) == key:
+        return   # already proposed this arrival
+
+    plan = _build_auto_plan(symbol, verdict, structure)
+    if not plan:
+        return
+
+    _last_go[symbol] = key
+    _log({
+        "ts": datetime.now(timezone.utc).isoformat(), "symbol": symbol,
+        "spot": verdict["spot"], "state": state, "side": verdict["side"],
+        "level": verdict["level"], "cvd_direction": verdict["cvd"]["direction"],
+        "divergence": verdict["cvd"].get("divergence", "none"),
+        "reason": verdict["reason"], "source": "auto_propose",
+    })
+
+    try:
+        from bot.modules import stagewatch
+        stagewatch.stage_auto(plan, verdict=verdict)
+    except Exception as e:
+        log.warning(f"auto-propose stage failed for {symbol}: {e}")
+
+
+def scan():
+    """Scheduler entry — intrabar with-trend GO watch across GATE_SCAN_SYMBOLS."""
+    if not GATE_AUTO_SCAN:
+        return
+    for sym in GATE_SCAN_SYMBOLS:
+        try:
+            _scan_one(sym)
+        except Exception as e:
+            log.warning(f"gate scan {sym}: {e}")
