@@ -937,12 +937,15 @@ def start_scheduler():
     print("📊 MarketStructure scheduled (4H close +2min UTC) ✅", flush=True)
 
     # ── Gate auto-propose scan (intrabar with-trend GO → stage card) ──
-    SCHED.add_job(
-        gatewatch.scan, "interval", minutes=3,
-        id="gate_scan", max_instances=1, misfire_grace_time=120,
-        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=45),
-    )
-    print("⚡ Gate auto-propose scan scheduled (3 min) ✅", flush=True)
+    if hasattr(gatewatch, "scan"):
+        SCHED.add_job(
+            gatewatch.scan, "interval", minutes=3,
+            id="gate_scan", max_instances=1, misfire_grace_time=120,
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=45),
+        )
+        print("⚡ Gate auto-propose scan scheduled (3 min) ✅", flush=True)
+    else:
+        print("⚠️ gatewatch.scan missing — auto-propose scan NOT scheduled", flush=True)
 
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
