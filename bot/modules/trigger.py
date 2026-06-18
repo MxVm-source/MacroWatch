@@ -98,6 +98,8 @@ def evaluate(structure: dict, symbol: str = "BTCUSDT", cvd_period: str = "15m",
     """
     spot = structure["spot"]
     cvd  = cvd or get_cvd(symbol, period=cvd_period)
+    # Normalize so 'rolling-over' / 'rolling_over' both match cvd.py's output.
+    cvd_dir = (cvd.direction or "").replace("_", "-")
 
     res_levels = structure.get("res_levels", [])
     sup_levels = structure.get("sup_levels", [])
@@ -137,7 +139,7 @@ def evaluate(structure: dict, symbol: str = "BTCUSDT", cvd_period: str = "15m",
 
     if near_res is not None:
         level = near_res["price"]
-        if cvd.direction == "rolling_over":
+        if cvd_dir == "rolling-over":
             state, side = "LIVE", "short"
             with_trend, entry_mode, note = _grade_entry(side, bias, fresh_flush)
             reason = f"CVD rolling over into resistance = absorption confirmed | {note}"
@@ -147,7 +149,7 @@ def evaluate(structure: dict, symbol: str = "BTCUSDT", cvd_period: str = "15m",
 
     elif near_sup is not None:
         level = near_sup["price"]
-        if cvd.direction in ("rising", "flat"):
+        if cvd_dir in ("rising", "flat"):
             state, side = "LIVE", "long"
             with_trend, entry_mode, note = _grade_entry(side, bias, fresh_flush)
             reason = f"CVD {cvd.direction}/holding at support = buyers defending | {note}"
