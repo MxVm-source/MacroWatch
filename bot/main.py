@@ -1170,6 +1170,15 @@ def command_loop():
 
 def _handle_command(text: str, text_raw: str):
 
+    # ── /scandiag ─ what the auto-propose scan sees right now ─────────────────
+    if text.startswith("/scandiag"):
+        try:
+            parts = text.split()
+            gatewatch.scan_report(parts[1] if len(parts) > 1 else "BTCUSDT")
+        except Exception as e:
+            send_text(f"🔍 [Scandiag] {e}")
+        return
+
     # ── /gate ─ on-demand gate read ───────────────────────────────────────────
     if text.startswith("/gate"):
         try:
