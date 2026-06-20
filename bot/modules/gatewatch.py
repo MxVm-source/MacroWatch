@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from bot.utils import send_text
 from bot.modules import market_structure_module as msm
 from bot.modules import trigger as trig
+from bot.modules.cvd import get_cvd
 
 log = logging.getLogger("gatewatch")
 
@@ -37,6 +38,26 @@ GATE_AUTO_SCAN = os.getenv("GATE_AUTO_SCAN", "true").lower() in ("1", "true", "y
 
 # debounce: one auto-propose per (side, level) arrival, per symbol
 _last_go: dict = {}
+
+# ── Row-2 flush guard + Row-3 break-confirmation config ─────────────────────
+FLUSH_PCT   = float(os.getenv("GATE_FLUSH_PCT", "1.5"))   # recent % move into a level = knife
+BREAK_BUFFER = float(os.getenv("GATE_BREAK_BUFFER", "0.001"))  # 0.1% past the level
+_break_state: dict = {}   # symbol -> {"ceiling": x, "floor": y}, refreshed each 4H close
+
+
+def _flush_flag(cvd) -> bool:
+    """
+    First-touch-after-flush proxy: a large, fast recent price move (into the level).
+    Reuses the CVD result's recent price move — no extra fetch. Conservative: over-
+    flagging just means more WAIT-4H, which is the correct bias for knife-catches.
+    """
+    try:
+        if cvd.last_price and cvd.price_slope:
+            move_pct = abs(cvd.price_slope) / cvd.last_price * 100
+            return move_pct >= FLUSH_PCT
+    except Exception:
+        pass
+    return False
 
 
 def _get_structure(symbol: str):
@@ -155,7 +176,9 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
 
 def _scan_one(symbol: str):
     structure = _get_structure(symbol)
-    verdict   = trig.evaluate(structure, symbol=symbol)
+    cvd       = get_cvd(symbol)                      # fetch once, reuse for flush + gate
+    flush     = _flush_flag(cvd)
+    verdict   = trig.evaluate(structure, symbol=symbol, cvd=cvd, fresh_flush=flush)
     state     = verdict["state"]
 
     # Only a with-trend, intrabar GO auto-proposes. Counter-trend (await_4h),
@@ -213,7 +236,9 @@ def scan_report(symbol: str = "BTCUSDT"):
         symbol += "USDT"
 
     structure = _get_structure(symbol)
-    verdict   = trig.evaluate(structure, symbol=symbol)
+    cvd_r     = get_cvd(symbol)
+    flush     = _flush_flag(cvd_r)
+    verdict   = trig.evaluate(structure, symbol=symbol, cvd=cvd_r, fresh_flush=flush)
     state = verdict["state"]
     em    = verdict.get("entry_mode")
     side  = verdict.get("side")
@@ -272,3 +297,54 @@ def scan_report(symbol: str = "BTCUSDT"):
         lines.append(f"→ WOULD propose NOW: {plan['side']} @ {plan['entry']:,.0f} · "
                      f"SL {plan['sl']:,.0f} · TPs {plan['tps']} · {plan['grade']}-grade")
     send_text("\n".join(lines))
+
+
+# ─── Row 3: break confirmation on the 4H close (close_break wired) ───────────
+
+def check_break(symbol: str = "BTCUSDT"):
+    """
+    Scheduler entry — run once per 4H close. Compares the close (spot just after
+    the candle closes) against the PREVIOUS 4H's nearest range edges; a close
+    beyond them = a confirmed break → 🚀 BREAKOUT / 🔻 BREAKDOWN alert.
+
+    State is per-symbol and refreshed each call, so the same break never
+    re-fires. In-memory: a restart re-seeds (one missed close at worst).
+    """
+    structure = _get_structure(symbol)
+    spot = structure["spot"]
+
+    cur_ceiling = _nearest(structure.get("res_levels", []), True,  spot)
+    cur_floor   = _nearest(structure.get("sup_levels", []), False, spot)
+    cur_ceiling = cur_ceiling[0] if cur_ceiling else None
+    cur_floor   = cur_floor[0]   if cur_floor   else None
+
+    prev = _break_state.get(symbol)
+    _break_state[symbol] = {"ceiling": cur_ceiling, "floor": cur_floor}
+    if not prev:
+        return   # first run — seed state, nothing to compare against yet
+
+    ceiling = prev.get("ceiling")
+    floor   = prev.get("floor")
+    # buffer so a hair-cross doesn't count as a break
+    ceil_b  = ceiling * (1 + BREAK_BUFFER) if ceiling else None
+    floor_b = floor   * (1 - BREAK_BUFFER) if floor   else None
+
+    verdict = trig.close_break(spot, ceiling=ceil_b, floor=floor_b, symbol=symbol)
+    if not verdict:
+        return
+
+    e = "🚀" if verdict["state"] == "BREAKOUT" else "🔻"
+    send_text(
+        f"{e} *{verdict['state']} — {symbol}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"4H close {spot:,.0f} {'>' if verdict['state']=='BREAKOUT' else '<'} "
+        f"{verdict['level']:,.0f}\n"
+        f"{verdict['reason']}\n"
+        f"→ continuation {verdict['side']} — wait for retest, confirm on aggr\n"
+        f"🕐 {datetime.now(timezone.utc).isoformat()}"
+    )
+    _log({
+        "ts": datetime.now(timezone.utc).isoformat(), "symbol": symbol,
+        "spot": spot, "state": verdict["state"], "side": verdict["side"],
+        "level": verdict["level"], "reason": verdict["reason"], "source": "break",
+    })
