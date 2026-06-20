@@ -198,3 +198,77 @@ def scan():
             _scan_one(sym)
         except Exception as e:
             log.warning(f"gate scan {sym}: {e}")
+
+
+# ─── /scandiag : on-demand "what is the scan seeing right now" ────────────────
+
+def scan_report(symbol: str = "BTCUSDT"):
+    """
+    Read-only. Mirrors _scan_one's decision path and reports exactly what the
+    scanner sees this second and why it is / isn't auto-proposing. Places no
+    orders, mutates no state.
+    """
+    symbol = (symbol or "BTCUSDT").upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+
+    structure = _get_structure(symbol)
+    verdict   = trig.evaluate(structure, symbol=symbol)
+    state = verdict["state"]
+    em    = verdict.get("entry_mode")
+    side  = verdict.get("side")
+    level = verdict.get("level")
+    spot  = verdict["spot"]
+    cvd   = verdict["cvd"]
+
+    lines = [
+        f"🔍 *SCANDIAG — {symbol}*",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"spot: {spot:,.2f}   regime: {verdict.get('regime', '?')}",
+        f"CVD: {cvd['direction']} (slope {cvd['slope_recent']:+.0f})",
+        f"state: {state}   side: {side or '—'}   mode: {em or '—'}",
+        f"level: {level:,.0f}" if level else "level: —",
+        f"scan: {'ON' if GATE_AUTO_SCAN else 'OFF (GATE_AUTO_SCAN=false)'}",
+    ]
+
+    # Mirror _scan_one exactly so the reported reason is the true one.
+    if state != "LIVE" or em != "intrabar":
+        if state == "MID_RANGE":
+            why = "mid-range — no validated level in play"
+        elif state == "NO_TAKE":
+            why = f"at level but CVD failed the gate ({cvd['direction']})"
+        elif em == "await_4h":
+            why = "counter-trend / first-touch-after-flush — awaits 4H, no auto-open"
+        else:
+            why = state
+        lines.append(f"→ NO propose: {why}")
+        send_text("\n".join(lines))
+        return
+
+    plan = _build_auto_plan(symbol, verdict, structure)
+    if not plan:
+        lines.append("→ NO propose: no structural target in the trade direction")
+        send_text("\n".join(lines))
+        return
+
+    if _last_go.get(symbol) == (side, level):
+        lines.append(f"→ already proposed this arrival (debounced): {side} @ {level:,.0f}")
+        send_text("\n".join(lines))
+        return
+
+    # the same active-plan guard stagewatch._post_stage applies
+    blocked = None
+    try:
+        from bot.modules import stagewatch
+        _pid, ap = stagewatch._active_plan_for(symbol)
+        if ap:
+            blocked = ap.get("state")
+    except Exception:
+        pass
+
+    if blocked:
+        lines.append(f"→ BLOCKED: an active {blocked} plan exists — run /flatten {symbol}")
+    else:
+        lines.append(f"→ WOULD propose NOW: {plan['side']} @ {plan['entry']:,.0f} · "
+                     f"SL {plan['sl']:,.0f} · TPs {plan['tps']} · {plan['grade']}-grade")
+    send_text("\n".join(lines))
