@@ -947,6 +947,17 @@ def start_scheduler():
     else:
         print("⚠️ gatewatch.scan missing — auto-propose scan NOT scheduled", flush=True)
 
+    # ── Break confirmation on the 4H close (Row 3: close_break) ──
+    if hasattr(gatewatch, "check_break"):
+        SCHED.add_job(
+            gatewatch.check_break, "cron",
+            hour="0,4,8,12,16,20", minute=3, timezone="UTC",
+            id="gate_break", max_instances=1, misfire_grace_time=300,
+        )
+        print("🚀 Break confirmation scheduled (4H close +3min UTC) ✅", flush=True)
+    else:
+        print("⚠️ gatewatch.check_break missing — break confirmation NOT scheduled", flush=True)
+
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
