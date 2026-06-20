@@ -210,6 +210,10 @@ def _scan_one(symbol: str):
         stagewatch.stage_auto(plan, verdict=verdict)
     except Exception as e:
         log.warning(f"auto-propose stage failed for {symbol}: {e}")
+        try:
+            send_text(f"⚠️ [Stage] auto-propose for {symbol} failed to persist: {str(e)[:140]}")
+        except Exception:
+            pass
 
 
 def scan():

@@ -108,6 +108,9 @@ def _load() -> dict:
 
 
 def _save(store: dict):
+    d = os.path.dirname(STORE_PATH)
+    if d:
+        os.makedirs(d, exist_ok=True)   # create the dir if it doesn't exist (e.g. no disk yet)
     tmp = STORE_PATH + ".tmp"
     with open(tmp, "w") as f:
         json.dump(store, f)
@@ -263,17 +266,21 @@ def _post_stage(p: dict):
         "msg_id":    None,
     })
 
+    # Persist the plan BEFORE the card exists. If the store write fails, we throw
+    # here and never post a card the user can't approve.
+    store = _load()
+    store[pid] = p
+    _save(store)
+
     card = _build_card(p)
     buttons = [[("✅ Approve", f"approve:{pid}"), ("❌ Skip", f"skip:{pid}")]]
     resp = send_buttons(card, buttons)
     try:
         p["msg_id"] = resp["result"]["message_id"]
+        store[pid] = p
+        _save(store)            # best-effort msg_id update
     except Exception:
         pass
-
-    store = _load()
-    store[pid] = p
-    _save(store)
 
 
 # ─── Callback (button tap) ───────────────────────────────────────────────────
