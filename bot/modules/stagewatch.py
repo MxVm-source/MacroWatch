@@ -122,6 +122,14 @@ def _active_plan_for(symbol: str):
     return None, None
 
 
+def _is_expired(p: dict) -> bool:
+    """True if a plan is past its TTL (used to supersede stale never-filled ARMED plans)."""
+    try:
+        return datetime.now(timezone.utc) > datetime.fromisoformat(p["expires_at"])
+    except Exception:
+        return False
+
+
 # ─── /stage command ──────────────────────────────────────────────────────────
 
 def _parse_stage(text_raw: str) -> dict:
@@ -228,11 +236,20 @@ def stage_auto(plan: dict, verdict: dict = None):
 def _post_stage(p: dict):
     """Shared: persist a plan and post the approval card with buttons."""
     # one active plan per symbol
-    pid_existing, _ = _active_plan_for(p["symbol"])
+    pid_existing, p_existing = _active_plan_for(p["symbol"])
     if pid_existing:
-        if not p.get("auto"):
-            send_text(f"⛔ A {p['symbol']} plan is already active. /flatten or let it close first.")
-        return   # auto: stay silent, the debounce + this guard prevent spam
+        # A never-filled ARMED plan past its TTL must not block forever — supersede it.
+        # A live OPEN/running plan still blocks (don't open a second leg on it).
+        if p_existing.get("state") == "ARMED" and _is_expired(p_existing):
+            s0 = _load()
+            if pid_existing in s0:
+                s0[pid_existing]["state"] = "EXPIRED"
+                _save(s0)
+            log.info(f"superseded stale ARMED plan {pid_existing} for {p['symbol']}")
+        else:
+            if not p.get("auto"):
+                send_text(f"⛔ A {p['symbol']} plan is already active. /flatten or let it close first.")
+            return   # auto: stay silent, the debounce + this guard prevent spam
 
     pid = uuid.uuid4().hex[:10]
     p.update({
@@ -435,13 +452,23 @@ def flatten_cmd(symbol: str = ""):
     targets = [sym] if sym else CORR_SYMBOLS
     store = _load()
     for s in targets:
-        try:
-            bitget_exec.cancel_plan_orders(s)
-            bitget_exec.flatten(s)
-            pid, p = _active_plan_for(s)
-            if p:
-                p["state"] = "CLOSED"; store[pid] = p
-            send_text(f"🛑 [Stage] flattened {s}")
-        except Exception as e:
-            send_text(f"⚠️ [Stage] flatten {s} failed: {str(e)[:120]}")
+        # Exchange calls: best-effort. "no position / no order" = already flat, NOT a failure.
+        for fn in (bitget_exec.cancel_plan_orders, bitget_exec.flatten):
+            try:
+                fn(s)
+            except Exception as e:
+                m = str(e)
+                if not any(t in m for t in ("22002", "No position", "not exist", "no order", "40109")):
+                    send_text(f"⚠️ [Stage] {fn.__name__} {s}: {m[:120]}")
+
+        # ALWAYS clear local plan state — independent of whatever the exchange returned.
+        # This is the unblock: a stuck ARMED/OPEN plan stops blocking new proposes.
+        cleared = 0
+        for pid, p in store.items():
+            if p.get("symbol") == s and p.get("state") in (
+                    "STAGED", "ARMED", "OPEN", "TP1", "TP2", "RUNNER"):
+                p["state"] = "CLOSED"
+                cleared += 1
+        send_text(f"🛑 [Stage] {s} — {cleared} plan(s) cleared"
+                  if cleared else f"🛑 [Stage] {s} — nothing active")
     _save(store)
