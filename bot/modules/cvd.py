@@ -29,6 +29,8 @@ Divergence (price vs CVD, computed from a separate closes fetch):
 """
 
 import logging
+import os
+import time
 from dataclasses import dataclass, asdict
 
 import requests
@@ -112,7 +114,40 @@ def _unavailable() -> CVDResult:
     )
 
 
+# ─── TTL cache (kills the 429: scan + card + scandiag share one fetch) ───────
+_CVD_CACHE: dict = {}                                  # key -> (ts, CVDResult)
+CVD_TTL = float(os.getenv("CVD_CACHE_TTL", "90"))      # seconds a read is reused
+
+
 def get_cvd(symbol: str = "BTCUSDT", period: str = "15m", lookback: int = 96,
+            recent: int = 5, flat_eps_frac: float = 0.05,
+            _rows=None, _closes=None) -> CVDResult:
+    """
+    Cached entry point. Every consumer (3-min scan, card build, /scandiag,
+    close_break) calls this; within CVD_TTL they all share ONE network fetch,
+    so Bitget stops 429-ing us. A failed read is NOT cached, and if we have a
+    recent good value we serve that instead of 'unavailable' (fixes the card).
+    """
+    if _rows is not None or _closes is not None:          # test injection: no cache
+        return _compute_cvd(symbol, period, lookback, recent, flat_eps_frac, _rows, _closes)
+
+    key = (symbol, period, lookback, recent)
+    now = time.time()
+    hit = _CVD_CACHE.get(key)
+    if hit and (now - hit[0]) < CVD_TTL:
+        return hit[1]
+
+    res = _compute_cvd(symbol, period, lookback, recent, flat_eps_frac)
+    if res.direction != "unavailable":
+        _CVD_CACHE[key] = (now, res)
+        return res
+    # transient failure (e.g. 429): serve the last good read if it's still recent
+    if hit and (now - hit[0]) < CVD_TTL * 3:
+        return hit[1]
+    return res
+
+
+def _compute_cvd(symbol: str = "BTCUSDT", period: str = "15m", lookback: int = 96,
             recent: int = 5, flat_eps_frac: float = 0.05,
             _rows=None, _closes=None) -> CVDResult:
     """

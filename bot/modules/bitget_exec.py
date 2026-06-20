@@ -27,6 +27,8 @@ import os
 import time
 import logging
 
+import requests
+
 from bot.datafeed_bitget import (
     _signed_request_elite,
     BITGET_PRODUCT_TYPE,
@@ -54,6 +56,43 @@ def _round_size(qty: float) -> str:
     return f"{floored:.{SIZE_DECIMALS}f}"
 
 
+# ─── Price tick (Bitget 45115: "price must be a multiple of <tick>") ─────────
+# Bitget rejects any order price that isn't a multiple of the symbol's tick.
+# tick = priceEndStep * 10^-pricePlace  (BTCUSDT -> 1 * 10^-1 = 0.1).
+_PRICE_SPEC: dict = {}          # symbol -> (tick: float, place: int)
+_BITGET_BASE = "https://api.bitget.com"
+
+
+def _price_spec(symbol: str):
+    if symbol in _PRICE_SPEC:
+        return _PRICE_SPEC[symbol]
+    spec = (0.1, 1)             # safe default = BTCUSDT, in case the fetch fails
+    try:
+        r = requests.get(
+            f"{_BITGET_BASE}/api/v2/mix/market/contracts",
+            params={"productType": BITGET_PRODUCT_TYPE, "symbol": symbol},
+            timeout=8,
+        )
+        for c in (r.json() or {}).get("data") or []:
+            if c.get("symbol") == symbol:
+                place = int(c.get("pricePlace", 1))
+                step  = int(c.get("priceEndStep", 1))
+                spec  = (step / (10 ** place), place)
+                break
+    except Exception as e:
+        log.warning(f"contract spec fetch failed for {symbol}, default {spec}: {e}")
+    _PRICE_SPEC[symbol] = spec
+    log.info(f"price tick for {symbol}: {spec[0]} ({spec[1]} dp)")
+    return spec
+
+
+def _round_price(symbol: str, price: float) -> str:
+    """Snap a price to the symbol's tick so Bitget accepts it (fixes 45115)."""
+    tick, place = _price_spec(symbol)
+    rounded = round(round(price / tick) * tick, place)
+    return f"{rounded:.{place}f}"
+
+
 def _post(path: str, body: dict) -> dict:
     """Single choke point. Dry-run unless STAGE_LIVE; logs the exact payload."""
     if not is_live():
@@ -79,13 +118,13 @@ def place_entry(symbol: str, side: str, entry: float, size: float,
         "marginMode":  MARGIN_MODE,
         "marginCoin":  BITGET_MARGIN_COIN,
         "size":        _round_size(size),
-        "price":       f"{entry}",
+        "price":       _round_price(symbol, entry),
         "side":        "buy" if side == "LONG" else "sell",
         "orderType":   "limit",
         "force":       "gtc",
         "reduceOnly":  "NO",
         "clientOid":   client_oid,
-        "presetStopLossPrice": f"{preset_sl}",
+        "presetStopLossPrice": _round_price(symbol, preset_sl),
     }
     if not ONE_WAY_MODE:
         body["tradeSide"] = "open"
@@ -107,7 +146,7 @@ def place_ladder_tps(symbol: str, side: str, tps: list, sizes: list,
             "productType": BITGET_PRODUCT_TYPE,
             "symbol":      symbol,
             "planType":    "profit_plan",
-            "triggerPrice": f"{tp}",
+            "triggerPrice": _round_price(symbol, tp),
             "triggerType": "mark_price",
             "executePrice": "0",          # 0 = market execution on trigger
             "holdSide":    hold,
@@ -128,7 +167,7 @@ def set_position_sl(symbol: str, side: str, sl_price: float) -> dict:
         "marginCoin":  BITGET_MARGIN_COIN,
         "productType": BITGET_PRODUCT_TYPE,
         "symbol":      symbol,
-        "stopLossTriggerPrice": f"{sl_price}",
+        "stopLossTriggerPrice": _round_price(symbol, sl_price),
         "stopLossTriggerType":  "mark_price",
         "stopLossExecutePrice": "0",      # 0 = market on trigger
         "holdSide":    hold,
