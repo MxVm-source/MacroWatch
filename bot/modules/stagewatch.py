@@ -212,6 +212,8 @@ def _build_card(p: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{'🔴 LIVE' if bitget_exec.is_live() else '🧪 DRY-RUN'} · expires in {EXPIRE_MIN}m",
     ]
+    for w in (p.get("warnings") or []):
+        lines.append(f"⚠️ {w}")
     if p.get("auto"):
         lines.append("⚠️ _proxy gate — check aggr 15m before you tap Approve_")
     lines.append(f"🕐 {iso_utc_now()}")

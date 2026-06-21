@@ -20,6 +20,9 @@ from bot.utils import send_text
 from bot.modules import market_structure_module as msm
 from bot.modules import trigger as trig
 from bot.modules.cvd import get_cvd
+from bot.modules.structural_stop import (
+    structural_stop, honest_rr, grade_tps, MAX_RISK_PCT,
+)
 
 log = logging.getLogger("gatewatch")
 
@@ -148,7 +151,23 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
     """
     side  = "SHORT" if verdict["side"] == "short" else "LONG"
     entry = float(verdict["level"])
-    sl    = entry * (1 + SL_BUFFER) if side == "SHORT" else entry * (1 - SL_BUFFER)
+    side_l = "short" if side == "SHORT" else "long"
+
+    # Full S/R set with touch counts — the structural stop needs the real walls.
+    levels = [(float(p), int(t)) for (p, t) in
+              (structure.get("res_levels", []) + structure.get("sup_levels", []))]
+
+    # SL beyond the next >=3-touch wall (skips thin levels that just get wicked),
+    # NOT a fixed % that lands in the chop and inflates R:R.
+    try:
+        sr       = structural_stop(entry, side_l, levels, GATE_LEV)
+        sl       = sr.sl
+        risk_pct = sr.risk_pct
+        warnings = list(sr.warnings)
+    except Exception as e:
+        sl       = entry * (1 + SL_BUFFER) if side == "SHORT" else entry * (1 - SL_BUFFER)
+        risk_pct = SL_BUFFER * GATE_LEV
+        warnings = [f"structural stop unavailable ({e}); fell back to {SL_BUFFER:.1%} buffer"]
 
     if side == "SHORT":
         targets = [float(p) for (p, _t) in structure.get("sup_levels", []) if p < entry][:3]
@@ -157,9 +176,19 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
     if not targets:
         return None   # no defined target in direction — don't propose a target-less trade
 
-    r_sl  = abs(entry - sl)
-    r_tp1 = abs(targets[0] - entry)
-    grade = "A" if (r_sl and r_tp1 / r_sl >= GRADE_ROOM_R) else "B"
+    # Honest R:R measured against the REAL stop, not a tight % one.
+    rr = honest_rr(entry, sl, targets, side_l)
+    warnings += grade_tps(rr)
+
+    # Block junk the inflated-R:R version would have waved through:
+    if rr and rr[0] < 1.0:
+        log.info(f"auto-plan blocked {symbol}: TP1 {rr[0]}R < 1R vs structural stop")
+        return None
+    if risk_pct > MAX_RISK_PCT:
+        log.info(f"auto-plan blocked {symbol}: risk {risk_pct:.1%} > {MAX_RISK_PCT:.0%} guardrail")
+        return None
+
+    grade = "A" if (rr and rr[0] >= GRADE_ROOM_R) else "B"
     size  = round(GATE_CAPITAL * GATE_LEV / entry, GATE_SIZE_DEC)
 
     return {
@@ -168,6 +197,9 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
         "entry":      round(entry, 2),
         "sl":         round(sl, 2),
         "tps":        [round(x, 2) for x in targets],
+        "rr":         rr,
+        "risk_pct":   round(risk_pct, 4),
+        "warnings":   warnings,
         "total_size": size,
         "lev":        GATE_LEV,
         "grade":      grade,
