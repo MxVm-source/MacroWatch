@@ -42,6 +42,9 @@ GATE_AUTO_SCAN = os.getenv("GATE_AUTO_SCAN", "true").lower() in ("1", "true", "y
 # debounce: one auto-propose per (side, level) arrival, per symbol
 _last_go: dict = {}
 
+# why the last _build_auto_plan returned None, per symbol (for /scandiag honesty)
+_block_reason: dict = {}
+
 # ── Row-2 flush guard + Row-3 break-confirmation config ─────────────────────
 FLUSH_PCT   = float(os.getenv("GATE_FLUSH_PCT", "1.5"))   # recent % move into a level = knife
 BREAK_BUFFER = float(os.getenv("GATE_BREAK_BUFFER", "0.001"))  # 0.1% past the level
@@ -174,6 +177,7 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
     else:
         targets = [float(p) for (p, _t) in structure.get("res_levels", []) if p > entry][:3]
     if not targets:
+        _block_reason[symbol] = "no S/R target in the trade direction"
         return None   # no defined target in direction — don't propose a target-less trade
 
     # Honest R:R measured against the REAL stop, not a tight % one.
@@ -182,11 +186,16 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
 
     # Block junk the inflated-R:R version would have waved through:
     if rr and rr[0] < 1.0:
+        _block_reason[symbol] = (f"TP1 {rr[0]}R < 1R vs structural stop {sl:,.0f} "
+                                 f"(nearest target {targets[0]:,.0f} too close)")
         log.info(f"auto-plan blocked {symbol}: TP1 {rr[0]}R < 1R vs structural stop")
         return None
     if risk_pct > MAX_RISK_PCT:
+        _block_reason[symbol] = f"risk {risk_pct:.0%} > {MAX_RISK_PCT:.0%} guardrail (SL {sl:,.0f})"
         log.info(f"auto-plan blocked {symbol}: risk {risk_pct:.1%} > {MAX_RISK_PCT:.0%} guardrail")
         return None
+
+    _block_reason.pop(symbol, None)   # passed all gates
 
     grade = "A" if (rr and rr[0] >= GRADE_ROOM_R) else "B"
     size  = round(GATE_CAPITAL * GATE_LEV / entry, GATE_SIZE_DEC)
@@ -308,7 +317,7 @@ def scan_report(symbol: str = "BTCUSDT"):
 
     plan = _build_auto_plan(symbol, verdict, structure)
     if not plan:
-        lines.append("→ NO propose: no structural target in the trade direction")
+        lines.append(f"→ NO propose: {_block_reason.get(symbol, 'no structural target in the trade direction')}")
         send_text("\n".join(lines))
         return
 
