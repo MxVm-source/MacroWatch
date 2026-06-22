@@ -247,14 +247,28 @@ def fractals(df: pd.DataFrame, n: int):
 
 
 def zones(prices, tol: float = ZONE_TOL):
-    """Cluster sorted prices within tol% -> list of (mean_price, touch_count)."""
-    z = []
-    for p in sorted(prices):
-        if z and abs(p - z[-1][-1]) / z[-1][-1] < tol:
-            z[-1].append(p)
-        else:
-            z.append([p])
-    return [(float(np.mean(c)), len(c)) for c in z]
+    """Fixed-anchor clustering — ported verbatim from btc_4h_levels.py so the
+    bot's levels match the CLI exactly.
+
+    The first swing in a zone is its ANCHOR and never moves; later swings within
+    `tol` of that anchor increment the touch count but do NOT shift the reported
+    price. Prices must arrive in CHRONOLOGICAL order (do NOT sort) — sorting +
+    chaining lets a zone drift across many small steps and report a mean price
+    that was never actually touched (the old bug: 68,334 where the real wall is
+    65,718)."""
+    anchors: list = []
+    counts: list = []
+    for p in prices:
+        matched = False
+        for i, a in enumerate(anchors):
+            if abs(p - a) / a < tol:
+                counts[i] += 1
+                matched = True
+                break
+        if not matched:
+            anchors.append(float(p))
+            counts.append(1)
+    return list(zip(anchors, counts))
 
 
 def fit_tl(idx, prices):
@@ -453,8 +467,17 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
     sw_lo_idx = df.index[sl].to_numpy()
     sw_lo_p   = df["l"].values[sl]
 
-    res_levels = [(p, c) for p, c in zones(sw_hi_p) if p > spot]
-    sup_levels = [(p, c) for p, c in zones(sw_lo_p) if p < spot]
+    # UNIFIED pool (ported from btc_4h_levels.py): cluster swing highs AND lows
+    # together in CHRONOLOGICAL order into one set of anchors, then split into
+    # res/sup by current spot. Keeps role-reversal levels alive when spot crosses
+    # them (a swing-low anchor can still show as resistance, and vice-versa).
+    _swings = sorted(
+        zip(list(sw_hi_idx) + list(sw_lo_idx), list(sw_hi_p) + list(sw_lo_p)),
+        key=lambda t: t[0],
+    )
+    _levels = zones([p for _, p in _swings])
+    res_levels = [(p, c) for p, c in _levels if p > spot]
+    sup_levels = [(p, c) for p, c in _levels if p < spot]
     res_levels.sort(key=lambda x: x[0])           # ascending — closest first
     sup_levels.sort(key=lambda x: -x[0])          # descending — closest first
 
