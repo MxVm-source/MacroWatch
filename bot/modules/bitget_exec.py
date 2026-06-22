@@ -41,8 +41,13 @@ log = logging.getLogger("bitget_exec")
 # ─── Gates / config ──────────────────────────────────────────────────────────
 STAGE_LIVE   = os.getenv("STAGE_LIVE", "false").lower() in ("1", "true", "yes", "on")
 MARGIN_MODE  = os.getenv("BITGET_MARGIN_MODE", "isolated")   # isolated | crossed
-# one-way: tradeSide is ignored by Bitget. hedge: tradeSide=open required.
-ONE_WAY_MODE = os.getenv("BITGET_ONE_WAY", "true").lower() in ("1", "true", "yes", "on")
+# one-way: tradeSide must NOT be sent (40774 if it is). hedge: tradeSide=open required.
+# Empty/unset → one-way (the safe default): a BLANK env var must not silently flip to
+# hedge mode and start sending tradeSide to a one-way account.
+_OW_RAW = os.getenv("BITGET_ONE_WAY", "true").strip().lower()
+ONE_WAY_MODE = _OW_RAW not in ("0", "false", "no", "off", "hedge")
+log.info(f"Bitget position mode: {'ONE-WAY' if ONE_WAY_MODE else 'HEDGE'} "
+         f"(BITGET_ONE_WAY={os.getenv('BITGET_ONE_WAY')!r})")
 SIZE_DECIMALS = int(os.getenv("BITGET_SIZE_DECIMALS", "3"))  # BTC contract step; VERIFY per symbol
 
 
