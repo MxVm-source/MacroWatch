@@ -36,7 +36,9 @@ SL_BUFFER      = float(os.getenv("GATE_SL_BUFFER", "0.005"))     # 0.5% beyond l
 GATE_LEV       = float(os.getenv("GATE_LEV", "10"))
 GATE_CAPITAL   = float(os.getenv("GATE_CAPITAL", "500"))         # capital-first base
 GATE_SIZE_DEC  = int(os.getenv("BITGET_SIZE_DECIMALS", "4"))
-GRADE_ROOM_R   = float(os.getenv("GATE_GRADE_ROOM_R", "2.0"))    # >=2R to TP1 = A-grade
+GRADE_ROOM_R   = float(os.getenv("GATE_GRADE_ROOM_R", "2.0"))    # best target >=2R = A-grade
+MIN_TRADE_RR   = float(os.getenv("GATE_MIN_TRADE_RR", "1.0"))    # best target must clear this to propose
+SOFT_RR_PREF   = float(os.getenv("GATE_SOFT_RR_PREF", "1.5"))    # warn (not block) below your real floor
 GATE_AUTO_SCAN = os.getenv("GATE_AUTO_SCAN", "true").lower() in ("1", "true", "yes", "on")
 
 # debounce: one auto-propose per (side, level) arrival, per symbol
@@ -184,11 +186,13 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
     rr = honest_rr(entry, sl, targets, side_l)
     warnings += grade_tps(rr)
 
-    # Block junk the inflated-R:R version would have waved through:
-    if rr and rr[0] < 1.0:
-        _block_reason[symbol] = (f"TP1 {rr[0]}R < 1R vs structural stop {sl:,.0f} "
-                                 f"(nearest target {targets[0]:,.0f} too close)")
-        log.info(f"auto-plan blocked {symbol}: TP1 {rr[0]}R < 1R vs structural stop")
+    best_rr = max(rr) if rr else 0.0
+    # TP1 is your close scalp leg — SUPPOSED to be sub-1R. Gate on whether a DEEPER
+    # target clears your real reward floor, not on TP1. grade_tps still warns on card.
+    if best_rr < MIN_TRADE_RR:
+        _block_reason[symbol] = (f"best target only {best_rr:.2f}R vs structural stop {sl:,.0f} "
+                                 f"(< {MIN_TRADE_RR}R floor) — no real reward")
+        log.info(f"auto-plan blocked {symbol}: best {best_rr:.2f}R < {MIN_TRADE_RR}R floor")
         return None
     if risk_pct > MAX_RISK_PCT:
         _block_reason[symbol] = f"risk {risk_pct:.0%} > {MAX_RISK_PCT:.0%} guardrail (SL {sl:,.0f})"
@@ -196,8 +200,10 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
         return None
 
     _block_reason.pop(symbol, None)   # passed all gates
+    if best_rr < SOFT_RR_PREF:
+        warnings.append(f"best target {best_rr:.2f}R < your {SOFT_RR_PREF}R floor — marginal, judge it")
 
-    grade = "A" if (rr and rr[0] >= GRADE_ROOM_R) else "B"
+    grade = "A" if best_rr >= GRADE_ROOM_R else "B"
     size  = round(GATE_CAPITAL * GATE_LEV / entry, GATE_SIZE_DEC)
 
     return {
