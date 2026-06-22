@@ -39,6 +39,8 @@ GATE_SIZE_DEC  = int(os.getenv("BITGET_SIZE_DECIMALS", "4"))
 GRADE_ROOM_R   = float(os.getenv("GATE_GRADE_ROOM_R", "2.0"))    # best target >=2R = A-grade
 MIN_TRADE_RR   = float(os.getenv("GATE_MIN_TRADE_RR", "1.0"))    # best target must clear this to propose
 SOFT_RR_PREF   = float(os.getenv("GATE_SOFT_RR_PREF", "1.5"))    # warn (not block) below your real floor
+WALL_TOUCHES   = int(os.getenv("GATE_WALL_TOUCHES", "3"))        # first target this strong = into-a-wall = B
+BAND_PCT       = float(os.getenv("GATE_BAND_PCT", "0.012"))      # strong level within this above entry = sandwiched
 GATE_AUTO_SCAN = os.getenv("GATE_AUTO_SCAN", "true").lower() in ("1", "true", "yes", "on")
 
 # debounce: one auto-propose per (side, level) arrival, per symbol
@@ -175,12 +177,14 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
         warnings = [f"structural stop unavailable ({e}); fell back to {SL_BUFFER:.1%} buffer"]
 
     if side == "SHORT":
-        targets = [float(p) for (p, _t) in structure.get("sup_levels", []) if p < entry][:3]
+        tgt = [(float(p), int(t)) for (p, t) in structure.get("sup_levels", []) if p < entry][:3]
     else:
-        targets = [float(p) for (p, _t) in structure.get("res_levels", []) if p > entry][:3]
-    if not targets:
+        tgt = [(float(p), int(t)) for (p, t) in structure.get("res_levels", []) if p > entry][:3]
+    if not tgt:
         _block_reason[symbol] = "no S/R target in the trade direction"
         return None   # no defined target in direction — don't propose a target-less trade
+    targets     = [p for p, _ in tgt]
+    tp1_touches = tgt[0][1]
 
     # Honest R:R measured against the REAL stop, not a tight % one.
     rr = honest_rr(entry, sl, targets, side_l)
@@ -203,7 +207,30 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
     if best_rr < SOFT_RR_PREF:
         warnings.append(f"best target {best_rr:.2f}R < your {SOFT_RR_PREF}R floor — marginal, judge it")
 
-    grade = "A" if best_rr >= GRADE_ROOM_R else "B"
+    # GRADE = how to scale, and it must see WHAT'S IN THE WAY, not just the deep R:R.
+    # A-grade = trend-continuation into OPEN AIR (runner has room) → 30/40/30.
+    # B-grade = first target is a real wall, or entry is sandwiched in a band, or low
+    #           reward → front-load 50/30/20 (bank into the first obstacle).
+    # Fixes the misgrade: a short whose TP1 sits on a high-touch support (a magnet that
+    # fights the move) is NOT open air — it's B, no matter how far the deep target is.
+    tp1_is_wall = tp1_touches >= WALL_TOUCHES
+    if side == "SHORT":
+        band = [t for (p, t) in structure.get("res_levels", [])
+                if entry < p <= entry * (1 + BAND_PCT) and t >= WALL_TOUCHES]
+    else:
+        band = [t for (p, t) in structure.get("sup_levels", [])
+                if entry * (1 - BAND_PCT) <= p < entry and t >= WALL_TOUCHES]
+    sandwiched = len(band) > 0
+
+    if best_rr >= GRADE_ROOM_R and not tp1_is_wall and not sandwiched:
+        grade = "A"
+    else:
+        grade = "B"
+        if tp1_is_wall:
+            warnings.append(f"TP1 sits on a ×{tp1_touches} wall — front-loaded 50/30/20, "
+                            f"bank biggest into the first obstacle")
+        elif sandwiched:
+            warnings.append("entry sandwiched in a resistance band — front-loaded 50/30/20")
     size  = round(GATE_CAPITAL * GATE_LEV / entry, GATE_SIZE_DEC)
 
     return {
