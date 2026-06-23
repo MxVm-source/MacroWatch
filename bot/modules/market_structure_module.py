@@ -49,6 +49,12 @@ TOP_LEVELS      = int(os.getenv("MS_TOP_LEVELS", "4"))
 
 STATE_PATH      = os.getenv("MS_STATE_PATH", "/var/data/market_structure_state.json")
 
+# Telegram noise toggles (the gate + Phase-0 logging keep running either way):
+#   MS_BROADCAST=false         → mute the verbose 4H structure ladder
+#   MS_TRANSITION_ALERTS=false → mute the LIVE/NO_TAKE/AWAIT-4H state-change pings
+MS_BROADCAST         = os.getenv("MS_BROADCAST", "true").strip().lower() not in ("0", "false", "no", "off")
+MS_TRANSITION_ALERTS = os.getenv("MS_TRANSITION_ALERTS", "true").strip().lower() not in ("0", "false", "no", "off")
+
 # CVD trigger fire log — append-only JSONL, one line per LIVE/NO_TAKE verdict.
 # Supports Phase 0 validation: compare bot verdicts against manual aggr 15m
 # reads over the next 20-30 level-touches before promoting this to a real
@@ -783,6 +789,9 @@ def _check_cvd_transition(verdict: dict, symbol: str):
         f"{action}"
     )
 
+    if not MS_TRANSITION_ALERTS:
+        log.info(f"CVD transition {symbol} {prev_state}->{new_state} (alert muted)")
+        return
     try:
         send_text(msg)
         log.info(f"CVD transition alert: {symbol} {prev_state} -> {new_state}")
@@ -823,12 +832,16 @@ def poll_and_maybe_fire(symbol: str = "BTCUSDT"):
 
         log.info(f"MarketStructure {symbol}: regime={struct['regime']} fire={fire} ({reason})")
 
-        if fire:
-            trigger_line = _get_trigger_line(struct, symbol)
-            msg = format_telegram(struct, trigger_line=trigger_line)
-            send_text(msg)
+        # Always run the gate first: transition detection + Phase-0 logging happen
+        # regardless of whether we broadcast the ladder.
+        trigger_line = _get_trigger_line(struct, symbol)
 
-            # Save state
+        if fire:
+            if MS_BROADCAST:
+                send_text(format_telegram(struct, trigger_line=trigger_line))
+            else:
+                log.info(f"MarketStructure {symbol}: ladder broadcast muted (MS_BROADCAST=false)")
+            # Save state either way so the noise gate behaves the same when muted.
             STATE[symbol] = {
                 "last_fire_utc":  datetime.now(timezone.utc),
                 "last_regime":    struct["regime"],
@@ -837,11 +850,6 @@ def poll_and_maybe_fire(symbol: str = "BTCUSDT"):
                 "last_sup_top":   struct["sup_levels"][0][0] if struct["sup_levels"] else None,
             }
             _save_state()
-        else:
-            # Even when the full structure broadcast is suppressed, still run
-            # the CVD gate for transition detection — a LIVE→NO_TAKE flip is
-            # important to catch regardless of whether anything else changed.
-            _get_trigger_line(struct, symbol)
 
     except Exception as e:
         log.exception(f"MarketStructure poll failed for {symbol}: {e}")
