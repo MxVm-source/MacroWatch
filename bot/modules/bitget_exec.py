@@ -133,6 +133,8 @@ def place_entry(symbol: str, side: str, entry: float, size: float,
     }
     if not ONE_WAY_MODE:
         body["tradeSide"] = "open"
+        log.warning("place_entry SENDING tradeSide=open (HEDGE mode) — if your account is "
+                    "one-way this WILL fail with 40774. Set BITGET_ONE_WAY=true.")
     return _post("/api/v2/mix/order/place-order", body)
 
 
