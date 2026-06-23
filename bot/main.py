@@ -929,15 +929,13 @@ def start_scheduler():
     # like the Monday brief / Friday recap), so this job needs an explicit
     # UTC override or it fires 2h early (Brussels = UTC+2 in summer, UTC+1
     # in winter) and reads a still-forming candle.
-    if os.getenv("MS_BROADCAST", "true").lower() == "true":
-        SCHED.add_job(
-            market_structure.poll_all, "cron",
-            hour="0,4,8,12,16,20", minute=2, timezone="UTC",
-            id="market_structure", max_instances=1, misfire_grace_time=300,
-        )
-        print("📊 MarketStructure scheduled (4H close +2min UTC) ✅", flush=True)
-    else:
-        print("🔇 MarketStructure 4H broadcast MUTED (MS_BROADCAST=false)", flush=True)
+    SCHED.add_job(
+        market_structure.poll_all, "cron",
+        hour="0,4,8,12,16,20", minute=2, timezone="UTC",
+        id="market_structure", max_instances=1, misfire_grace_time=300,
+    )
+    print("📊 MarketStructure scheduled (4H close +2min UTC) ✅ "
+          "[ladder + transitions gated by MS_BROADCAST / MS_TRANSITION_ALERTS]", flush=True)
 
     # ── Gate auto-propose scan (intrabar with-trend GO → stage card) ──
     if hasattr(gatewatch, "scan"):
