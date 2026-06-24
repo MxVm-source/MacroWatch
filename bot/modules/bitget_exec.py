@@ -99,14 +99,32 @@ def _round_price(symbol: str, price: float) -> str:
 
 
 def _post(path: str, body: dict) -> dict:
-    """Single choke point. Dry-run unless STAGE_LIVE; logs the exact payload."""
+    """Single choke point. Dry-run unless STAGE_LIVE; logs the exact payload.
+
+    Self-heals the 40774 mode mismatch: if we sent tradeSide (hedge field) to a
+    one-way account, Bitget rejects it — so we strip tradeSide, pin ONE-WAY for
+    the session, and retry once. This makes a wrong BITGET_ONE_WAY env or a stale
+    boot non-fatal instead of bouncing every Approve.
+    """
     if not is_live():
         log.warning(f"[DRY-RUN] would POST {path}  {body}")
         return {"dry_run": True, "path": path, "body": body,
                 "data": {"orderId": f"dry-{int(time.time()*1000)}",
                          "clientOid": body.get("clientOid", "")}}
-    res = _signed_request_elite("POST", path, params=None, body=body)
-    return res.get("data") or {}
+    try:
+        res = _signed_request_elite("POST", path, params=None, body=body)
+        return res.get("data") or {}
+    except Exception as e:
+        if "40774" in str(e) and "tradeSide" in body:
+            global ONE_WAY_MODE
+            ONE_WAY_MODE = True
+            body = {k: v for k, v in body.items() if k != "tradeSide"}
+            log.warning("40774: account is ONE-WAY but order carried tradeSide. Stripped it, "
+                        "pinned ONE-WAY for this session, retrying. Set BITGET_ONE_WAY=true "
+                        "to avoid this retry on the next boot.")
+            res = _signed_request_elite("POST", path, params=None, body=body)
+            return res.get("data") or {}
+        raise
 
 
 # ─── Order placement ─────────────────────────────────────────────────────────
