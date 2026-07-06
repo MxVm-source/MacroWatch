@@ -34,7 +34,8 @@ GATE_SCAN_SYMBOLS = [s.strip().upper() for s in
                      os.getenv("GATE_SCAN_SYMBOLS", "BTCUSDT").split(",") if s.strip()]
 SL_BUFFER      = float(os.getenv("GATE_SL_BUFFER", "0.005"))     # 0.5% beyond level
 GATE_LEV       = float(os.getenv("GATE_LEV", "10"))
-GATE_CAPITAL   = float(os.getenv("GATE_CAPITAL", "500"))         # capital-first base
+GATE_CAPITAL_A = float(os.getenv("GATE_CAPITAL_A", "500"))       # capital-first base, A-grade
+GATE_CAPITAL_B = float(os.getenv("GATE_CAPITAL_B", "250"))       # capital-first base, B-grade
 GATE_SIZE_DEC  = int(os.getenv("BITGET_SIZE_DECIMALS", "4"))
 GRADE_ROOM_R   = float(os.getenv("GATE_GRADE_ROOM_R", "2.0"))    # best target >=2R = A-grade
 MIN_TRADE_RR   = float(os.getenv("GATE_MIN_TRADE_RR", "1.0"))    # best target must clear this to propose
@@ -163,6 +164,7 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
     # Full S/R set with touch counts — the structural stop needs the real walls.
     levels = [(float(p), int(t)) for (p, t) in
               (structure.get("res_levels", []) + structure.get("sup_levels", []))]
+    entry_touches = next((t for (p, t) in levels if abs(p - entry) < 0.01), None)
 
     # SL beyond the next >=3-touch wall (skips thin levels that just get wicked),
     # NOT a fixed % that lands in the chop and inflates R:R.
@@ -222,16 +224,22 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
                 if entry * (1 - BAND_PCT) <= p < entry and t >= WALL_TOUCHES]
     sandwiched = len(band) > 0
 
-    if best_rr >= GRADE_ROOM_R and not tp1_is_wall and not sandwiched:
+    entry_thin = entry_touches is not None and entry_touches < WALL_TOUCHES
+
+    if best_rr >= GRADE_ROOM_R and not tp1_is_wall and not sandwiched and not entry_thin:
         grade = "A"
     else:
         grade = "B"
+        if entry_thin:
+            warnings.append(f"entry level is only ×{entry_touches} touches (< {WALL_TOUCHES}) — "
+                            f"capped at B regardless of room, per your entry-quality rule")
         if tp1_is_wall:
             warnings.append(f"TP1 sits on a ×{tp1_touches} wall — front-loaded 50/30/20, "
                             f"bank biggest into the first obstacle")
         elif sandwiched:
             warnings.append("entry sandwiched in a resistance band — front-loaded 50/30/20")
-    size  = round(GATE_CAPITAL * GATE_LEV / entry, GATE_SIZE_DEC)
+    capital = GATE_CAPITAL_A if grade == "A" else GATE_CAPITAL_B
+    size    = round(capital * GATE_LEV / entry, GATE_SIZE_DEC)
 
     return {
         "symbol":     symbol,
@@ -329,7 +337,7 @@ def scan_report(symbol: str = "BTCUSDT"):
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
         f"spot: {spot:,.2f}   regime: {verdict.get('regime', '?')}",
         f"CVD: {cvd['direction']} (slope {cvd['slope_recent']:+.0f})",
-        f"state: {state}   side: {side or '—'}   mode: {em or '—'}",
+        f"state: {state.replace('_',' ')}   side: {side or '—'}   mode: {(em or '—').replace('_',' ')}",
         f"level: {level:,.0f}" if level else "level: —",
         f"scan: {'ON' if GATE_AUTO_SCAN else 'OFF (GATE_AUTO_SCAN=false)'}",
     ]
