@@ -23,7 +23,12 @@ from bot.modules.cvd import get_cvd
 from bot.modules.structural_stop import (
     structural_stop, honest_rr, grade_tps, MAX_RISK_PCT,
 )
-from bot.datafeed_bitget import get_elite_usdt_balance
+from bot.datafeed_bitget import (
+    get_elite_usdt_balance,
+    _fetch_current_futures_position_elite,
+    _position_is_open,
+    _to_float,
+)
 
 log = logging.getLogger("gatewatch")
 
@@ -397,6 +402,46 @@ def scan_report(symbol: str = "BTCUSDT"):
 
 # ─── Row 3: break confirmation on the 4H close (close_break wired) ───────────
 
+_invalidation_alerted: dict = {}   # symbol -> entry price already alerted on (dedupe across repeated closes)
+
+
+def _check_invalidation(symbol: str, spot: float):
+    """
+    Step 3, job 2: if a position is open and the 4H close falls back through
+    ITS OWN entry level, the read is invalidated. Alert-only — never closes
+    the position; you still tap to exit, matches every other decision here.
+    """
+    try:
+        pos = _fetch_current_futures_position_elite(symbol)
+    except Exception as e:
+        log.warning(f"invalidation check: position fetch failed for {symbol}: {e}")
+        return
+    if not _position_is_open(pos):
+        _invalidation_alerted.pop(symbol, None)   # flat again — clear dedupe
+        return
+
+    side  = (pos.get("holdSide") or "").upper()
+    entry = _to_float(pos.get("openPriceAvg") or pos.get("openPrice") or 0)
+    if not entry or not side:
+        return
+
+    invalidated = (spot < entry) if side == "LONG" else (spot > entry)
+    if not invalidated:
+        return
+    if _invalidation_alerted.get(symbol) == entry:
+        return   # already alerted this position, don't spam every 4H close
+    _invalidation_alerted[symbol] = entry
+
+    send_text(
+        f"⚠️ *INVALIDATION — {symbol}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"4H close {spot:,.0f} back through your entry {entry:,.0f} ({side})\n"
+        f"Step 3: the level failed — this is your read, no auto-action taken.\n"
+        f"Consider exiting manually.\n"
+        f"🕐 {datetime.now(timezone.utc).isoformat()}"
+    )
+
+
 def check_break(symbol: str = "BTCUSDT"):
     """
     Scheduler entry — run once per 4H close. Compares the close (spot just after
@@ -424,6 +469,8 @@ def check_break(symbol: str = "BTCUSDT"):
     # buffer so a hair-cross doesn't count as a break
     ceil_b  = ceiling * (1 + BREAK_BUFFER) if ceiling else None
     floor_b = floor   * (1 - BREAK_BUFFER) if floor   else None
+
+    _check_invalidation(symbol, spot)
 
     verdict = trig.close_break(spot, ceiling=ceil_b, floor=floor_b, symbol=symbol)
     if not verdict:
