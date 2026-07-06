@@ -143,9 +143,13 @@ def evaluate(structure: dict, symbol: str = "BTCUSDT", cvd_period: str = "15m",
             state, side = "LIVE", "short"
             with_trend, entry_mode, note = _grade_entry(side, bias, fresh_flush)
             reason = f"CVD rolling over into resistance = absorption confirmed | {note}"
-        else:  # rising / flat / falling-but-still-below
+        else:  # rising / flat / falling-but-not-yet-rolled-over
             state, side = "NO_TAKE", "short"
-            reason = f"CVD {cvd.direction} into resistance = absorption risk, no fade"
+            if cvd_dir == "falling":
+                reason = ("CVD falling but hasn't rolled over yet — waiting for the turn, "
+                           "not chasing an already-extended move")
+            else:
+                reason = f"CVD {cvd.direction} into resistance = absorption risk, no fade"
 
     elif near_sup is not None:
         level = near_sup["price"]
