@@ -23,6 +23,7 @@ from bot.modules.cvd import get_cvd
 from bot.modules.structural_stop import (
     structural_stop, honest_rr, grade_tps, MAX_RISK_PCT,
 )
+from bot.datafeed_bitget import get_elite_usdt_balance
 
 log = logging.getLogger("gatewatch")
 
@@ -34,8 +35,9 @@ GATE_SCAN_SYMBOLS = [s.strip().upper() for s in
                      os.getenv("GATE_SCAN_SYMBOLS", "BTCUSDT").split(",") if s.strip()]
 SL_BUFFER      = float(os.getenv("GATE_SL_BUFFER", "0.005"))     # 0.5% beyond level
 GATE_LEV       = float(os.getenv("GATE_LEV", "10"))
-GATE_CAPITAL_A = float(os.getenv("GATE_CAPITAL_A", "500"))       # capital-first base, A-grade
-GATE_CAPITAL_B = float(os.getenv("GATE_CAPITAL_B", "250"))       # capital-first base, B-grade
+GATE_RISK_PCT_A = float(os.getenv("GATE_RISK_PCT_A", "25"))      # % of Elite equity risked, A-grade
+GATE_RISK_PCT_B = float(os.getenv("GATE_RISK_PCT_B", "15"))      # % of Elite equity risked, B-grade
+GATE_EQUITY_FALLBACK = float(os.getenv("GATE_EQUITY_FALLBACK", "1000"))  # used if balance fetch fails
 GATE_SIZE_DEC  = int(os.getenv("BITGET_SIZE_DECIMALS", "4"))
 GRADE_ROOM_R   = float(os.getenv("GATE_GRADE_ROOM_R", "2.0"))    # best target >=2R = A-grade
 MIN_TRADE_RR   = float(os.getenv("GATE_MIN_TRADE_RR", "1.0"))    # best target must clear this to propose
@@ -238,8 +240,20 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
                             f"bank biggest into the first obstacle")
         elif sandwiched:
             warnings.append("entry sandwiched in a resistance band — front-loaded 50/30/20")
-    capital = GATE_CAPITAL_A if grade == "A" else GATE_CAPITAL_B
+    target_pct = GATE_RISK_PCT_A if grade == "A" else GATE_RISK_PCT_B
+    try:
+        equity = get_elite_usdt_balance() or GATE_EQUITY_FALLBACK
+    except Exception as e:
+        equity = GATE_EQUITY_FALLBACK
+        warnings.append(f"equity fetch failed ({e}); used ${GATE_EQUITY_FALLBACK:.0f} fallback")
+    target_risk_dollar = equity * target_pct / 100
+    # risk_pct here is a fraction (sl_dist_pct * leverage) from structural_stop —
+    # it's the fraction of ALLOCATED CAPITAL at risk, not of equity. Solve backwards
+    # for the capital that puts exactly target_risk_dollar of equity on the line.
+    capital = (target_risk_dollar / risk_pct) if risk_pct > 0 else 0.0
     size    = round(capital * GATE_LEV / entry, GATE_SIZE_DEC)
+    warnings.append(f"sized at {target_pct:.2f}% of ${equity:,.0f} equity "
+                    f"(${target_risk_dollar:,.0f} risk) — {grade}-grade")
 
     return {
         "symbol":     symbol,
