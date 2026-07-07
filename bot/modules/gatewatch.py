@@ -15,6 +15,14 @@ import os
 import json
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+_BXL = ZoneInfo("Europe/Brussels")
+
+
+def _bxl_now_str() -> str:
+    """Belgium local time for Telegram-facing messages (handles CET/CEST automatically)."""
+    return datetime.now(_BXL).strftime("%Y-%m-%d %H:%M %Z")
 
 from bot.utils import send_text
 from bot.modules import market_structure_module as msm
@@ -40,6 +48,7 @@ GATE_SCAN_SYMBOLS = [s.strip().upper() for s in
                      os.getenv("GATE_SCAN_SYMBOLS", "BTCUSDT").split(",") if s.strip()]
 SL_BUFFER      = float(os.getenv("GATE_SL_BUFFER", "0.005"))     # 0.5% beyond level
 GATE_LEV       = float(os.getenv("GATE_LEV", "10"))
+GATE_MIN_GRADE = os.getenv("GATE_MIN_GRADE", "B").strip().upper()   # "A" suppresses B from Telegram
 GATE_MARGIN_PCT_A = float(os.getenv("GATE_MARGIN_PCT_A", "25"))  # % of Elite equity used as margin, A-grade
 GATE_MARGIN_PCT_B = float(os.getenv("GATE_MARGIN_PCT_B", "15"))  # % of Elite equity used as margin, B-grade
 GATE_EQUITY_FALLBACK = float(os.getenv("GATE_EQUITY_FALLBACK", "1000"))  # used if balance fetch fails
@@ -293,6 +302,10 @@ def _scan_one(symbol: str):
     plan = _build_auto_plan(symbol, verdict, structure)
     if not plan:
         return
+    if GATE_MIN_GRADE == "A" and plan.get("grade") != "A":
+        log.info(f"{symbol}: {plan.get('grade')}-grade suppressed from Telegram "
+                f"(GATE_MIN_GRADE=A) — still visible via /scandiag")
+        return
 
     _last_go[symbol] = key
     _log({
@@ -439,7 +452,7 @@ def _check_invalidation(symbol: str, spot: float):
         f"4H close {spot:,.0f} back through your entry {entry:,.0f} ({side})\n"
         f"Step 3: the level failed — this is your read, no auto-action taken.\n"
         f"Consider exiting manually.\n"
-        f"🕐 {datetime.now(timezone.utc).isoformat()}"
+        f"🕐 {_bxl_now_str()}"
     )
 
 
@@ -476,7 +489,7 @@ def _check_retest(symbol: str, structure: dict, spot: float):
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{level:,.0f} retested, holding, CVD {cvd.direction} confirms\n"
         f"→ {side.upper()} — this is your with-trend continuation retest, judge grade/R:R fresh\n"
-        f"🕐 {datetime.now(timezone.utc).isoformat()}"
+        f"🕐 {_bxl_now_str()}"
     )
 
 
@@ -526,7 +539,7 @@ def check_break(symbol: str = "BTCUSDT"):
         f"{verdict['level']:,.0f}\n"
         f"{verdict['reason']}\n"
         f"→ continuation {verdict['side']} — wait for retest, confirm on aggr\n"
-        f"🕐 {datetime.now(timezone.utc).isoformat()}"
+        f"🕐 {_bxl_now_str()}"
     )
     _log({
         "ts": datetime.now(timezone.utc).isoformat(), "symbol": symbol,
