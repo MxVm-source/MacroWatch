@@ -273,6 +273,7 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
 
 def _scan_one(symbol: str):
     structure = _get_structure(symbol)
+    _check_retest(symbol, structure, structure["spot"])
     cvd       = get_cvd(symbol)                      # fetch once, reuse for flush + gate
     flush     = _flush_flag(cvd)
     verdict   = trig.evaluate(structure, symbol=symbol, cvd=cvd, fresh_flush=flush)
@@ -442,6 +443,43 @@ def _check_invalidation(symbol: str, spot: float):
     )
 
 
+_retest_watch: dict = {}   # symbol -> {"level": price, "side": "long"/"short", "touches": int}
+
+
+def _check_retest(symbol: str, structure: dict, spot: float):
+    """
+    One-shot retest catcher. A freshly broken level isn't yet a confirmed
+    fractal pivot in the OTHER direction, so trig.evaluate()'s near_res/near_sup
+    won't see it — this seeds it manually the moment check_break() confirms,
+    and fires as soon as price returns to it with CVD still confirming.
+    """
+    watch = _retest_watch.get(symbol)
+    if not watch:
+        return
+    level = watch["level"]
+    dist_pct = abs(spot - level) / level * 100
+    if dist_pct > PROXIMITY_PCT:
+        return   # not there yet
+
+    cvd = get_cvd(symbol)
+    side = watch["side"]
+    ok = (cvd.direction in ("rising", "flat")) if side == "long" else (cvd.direction == "rolling-over")
+    if not ok:
+        send_text(f"⏳ *RETEST — {symbol}*\n{level:,.0f} reached but CVD ({cvd.direction}) "
+                  f"hasn't confirmed — watching, not firing")
+        return
+
+    del _retest_watch[symbol]   # one-shot — consumed whether taken or not
+    e = "🟢" if side == "long" else "🔴"
+    send_text(
+        f"{e} *RETEST CONFIRMED — {symbol}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{level:,.0f} retested, holding, CVD {cvd.direction} confirms\n"
+        f"→ {side.upper()} — this is your with-trend continuation retest, judge grade/R:R fresh\n"
+        f"🕐 {datetime.now(timezone.utc).isoformat()}"
+    )
+
+
 def check_break(symbol: str = "BTCUSDT"):
     """
     Scheduler entry — run once per 4H close. Compares the close (spot just after
@@ -477,6 +515,10 @@ def check_break(symbol: str = "BTCUSDT"):
         return
 
     e = "🚀" if verdict["state"] == "BREAKOUT" else "🔻"
+    _retest_watch[symbol] = {
+        "level": verdict["level"],
+        "side": "long" if verdict["state"] == "BREAKOUT" else "short",
+    }
     send_text(
         f"{e} *{verdict['state']} — {symbol}*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
