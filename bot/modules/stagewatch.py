@@ -383,6 +383,14 @@ def on_position_change(symbol: str, prev: dict, cur: dict):
     """
     pid, p = _active_plan_for(symbol)
     if not p:
+        if not prev.get("has_position") and cur.get("has_position"):
+            send_text(
+                f"🚨 *{symbol} — FILLED WITH NO PLAN ON RECORD*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Entry {cur.get('entry'):,.2f}, size {cur.get('size')} — the bot has no staged "
+                f"plan for this (likely lost on a restart between arm and fill).\n"
+                f"⚠️ No TP ladder will be placed automatically. Set TP/SL manually now."
+            )
         return
     store = _load()
 
