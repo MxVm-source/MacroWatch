@@ -38,6 +38,7 @@ log = logging.getLogger("trigger")
 PROXIMITY_PCT = 0.6   # within this % of a level counts as "at" it
 MIN_TOUCHES   = 2     # a validated level needs >= this many touches
 CROWD_APR     = 8.0   # |funding APR| above this = crowded-side flag
+LS_CROWD_PCT  = 57.0   # L/S account ratio above this on one side = crowded (your ~55-60% read)
 
 
 def _near(levels, lo_pct, hi_pct, spot):
@@ -118,6 +119,13 @@ def evaluate(structure: dict, symbol: str = "BTCUSDT", cvd_period: str = "15m",
         crowd = " | funding crowded LONG (fade-tilt)"
     elif funding_apr < -CROWD_APR:
         crowd = " | funding crowded SHORT (squeeze-tilt)"
+
+    ls_long_pct = structure.get("ls_long_pct", 0.0)
+    ls_short_pct = structure.get("ls_short_pct", 0.0)
+    if ls_long_pct >= LS_CROWD_PCT:
+        crowd += f" | L/S {ls_long_pct:.0f}% long — crowded (fade-tilt)"
+    elif ls_short_pct >= LS_CROWD_PCT:
+        crowd += f" | L/S {ls_short_pct:.0f}% short — crowded (squeeze-tilt)"
 
     # Price/CVD divergence — surfaced regardless of state.
     div_note = ""

@@ -38,6 +38,7 @@ BITGET_CANDLES  = f"{BITGET_BASE}/api/v2/mix/market/candles"
 BITGET_FUNDING  = f"{BITGET_BASE}/api/v2/mix/market/current-fund-rate"
 BITGET_FUND_HIST= f"{BITGET_BASE}/api/v2/mix/market/history-fund-rate"
 BITGET_OI       = f"{BITGET_BASE}/api/v2/mix/market/open-interest"
+BITGET_LS_RATIO = f"{BITGET_BASE}/api/v2/mix/market/account-long-short"
 PRODUCT_TYPE    = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 
 NBARS           = int(os.getenv("MS_NBARS", "1000"))
@@ -354,6 +355,30 @@ def open_interest_data(sym: str, limit: int = 120):
         return 0.0, pd.DataFrame()
 
 
+def ls_ratio_data(sym: str):
+    """
+    Long/short account ratio from Bitget (crowd-fade read — Maxime's manual habit
+    of countering the crowd when one side gets lopsided).
+    Returns (long_pct, short_pct, ls_ratio) as floats, or (0.0, 0.0, 0.0) on failure.
+    """
+    try:
+        resp = requests.get(BITGET_LS_RATIO,
+                            params={"symbol": sym, "productType": PRODUCT_TYPE},
+                            timeout=15).json()
+        rows = resp.get("data") or []
+        row = rows[0] if rows else {}
+        long_ratio  = float(row.get("longAccountRatio", 0) or 0)
+        short_ratio = float(row.get("shortAccountRatio", 0) or 0)
+        total = long_ratio + short_ratio
+        long_pct  = (long_ratio  / total * 100) if total else 0.0
+        short_pct = (short_ratio / total * 100) if total else 0.0
+        ls_ratio  = float(row.get("longShortAccountRatio", 0) or 0)
+        return long_pct, short_pct, ls_ratio
+    except Exception as e:
+        log.warning(f"L/S ratio fetch failed for {sym}: {e}")
+        return 0.0, 0.0, 0.0
+
+
 # ─── Regime classifier ───────────────────────────────────────────────────────
 
 def _classify_regime(df: pd.DataFrame) -> str:
@@ -519,6 +544,8 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
     else:
         oi_trend_pct = 0.0
 
+    ls_long_pct, ls_short_pct, ls_ratio = ls_ratio_data(symbol)
+
     # Trendlines (last 3 swings each)
     tl_desc = fit_tl(sw_hi_idx[-3:], sw_hi_p[-3:]) if len(sw_hi_idx) >= 3 else None
     tl_asc  = fit_tl(sw_lo_idx[-3:], sw_lo_p[-3:]) if len(sw_lo_idx) >= 3 else None
@@ -544,6 +571,9 @@ def get_structure(symbol: str, nbars: int = NBARS, n: int = FRACTAL_N) -> dict:
         "oi_now":              oi_now,
         "oi_trend_pct":        oi_trend_pct,
         "oi_samples":          oi_samples,
+        "ls_long_pct":         ls_long_pct,
+        "ls_short_pct":        ls_short_pct,
+        "ls_ratio":            ls_ratio,
         "tl_desc_now":         tl_desc_now,
         "tl_desc_slope":       tl_desc_slope,
         "tl_asc_now":          tl_asc_now,
@@ -651,6 +681,18 @@ def format_telegram(s: dict, trigger_line: str | None = None) -> str:
         lines.append(f"📊 OI trend: building history ({oi_samples}/120 bars)")
     else:
         lines.append(f"📊 OI trend: {oi_sign}{s['oi_trend_pct']:.1f}% ({oi_samples} bars)")
+
+    ls_long = s.get("ls_long_pct", 0.0)
+    ls_short = s.get("ls_short_pct", 0.0)
+    if ls_long or ls_short:
+        if ls_long >= 55:
+            ls_tag = " — majority LONG, squeeze risk if crowded (fade-tilt)"
+        elif ls_short >= 55:
+            ls_tag = " — majority SHORT, squeeze risk if crowded (fade-tilt)"
+        else:
+            ls_tag = ""
+        lines.append(f"⚖️ L/S ratio: {s.get('ls_ratio', 0.0):.2f}  |  "
+                     f"longs {ls_long:.1f}% shorts {ls_short:.1f}%{ls_tag}")
 
     return "\n".join(lines)
 
