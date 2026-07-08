@@ -281,18 +281,24 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
 
 
 def _scan_one(symbol: str):
+    """
+    3-min loop: retest watch + with-trend/range-fade intrabar propose.
+    Counter-trend and flush setups do NOT fire here — entry_mode="await_4h"
+    means they wait for _propose_at_close instead. This is the split that
+    was in trigger.py from the start: intrabar has momentum behind it and
+    doesn't need to wait; counter-trend is exactly the case that benefits
+    from waiting for confirmation.
+    """
     structure = _get_structure(symbol)
     _check_retest(symbol, structure, structure["spot"])
-    cvd       = get_cvd(symbol)                      # fetch once, reuse for flush + gate
-    flush     = _flush_flag(cvd)
-    verdict   = trig.evaluate(structure, symbol=symbol, cvd=cvd, fresh_flush=flush)
-    state     = verdict["state"]
+    cvd     = get_cvd(symbol)
+    flush   = _flush_flag(cvd)
+    verdict = trig.evaluate(structure, symbol=symbol, cvd=cvd, fresh_flush=flush)
+    state   = verdict["state"]
 
-    # Only a with-trend, intrabar GO auto-proposes. Counter-trend (await_4h),
-    # NO_TAKE and MID_RANGE do not — they stay on the 4H path.
     if state != "LIVE" or verdict.get("entry_mode") != "intrabar":
         if state == "MID_RANGE":
-            _last_go.pop(symbol, None)   # left the level → allow a fresh propose later
+            _last_go.pop(symbol, None)
         return
 
     key = (verdict.get("side"), verdict.get("level"))
@@ -313,7 +319,59 @@ def _scan_one(symbol: str):
         "spot": verdict["spot"], "state": state, "side": verdict["side"],
         "level": verdict["level"], "cvd_direction": verdict["cvd"]["direction"],
         "divergence": verdict["cvd"].get("divergence", "none"),
-        "reason": verdict["reason"], "source": "auto_propose",
+        "reason": verdict["reason"], "source": "auto_propose_intrabar",
+    })
+
+    try:
+        from bot.modules import stagewatch
+        stagewatch.stage_auto(plan, verdict=verdict)
+    except Exception as e:
+        log.warning(f"auto-propose stage failed for {symbol}: {e}")
+        try:
+            send_text(f"⚠️ [Stage] auto-propose for {symbol} failed to persist: {str(e)[:140]}")
+        except Exception:
+            pass
+
+
+def _propose_at_close(symbol: str):
+    """
+    Run once per confirmed 4H close (called from check_break). Catches
+    counter-trend/flush setups (entry_mode="await_4h") that intrabar
+    deliberately skips, plus acts as a fallback for anything intrabar missed.
+    Evaluates fresh, right at the close, same LIVE/NO_TAKE/MID_RANGE gate as
+    always — the _last_go dedup is shared with _scan_one, so a setup that
+    already fired intrabar won't double-propose here.
+    """
+    structure = _get_structure(symbol)
+    cvd       = get_cvd(symbol)
+    flush     = _flush_flag(cvd)
+    verdict   = trig.evaluate(structure, symbol=symbol, cvd=cvd, fresh_flush=flush)
+    state     = verdict["state"]
+
+    if state != "LIVE":
+        if state == "MID_RANGE":
+            _last_go.pop(symbol, None)
+        return
+
+    key = (verdict.get("side"), verdict.get("level"))
+    if _last_go.get(symbol) == key:
+        return   # already proposed this level on a prior close
+
+    plan = _build_auto_plan(symbol, verdict, structure)
+    if not plan:
+        return
+    if GATE_MIN_GRADE == "A" and plan.get("grade") != "A":
+        log.info(f"{symbol}: {plan.get('grade')}-grade suppressed from Telegram "
+                f"(GATE_MIN_GRADE=A) — still visible via /scandiag")
+        return
+
+    _last_go[symbol] = key
+    _log({
+        "ts": datetime.now(timezone.utc).isoformat(), "symbol": symbol,
+        "spot": verdict["spot"], "state": state, "side": verdict["side"],
+        "level": verdict["level"], "cvd_direction": verdict["cvd"]["direction"],
+        "divergence": verdict["cvd"].get("divergence", "none"),
+        "reason": verdict["reason"], "source": "auto_propose_4h_close",
     })
 
     try:
@@ -328,7 +386,7 @@ def _scan_one(symbol: str):
 
 
 def scan():
-    """Scheduler entry — intrabar with-trend GO watch across GATE_SCAN_SYMBOLS."""
+    """Scheduler entry, every 3 min — retest watch + flush-flag context only."""
     if not GATE_AUTO_SCAN:
         return
     for sym in GATE_SCAN_SYMBOLS:
@@ -504,6 +562,8 @@ def check_break(symbol: str = "BTCUSDT"):
     """
     structure = _get_structure(symbol)
     spot = structure["spot"]
+
+    _propose_at_close(symbol)   # the only entry-signal broadcast path now — no mid-candle fires
 
     cur_ceiling = _nearest(structure.get("res_levels", []), True,  spot)
     cur_floor   = _nearest(structure.get("sup_levels", []), False, spot)
