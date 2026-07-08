@@ -394,17 +394,33 @@ def on_position_change(symbol: str, prev: dict, cur: dict):
         return
     store = _load()
 
-    # entry filled: ARMED -> OPEN, lay the TP ladder
-    if p["state"] == "ARMED" and not prev.get("has_position") and cur.get("has_position"):
-        splits = GRADE_SPLITS[p["grade"]]
-        sizes = [round(p["total_size"] * s, 6) for s in splits[:len(p["tps"])]]
-        try:
-            bitget_exec.place_ladder_tps(symbol, p["side"], p["tps"], sizes, p["plan_id"])
-        except Exception as e:
-            send_text(f"⚠️ [Stage] {symbol} TP ladder failed: {str(e)[:120]}")
+    # entry filled: ARMED -> OPEN, lay the TP ladder.
+    # Reconcile on STATE, not just the false->true edge: if the bot restarted
+    # between arm and fill, `prev` already shows the position open and the edge
+    # is missed. Trigger whenever the plan is ARMED and a position now exists,
+    # regardless of prev. `ladder_placed` makes it idempotent so a re-poll can
+    # never double-place the ladder.
+    if p["state"] == "ARMED" and cur.get("has_position"):
+        edge = not prev.get("has_position")   # clean fill this poll vs reconciled-after-restart
+        if not p.get("ladder_placed"):
+            splits = GRADE_SPLITS[p["grade"]]
+            sizes = [round(p["total_size"] * s, 6) for s in splits[:len(p["tps"])]]
+            try:
+                bitget_exec.place_ladder_tps(symbol, p["side"], p["tps"], sizes, p["plan_id"])
+                p["ladder_placed"] = True
+            except Exception as e:
+                send_text(f"⚠️ [Stage] {symbol} TP ladder failed: {str(e)[:120]}")
+        # Seed cur_sl from the preset SL so the ratchet's tighter-only guard has a baseline.
+        if p.get("cur_sl") is None:
+            p["cur_sl"] = p.get("sl")
         p["state"] = "OPEN"
         store[pid] = p; _save(store)
-        send_text(f"🟢 [Stage] {symbol} filled @ {cur.get('entry'):,.2f} — ladder live, SL preset.")
+        tag = "filled" if edge else "reconciled after restart"
+        send_text(
+            f"🟢 [Stage] {symbol} {tag} @ {cur.get('entry'):,.2f} — "
+            f"ladder {'live' if p.get('ladder_placed') else 'FAILED (set manually)'}, "
+            f"ratchet armed."
+        )
         return
 
     # closed
@@ -413,16 +429,37 @@ def on_position_change(symbol: str, prev: dict, cur: dict):
         store[pid] = p; _save(store)
         return
 
-    # TP hit -> ratchet (a TP price disappeared from the bracket)
-    if cur.get("has_position") and prev.get("has_position"):
+    # TP hit -> ratchet. Primary path: a TP price disappeared from the bracket
+    # between two polls (prev -> cur). Restart-safe fallback: if the bot was
+    # blind across a fill, the prev/cur diff is empty but the live bracket now
+    # holds fewer TPs than the plan implies for its current state. Reconcile by
+    # advancing the ratchet until the plan's expected-open-TP count matches the
+    # bracket. Idempotent: only advances on a real shortfall.
+    if cur.get("has_position"):
         prev_tps = set(prev.get("tp") or [])
         cur_tps  = set(cur.get("tp") or [])
         hits = prev_tps - cur_tps
-        if not hits:
-            return
+
+        advanced = False
         for _ in hits:
             _advance_ratchet(symbol, p)
-        store[pid] = p; _save(store)
+            advanced = True
+
+        # Reconcile-on-state fallback (covers restart across a TP fill).
+        # Expected open-TP count by ratchet state: OPEN=all, TP1=all-1, TP2=all-2.
+        n_tps = len(p.get("tps") or [])
+        expected_open = {"OPEN": n_tps, "TP1": max(n_tps - 1, 0),
+                         "TP2": max(n_tps - 2, 0), "RUNNER": 0}.get(p["state"])
+        if expected_open is not None:
+            live_open = len(cur_tps)
+            while live_open < expected_open and p["state"] in ("OPEN", "TP1", "TP2"):
+                _advance_ratchet(symbol, p)
+                advanced = True
+                expected_open = {"OPEN": n_tps, "TP1": max(n_tps - 1, 0),
+                                 "TP2": max(n_tps - 2, 0), "RUNNER": 0}.get(p["state"])
+
+        if advanced:
+            store[pid] = p; _save(store)
 
 
 def _advance_ratchet(symbol: str, p: dict):
