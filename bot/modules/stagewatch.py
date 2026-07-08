@@ -24,6 +24,14 @@ import time
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+
+_BXL = ZoneInfo("Europe/Brussels")
+
+
+def _bxl_now_str() -> str:
+    """Belgium local time for card display only — expiry math stays UTC internally."""
+    return datetime.now(_BXL).strftime("%Y-%m-%d %H:%M %Z")
 
 from bot.utils import send_text
 try:
@@ -216,7 +224,7 @@ def _build_card(p: dict) -> str:
         lines.append(f"⚠️ {w}")
     if p.get("auto"):
         lines.append("⚠️ _proxy gate — check aggr 15m before you tap Approve_")
-    lines.append(f"🕐 {iso_utc_now()}")
+    lines.append(f"🕐 {_bxl_now_str()}")
     return "\n".join(lines)
 
 
