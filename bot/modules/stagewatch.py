@@ -229,7 +229,9 @@ def _build_card(p: dict) -> str:
             if "crowd" in part:
                 lines.append(f"⚠️{part.strip()}")
     if p.get("auto"):
-        lines.append("⚠️ _proxy gate — check aggr 15m before you tap Approve_")
+        lines.append("")
+        lines.append("🛑 *MANDATORY GATE — open aggr.trade 15m now.*")
+        lines.append("_This card is a proxy read. Do not tap Approve until aggr confirms it._")
     lines.append(f"🕐 {_bxl_now_str()}")
     return "\n".join(lines)
 
