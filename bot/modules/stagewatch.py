@@ -222,6 +222,12 @@ def _build_card(p: dict) -> str:
     ]
     for w in (p.get("warnings") or []):
         lines.append(f"⚠️ {w}")
+    gate_reason = p.get("gate_reason") or ""
+    if "crowd" in gate_reason:   # only surface the crowd-tilt piece, not the whole gate reason (redundant with CVD line above)
+        crowd_note = gate_reason.split("|")
+        for part in crowd_note:
+            if "crowd" in part:
+                lines.append(f"⚠️{part.strip()}")
     if p.get("auto"):
         lines.append("⚠️ _proxy gate — check aggr 15m before you tap Approve_")
     lines.append(f"🕐 {_bxl_now_str()}")
