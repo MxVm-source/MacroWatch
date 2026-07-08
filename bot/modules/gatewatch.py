@@ -277,6 +277,7 @@ def _build_auto_plan(symbol: str, verdict: dict, structure: dict):
         "total_size": size,
         "lev":        GATE_LEV,
         "grade":      grade,
+        "entry_mode": verdict.get("entry_mode"),
     }
 
 

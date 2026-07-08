@@ -186,9 +186,21 @@ def _build_card(p: dict) -> str:
     plan = compute_plan(p["side"], p["entry"], p["sl"], p["tps"], p["lev"], liq)
     emoji = "🟢" if p["side"] == "LONG" else "🔴"
 
+    entry_mode = p.get("entry_mode")
+    if entry_mode == "intrabar":
+        urgency = "⚡ *INTRABAR — with-trend, act now* (resting limit, no candle wait)"
+    elif entry_mode == "await_4h":
+        urgency = "⏳ *4H-CONFIRMED — counter-trend, already closed* (take your time)"
+    else:
+        urgency = None
+
     lines = [
         ("🤖 *AUTO-PROPOSED — conditions aligned (proxy)*" if p.get("auto")
          else "📋 *STAGE — awaiting approval*") + f"  ({p['grade']}-grade)",
+    ]
+    if urgency:
+        lines.append(urgency)
+    lines += [
         f"━━━━━━━━━━━━━━━━━━━━━━━━",
         f"Pair: {p['symbol']}",
         f"Side: {emoji} {p['side']}   Lev: {p['lev']:g}x",
