@@ -69,6 +69,9 @@ _block_reason: dict = {}
 # ── Row-2 flush guard + Row-3 break-confirmation config ─────────────────────
 FLUSH_PCT   = float(os.getenv("GATE_FLUSH_PCT", "1.5"))   # recent % move into a level = knife
 BREAK_BUFFER = float(os.getenv("GATE_BREAK_BUFFER", "0.001"))  # 0.1% past the level
+# Mute the 4H BREAKOUT/BREAKDOWN continuation pings. Break detection, the retest
+# watch it arms, and Phase-0 logging all still run — this only silences the ping.
+BREAK_ALERTS = os.getenv("GATE_BREAK_ALERTS", "true").strip().lower() not in ("0", "false", "no", "off")
 _break_state: dict = {}   # symbol -> {"ceiling": x, "floor": y}, refreshed each 4H close
 
 
@@ -593,15 +596,18 @@ def check_break(symbol: str = "BTCUSDT"):
         "level": verdict["level"],
         "side": "long" if verdict["state"] == "BREAKOUT" else "short",
     }
-    send_text(
-        f"{e} *{verdict['state']} — {symbol}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"4H close {spot:,.0f} {'>' if verdict['state']=='BREAKOUT' else '<'} "
-        f"{verdict['level']:,.0f}\n"
-        f"{verdict['reason']}\n"
-        f"→ continuation {verdict['side']} — wait for retest, confirm on aggr\n"
-        f"🕐 {_bxl_now_str()}"
-    )
+    if BREAK_ALERTS:
+        send_text(
+            f"{e} *{verdict['state']} — {symbol}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"4H close {spot:,.0f} {'>' if verdict['state']=='BREAKOUT' else '<'} "
+            f"{verdict['level']:,.0f}\n"
+            f"{verdict['reason']}\n"
+            f"→ continuation {verdict['side']} — wait for retest, confirm on aggr\n"
+            f"🕐 {_bxl_now_str()}"
+        )
+    else:
+        log.info(f"break alert {symbol} {verdict['state']} @ {verdict['level']} (muted)")
     _log({
         "ts": datetime.now(timezone.utc).isoformat(), "symbol": symbol,
         "spot": spot, "state": verdict["state"], "side": verdict["side"],
