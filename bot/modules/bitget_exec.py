@@ -124,6 +124,17 @@ def _post(path: str, body: dict) -> dict:
                         "to avoid this retry on the next boot.")
             res = _signed_request_elite("POST", path, params=None, body=body)
             return res.get("data") or {}
+        if "43011" in str(e) and "holdSide" in str(e) and "holdSide" in body:
+            # holdSide vocabulary mismatch: one-way wants buy/sell, hedge wants long/short.
+            # Flip to the other vocabulary and retry once.
+            _flip = {"long": "buy", "short": "sell", "buy": "long", "sell": "short"}
+            old = body.get("holdSide")
+            if old in _flip:
+                body = {**body, "holdSide": _flip[old]}
+                log.warning(f"43011 holdSide: retrying with holdSide '{_flip[old]}' instead of "
+                            f"'{old}' (one-way uses buy/sell, hedge uses long/short).")
+                res = _signed_request_elite("POST", path, params=None, body=body)
+                return res.get("data") or {}
         raise
 
 
@@ -156,12 +167,21 @@ def place_entry(symbol: str, side: str, entry: float, size: float,
     return _post("/api/v2/mix/order/place-order", body)
 
 
+def _hold_side(side: str) -> str:
+    """holdSide vocabulary differs by position mode (Bitget V2, verified vs CCXT):
+       one-way position → 'buy'/'sell'  ·  hedge position → 'long'/'short'.
+       Sending 'long'/'short' to a one-way account is rejected with 43011."""
+    if ONE_WAY_MODE:
+        return "buy" if side == "LONG" else "sell"
+    return "long" if side == "LONG" else "short"
+
+
 def place_ladder_tps(symbol: str, side: str, tps: list, sizes: list,
                      client_oid_base: str) -> list:
     """
     One reduce-side profit_plan per TP rung. sizes aligned to tps (base coin).
     """
-    hold = "long" if side == "LONG" else "short"
+    hold = _hold_side(side)
     out = []
     for i, (tp, sz) in enumerate(zip(tps, sizes), 1):
         if not tp or sz <= 0:
@@ -187,7 +207,7 @@ def set_position_sl(symbol: str, side: str, sl_price: float) -> dict:
     Ratchet primitive. Sets/updates the WHOLE-POSITION stop loss. Replaces any
     existing position SL (this is how BE / TP1 ratchet steps are applied).
     """
-    hold = "long" if side == "LONG" else "short"
+    hold = _hold_side(side)
     body = {
         "marginCoin":  BITGET_MARGIN_COIN,
         "productType": BITGET_PRODUCT_TYPE,
