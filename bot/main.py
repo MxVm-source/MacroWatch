@@ -36,8 +36,9 @@ from bot.utils import send_text, get_updates
 
 import bot.modules.fedwatch        as fedwatch
 import bot.modules.market_structure_module as market_structure
-import bot.modules.stagewatch              as stagewatch
-import bot.modules.gatewatch               as gatewatch
+# stagewatch / gatewatch removed 2026-07: MacroWatch is read-only/observational again.
+# Auto-propose, Approve/arm, TP ladder, ratchet and flatten now live nowhere in this
+# repo — signal generation moved to confluence_live.py (Hetzner, alert-only).
 import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.correlwatch     as correlwatch
 import bot.modules.whalewatch      as whalewatch
@@ -348,13 +349,6 @@ def _poll_positions():
                 # Preserve opened_at across snapshots
                 if cur["has_position"] and prev and prev.get("opened_at"):
                     cur["opened_at"] = prev["opened_at"]
-
-                # Stage loop: drive the auto-ratchet off the elite diff
-                if acct["name"] == "elite" and prev is not None:
-                    try:
-                        stagewatch.on_position_change(sym, prev, cur)
-                    except Exception as e:
-                        log.warning(f"stagewatch {sym}: {e}")
 
                 _POS_SNAPSHOT[key] = cur
 
@@ -937,27 +931,8 @@ def start_scheduler():
     print("📊 MarketStructure scheduled (4H close +2min UTC) ✅ "
           "[ladder + transitions gated by MS_BROADCAST / MS_TRANSITION_ALERTS]", flush=True)
 
-    # ── Gate auto-propose scan (intrabar with-trend GO → stage card) ──
-    if hasattr(gatewatch, "scan"):
-        SCHED.add_job(
-            gatewatch.scan, "interval", minutes=3,
-            id="gate_scan", max_instances=1, misfire_grace_time=120,
-            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=45),
-        )
-        print("⚡ Gate auto-propose scan scheduled (3 min) ✅", flush=True)
-    else:
-        print("⚠️ gatewatch.scan missing — auto-propose scan NOT scheduled", flush=True)
-
-    # ── Break confirmation on the 4H close (Row 3: close_break) ──
-    if hasattr(gatewatch, "check_break"):
-        SCHED.add_job(
-            gatewatch.check_break, "cron",
-            hour="0,4,8,12,16,20", minute=3, timezone="UTC",
-            id="gate_break", max_instances=1, misfire_grace_time=300,
-        )
-        print("🚀 Break confirmation scheduled (4H close +3min UTC) ✅", flush=True)
-    else:
-        print("⚠️ gatewatch.check_break missing — break confirmation NOT scheduled", flush=True)
+    # Gate auto-propose scan and 4H break confirmation removed with gatewatch.
+    # MarketStructure (above) remains the 4H read; it places no orders.
 
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
@@ -1118,17 +1093,8 @@ def command_loop():
             for upd in data.get("result", []):
                 offset   = upd["update_id"] + 1
 
-                # ── Button tap (approve/skip) ────────────────────────
-                cb = upd.get("callback_query")
-                if cb:
-                    if chat_allow:
-                        cb_chat = str(((cb.get("message") or {}).get("chat") or {}).get("id") or "")
-                        if cb_chat and cb_chat != chat_allow:
-                            continue
-                    try:
-                        stagewatch.handle_callback(cb)
-                    except Exception as e:
-                        print(f"[callback] {e}", flush=True)
+                # Button taps ignored: the approve/skip execution loop is gone.
+                if upd.get("callback_query"):
                     continue
 
                 msg      = upd.get("message") or {}
@@ -1182,40 +1148,7 @@ def command_loop():
 
 def _handle_command(text: str, text_raw: str):
 
-    # ── /scandiag ─ what the auto-propose scan sees right now ─────────────────
-    if text.startswith("/scandiag"):
-        try:
-            parts = text.split()
-            gatewatch.scan_report(parts[1] if len(parts) > 1 else "BTCUSDT")
-        except Exception as e:
-            send_text(f"🔍 [Scandiag] {e}")
-        return
-
-    # ── /gate ─ on-demand gate read ───────────────────────────────────────────
-    if text.startswith("/gate"):
-        try:
-            parts = text.split()
-            gatewatch.run_gate(parts[1] if len(parts) > 1 else "BTCUSDT")
-        except Exception as e:
-            send_text(f"🎯 [Gate] {e}")
-        return
-
-    # ── /stage ─ manually stage a plan with approve buttons ───────────────────
-    if text.startswith("/stage"):
-        try:
-            stagewatch.stage(text_raw)
-        except Exception as e:
-            send_text(f"📋 [Stage] {e}")
-        return
-
-    # ── /flatten ─ kill switch ────────────────────────────────────────────────
-    if text.startswith("/flatten"):
-        try:
-            parts = text_raw.split()
-            stagewatch.flatten_cmd(parts[1] if len(parts) > 1 else "")
-        except Exception as e:
-            send_text(f"🛑 [Stage] {e}")
-        return
+    # /scandiag, /gate, /stage and /flatten removed with gatewatch/stagewatch.
 
     # ── /help ────────────────────────────────────────────────────────────────
     if text.startswith("/help"):
