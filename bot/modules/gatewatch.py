@@ -345,7 +345,15 @@ def _propose_at_close(symbol: str):
     Evaluates fresh, right at the close, same LIVE/NO_TAKE/MID_RANGE gate as
     always — the _last_go dedup is shared with _scan_one, so a setup that
     already fired intrabar won't double-propose here.
+
+    Respects GATE_AUTO_SCAN: since check_break -> _propose_at_close became the only
+    card-broadcast path, gating scan() alone left cards firing at every 4H close with
+    GATE_AUTO_SCAN=false set. The toggle now means "no auto-proposed cards from any
+    path". Break detection, retest watch and Phase-0 logging are untouched.
     """
+    if not GATE_AUTO_SCAN:
+        log.info(f"{symbol}: 4H-close auto-propose suppressed (GATE_AUTO_SCAN=false)")
+        return
     structure = _get_structure(symbol)
     cvd       = get_cvd(symbol)
     flush     = _flush_flag(cvd)
