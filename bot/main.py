@@ -36,9 +36,6 @@ from bot.utils import send_text, get_updates
 
 import bot.modules.fedwatch        as fedwatch
 import bot.modules.market_structure_module as market_structure
-# stagewatch / gatewatch removed 2026-07: MacroWatch is read-only/observational again.
-# Auto-propose, Approve/arm, TP ladder, ratchet and flatten now live nowhere in this
-# repo — signal generation moved to confluence_live.py (Hetzner, alert-only).
 import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.correlwatch     as correlwatch
 import bot.modules.whalewatch      as whalewatch
@@ -50,7 +47,6 @@ import bot.modules.optionswatch    as optionswatch
 import bot.modules.vixwatch        as vixwatch
 import bot.modules.intelwatch      as intelwatch
 import bot.modules.reportwatch     as reportwatch
-import bot.modules.tradewatch      as tradewatch
 
 log = logging.getLogger("main")
 
@@ -263,8 +259,7 @@ def _poll_positions():
                         f"🕐 {iso_utc_now()}"
                     )
                     if rich:
-                        # Elite only — enriched TradeWatch plan card
-                        tradewatch.on_position_opened(sym, account=acct["name"])
+                        pass  # TradeWatch plan card removed
 
                 # ── Position closed ──────────────────────────────────────
                 elif prev["has_position"] and not cur["has_position"]:
@@ -931,7 +926,6 @@ def start_scheduler():
     print("📊 MarketStructure scheduled (4H close +2min UTC) ✅ "
           "[ladder + transitions gated by MS_BROADCAST / MS_TRANSITION_ALERTS]", flush=True)
 
-    # Gate auto-propose scan and 4H break confirmation removed with gatewatch.
     # MarketStructure (above) remains the 4H read; it places no orders.
 
     SCHED.start()
@@ -1148,7 +1142,6 @@ def command_loop():
 
 def _handle_command(text: str, text_raw: str):
 
-    # /scandiag, /gate, /stage and /flatten removed with gatewatch/stagewatch.
 
     # ── /help ────────────────────────────────────────────────────────────────
     if text.startswith("/help"):
@@ -1182,14 +1175,10 @@ def _handle_command(text: str, text_raw: str):
             "`/health` — Full system status\n"
             "`/restart` — Trigger clean poll of all modules\n"
             "`/status` — ATRb v2 live strategy status (indicators + regime)\n"
-            "`/bot` — ATRb v2 current open position(s)\n"
-            "`/live` — TraderWatch current open position(s)\n"
             "`/structure` — 4H S/R + regime + funding/OI (BTC or ETH)\n"
-            "`/cvd_log` — last 10 CVD trigger verdicts (add a number for more)\n"
             "`/bot_challenge` — ATRb v2 $1k → $100k progress\n"
             "`/live_challenge` — TraderWatch $1k → $10k progress\n"
             "`/report` — Last 7 days trades + P&L\n"
-            "`/plan` — Post enriched plan for the open position (R:R, risk %, liq, ratchet)\n"
         )
         return
 
@@ -1394,22 +1383,6 @@ def _handle_command(text: str, text_raw: str):
             send_text(f"🤖 [Report] Error: {e}")
         return
 
-    # ── /bot → ATRb v2 systematic live state ──────────────────────────────────
-    if text.startswith("/bot") and not text.startswith("/bot_challenge"):
-        try:
-            tradewatch.show_bot_state()
-        except Exception as e:
-            send_text(f"🤖 [Bot State] Error: {e}")
-        return
-
-    # ── /live → TraderWatch discretionary live state ──────────────────────────
-    if text.startswith("/live") and not text.startswith("/live_challenge"):
-        try:
-            tradewatch.show_live_state()
-        except Exception as e:
-            send_text(f"🎯 [Live State] Error: {e}")
-        return
-
     # ── /structure [BTC|ETH] — live 4H S/R + regime + funding/OI ─────────────
     if text.startswith("/structure"):
         try:
@@ -1418,26 +1391,6 @@ def _handle_command(text: str, text_raw: str):
             market_structure.show_structure(sym)
         except Exception as e:
             send_text(f"📊 [MarketStructure] Error: {e}")
-        return
-
-    # ── /cvd_log [N] — last N CVD trigger verdicts ────────────────────────────
-    if text.startswith("/cvd_log"):
-        try:
-            parts = text.split()
-            n = int(parts[1]) if len(parts) > 1 else 10
-            market_structure.show_cvd_log(n)
-        except Exception as e:
-            send_text(f"📊 [CVD Log] Error: {e}")
-        return
-
-    # ── /plan ─────────────────────────────────────────────────────────────────
-    if text.startswith("/plan"):
-        try:
-            parts = text.split()
-            sym = parts[1].upper() if len(parts) > 1 else ""
-            tradewatch.show_plan(sym)
-        except Exception as e:
-            send_text(f"📋 [TradeWatch] Error: {e}")
         return
 
 
