@@ -90,8 +90,8 @@ BOT_CONFIG = {
     "symbols":      ["ETHUSDT"],
     "signer":       "main",
     "footer_lines": [
-        "_Fully automated. No discretion. No emotion._",
-        "_TraderWatch discretionary trading is separate — private group._",
+        "_Rules-based algorithm. No human intervention._",
+        "_Strategy under review — challenge paused._",
     ],
     "follow_link":  None,        # ATRb v2 copy-trading not yet live
     "link_label":   None,
