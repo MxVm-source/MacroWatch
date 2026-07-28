@@ -861,13 +861,15 @@ def start_scheduler():
     else:
         print("🐋 WhaleWatch disabled (ETHERSCAN_API_KEY not set)", flush=True)
 
-    # ── Challenge update — Tuesday 09:15 (public channel)
-    if os.getenv("PUBLIC_CHAT_ID"):
-        SCHED.add_job(
-            _job_challenge_update, "cron", day_of_week="tue", hour=9, minute=15,
-            id="challenge_update", max_instances=1,
-        )
-        print("🎯 Challenge Update scheduled (Tue 09:15) ✅", flush=True)
+    # ── Challenge update — PAUSED (Tuesday 09:15)
+    # Temporarily disabled — ATRb v2 challenge paused pending strategy review.
+    # Re-enable by uncommenting the block below.
+    # if os.getenv("PUBLIC_CHAT_ID"):
+    #     SCHED.add_job(
+    #         _job_challenge_update, "cron", day_of_week="tue", hour=9, minute=15,
+    #         id="challenge_update", max_instances=1,
+    #     )
+    #     print("🎯 Challenge Update scheduled (Tue 09:15) ✅", flush=True)
 
     # ── FedWatch Monday rate probability push — Monday 08:00
     SCHED.add_job(
