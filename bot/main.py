@@ -35,6 +35,7 @@ from bot.utils import send_text, get_updates
 
 
 import bot.modules.fedwatch        as fedwatch
+import bot.modules.dailybrief      as dailybrief
 import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.correlwatch     as correlwatch
 import bot.modules.whalewatch      as whalewatch
@@ -57,6 +58,7 @@ STARTED_AT_UTC = datetime.now(timezone.utc)
 # which read os.getenv("PUBLIC_CHAT_ID") directly in their own modules.
 # main.py itself no longer sends to public directly.
 PUBLIC_CHAT_ID = os.getenv("PUBLIC_CHAT_ID", "")
+ADMIN_USER_ID  = os.getenv("ADMIN_USER_ID", "")   # Telegram user ID — /monthly_update restricted to this
 
 # ─── PositionWatch state ─────────────────────────────────────────────────────
 # Tracks last known snapshot per symbol so we can detect changes.
@@ -112,7 +114,13 @@ SCHED = BackgroundScheduler(timezone=os.getenv("TIMEZONE", "Europe/Brussels"))
 
 def _job_trumpwatch():
     try:
+        before = len(trumpwatch_live.STATE.get("seen", {}))
         trumpwatch_live.poll_once()
+        after  = len(trumpwatch_live.STATE.get("seen", {}))
+        if after > before:
+            # New alerts fired — record count for daily recap
+            for _ in range(after - before):
+                dailybrief.record_trump_alert()
     except Exception as e:
         _err("TrumpWatch", e)
 
@@ -806,6 +814,22 @@ def start_scheduler():
     )
     print("📊 MacroWatch Weekly Brief scheduled (Mon 09:00) ✅", flush=True)
 
+    # ── Daily Morning Brief — 08:00 Brussels (private only)
+    SCHED.add_job(
+        lambda: dailybrief.send_morning_brief(_get_modules()),
+        "cron", hour=8, minute=0,
+        id="morning_brief", max_instances=1,
+    )
+    print("🌅 Morning Brief scheduled (daily 08:00 Brussels) ✅", flush=True)
+
+    # ── Daily Evening Recap — 21:00 Brussels (private only)
+    SCHED.add_job(
+        lambda: dailybrief.send_evening_recap(_get_modules()),
+        "cron", hour=21, minute=0,
+        id="evening_recap", max_instances=1,
+    )
+    print("🌙 Evening Recap scheduled (daily 21:00 Brussels) ✅", flush=True)
+
     # ── Strategy Recap — Friday 09:00 (trades + positioning)
     SCHED.add_job(
         _job_strategy_recap, "cron", day_of_week="fri", hour=9, minute=0,
@@ -1142,7 +1166,12 @@ def _handle_command(text: str, text_raw: str):
             "`/fedwatch` — Next Fed event\n"
             "`/fed_diag` — Calendar + rate probability\n\n"
             "📊 *MacroWatch Weekly*\n"
-            "`/weekly` — Full weekly market brief\n\n"
+            "`/weekly` — Full weekly market brief (private)\n"
+            "`/pulse` — Investor weekly pulse (preview)\n"
+            "`/monthly_update` — Send monthly investor update (admin only)\n\n"
+            "📅 *Daily Briefs*\n"
+            "`/morning` — Morning brief on demand\n"
+            "`/evening` — Evening recap on demand\n\n"
             "📡 *CorrelWatch*\n"
             "`/correl_diag` — DXY vs BTC last reading\n\n"
             "💸 *FundingWatch*\n"
@@ -1253,6 +1282,51 @@ def _handle_command(text: str, text_raw: str):
             send_weekly_brief(_get_modules())
         except Exception as e:
             send_text(f"📊 [WeeklyBrief] Error: {e}")
+        return
+
+    # ── /pulse — investor weekly pulse (on-demand preview) ───────────────────
+    if text.startswith("/pulse"):
+        try:
+            from bot.modules.weeklybrief import build_weekly_pulse
+            send_text(build_weekly_pulse(_get_modules()))
+        except Exception as e:
+            send_text(f"⚡ [Pulse] Error: {e}")
+        return
+
+    # ── /morning — on-demand morning brief ───────────────────────────────────
+    if text.startswith("/morning"):
+        try:
+            dailybrief.send_morning_brief(_get_modules())
+        except Exception as e:
+            send_text(f"🌅 [Morning] Error: {e}")
+        return
+
+    # ── /evening — on-demand evening recap ───────────────────────────────────
+    if text.startswith("/evening"):
+        try:
+            dailybrief.send_evening_recap(_get_modules())
+        except Exception as e:
+            send_text(f"🌙 [Evening] Error: {e}")
+        return
+
+    # ── /monthly_update [outlook text] — admin only ───────────────────────────
+    if text.startswith("/monthly_update"):
+        user_id = str(upd.get("message", {}).get("from", {}).get("id", ""))
+        if ADMIN_USER_ID and user_id != ADMIN_USER_ID:
+            send_text("⚠️ This command is restricted.")
+            return
+        try:
+            parts    = text_raw.split(None, 1)
+            outlook  = parts[1].strip() if len(parts) > 1 else ""
+            if not outlook:
+                send_text("Usage: `/monthly_update Your outlook paragraph here`")
+                return
+            from bot.modules.weeklybrief import build_monthly_update, _send_public
+            msg = build_monthly_update(_get_modules(), outlook)
+            send_text(msg)
+            _send_public(msg)
+        except Exception as e:
+            send_text(f"📊 [MonthlyUpdate] Error: {e}")
         return
 
     # ── /correl_diag ─────────────────────────────────────────────────────────
