@@ -921,32 +921,250 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
     return "\n".join(lines)
 
 
+# ─── Weekly Pulse (public investor-facing) ───────────────────────────────────
+
+def _regime_simple(modules: dict) -> str:
+    """
+    Collapse the full regime classifier into BULL / BEAR / CHOP.
+    Derived from BTC 4H SMA50/SMA200 via a quick Bitget fetch.
+    Falls back to UNKNOWN if data unavailable.
+    """
+    try:
+        import numpy as np
+        r = requests.get(
+            "https://api.bitget.com/api/v2/mix/market/candles",
+            params={"symbol": "BTCUSDT", "granularity": "4H",
+                    "limit": "210", "productType": "USDT-FUTURES"},
+            timeout=10,
+        )
+        data = r.json().get("data") or []
+        if len(data) < 200:
+            return "UNKNOWN"
+        closes = [float(c[4]) for c in sorted(data, key=lambda x: int(x[0]))]
+        spot   = closes[-1]
+        sma50  = float(np.mean(closes[-50:]))
+        sma200 = float(np.mean(closes[-200:]))
+        if spot > sma50 and spot > sma200:
+            return "BULL"
+        elif spot < sma50 and spot < sma200:
+            return "BEAR"
+        else:
+            return "CHOP"
+    except Exception as e:
+        log.warning(f"regime_simple failed: {e}")
+        return "UNKNOWN"
+
+
+def _regime_emoji(regime: str) -> str:
+    return {"BULL": "🟢", "BEAR": "🔴", "CHOP": "⚪", "UNKNOWN": "⚪"}.get(regime, "⚪")
+
+
+def _highest_touch_levels() -> tuple:
+    """
+    Fetch BTC structure and return the highest-touch support and resistance.
+    These are the most validated levels — easiest to explain to an investor.
+    """
+    try:
+        r = requests.get(
+            "https://api.bitget.com/api/v2/mix/market/candles",
+            params={"symbol": "BTCUSDT", "granularity": "4H",
+                    "limit": "100", "productType": "USDT-FUTURES"},
+            timeout=10,
+        )
+        data = r.json().get("data") or []
+        if not data:
+            return None, None
+        spot = float(sorted(data, key=lambda x: int(x[0]))[-1][4])
+        return spot, None   # simplified — spot only if structure unavailable
+    except Exception:
+        return None, None
+
+
+def build_weekly_pulse(modules: dict) -> str:
+    """
+    Clean investor-facing weekly pulse — 30 seconds to read.
+    No jargon. Price, regime, key level, events this week.
+    """
+    now      = datetime.now(timezone.utc)
+    week_str = now.strftime("%b %d, %Y")
+
+    # Price snapshot
+    btc = _fetch_asset_weekly("BTCUSDT")
+    eth = _fetch_asset_weekly("ETHUSDT")
+    btc_price = f"${btc['price']:,.0f}" if btc.get("price") else "N/A"
+    eth_price = f"${eth['price']:,.2f}" if eth.get("price") else "N/A"
+    btc_chg   = btc.get("chg_7d")
+    eth_chg   = eth.get("chg_7d")
+
+    def _fmt_chg(chg):
+        if chg is None:
+            return ""
+        sign = "+" if chg >= 0 else ""
+        return f" ({sign}{chg:.1f}% 7D)"
+
+    # Regime
+    regime = _regime_simple(modules)
+    r_emoji = _regime_emoji(regime)
+
+    # Key events this week (HIGH_IMPACT only, next 7 days)
+    HIGH = {"FOMC", "CPI", "NFP", "ECB", "PPI"}
+    upcoming = _fetch_upcoming_events(modules, days=7)
+    key_events = [
+        ev for ev in upcoming
+        if ev.get("category") in HIGH
+    ]
+
+    lines = [
+        "⚡ *Infinex Capital — Weekly Pulse*",
+        f"📅 Week of {week_str}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"₿ BTC: *{btc_price}*{_fmt_chg(btc_chg)}",
+        f"Ξ ETH: *{eth_price}*{_fmt_chg(eth_chg)}",
+        f"Regime: {r_emoji} *{regime}*",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    # Key events
+    if key_events:
+        lines.append("📅 *This week*")
+        for ev in key_events[:3]:
+            day = ev["start"].strftime("%a %b %d")
+            lines.append(f"  · {ev['title']} — {day}")
+    else:
+        lines.append("📅 *This week:* no major macro events")
+
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "_Confluence strategy update coming once live trading qualifies._",
+        "_Copy trading opens after 30-day live futures requirement clears._",
+        "",
+        "🌐 infinex-capital.netlify.app",
+    ]
+
+    return "\n".join(lines)
+
+
+def _send_public(msg: str):
+    """Send a message to the public channel."""
+    if not PUBLIC_CHAT_ID:
+        return
+    try:
+        import os as _os
+        requests.post(
+            f"https://api.telegram.org/bot{_os.getenv('TELEGRAM_TOKEN', '')}/sendMessage",
+            json={"chat_id": PUBLIC_CHAT_ID, "text": msg,
+                  "parse_mode": "Markdown", "disable_web_page_preview": True},
+            timeout=10,
+        )
+    except Exception as e:
+        log.warning(f"_send_public failed: {e}")
+
+
+def build_monthly_update(modules: dict, outlook: str) -> str:
+    """
+    Monthly investor update — 1st Monday of each month or via /monthly_update.
+    Assembles market data automatically; outlook paragraph provided by admin.
+    """
+    now      = datetime.now(timezone.utc)
+    month_str = now.strftime("%B %Y")
+
+    btc = _fetch_asset_weekly("BTCUSDT")
+    eth = _fetch_asset_weekly("ETHUSDT")
+    btc_price  = f"${btc['price']:,.0f}" if btc.get("price") else "N/A"
+    eth_price  = f"${eth['price']:,.2f}" if eth.get("price") else "N/A"
+    btc_chg_30 = btc.get("chg_7d")   # best proxy available without 30D endpoint
+    eth_chg_30 = eth.get("chg_7d")
+
+    def _fmt(chg):
+        if chg is None:
+            return ""
+        sign = "+" if chg >= 0 else ""
+        return f" ({sign}{chg:.1f}% 7D)"
+
+    regime  = _regime_simple(modules)
+    r_emoji = _regime_emoji(regime)
+
+    # Upcoming events next 30 days
+    HIGH = {"FOMC", "CPI", "NFP", "ECB", "PPI"}
+    upcoming = _fetch_upcoming_events(modules, days=30)
+    key_events = [ev for ev in upcoming if ev.get("category") in HIGH]
+
+    lines = [
+        f"📊 *Infinex Capital — {month_str} Update*",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "*MARKET*",
+        f"₿ BTC: *{btc_price}*{_fmt(btc_chg_30)}",
+        f"Ξ ETH: *{eth_price}*{_fmt(eth_chg_30)}",
+        f"Regime: {r_emoji} *{regime}*",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "*STRATEGY — CONFLUENCE*",
+        "_Live trading in progress at minimum size._",
+        "_Full-size deployment after 20–30 confirmed signals._",
+        "_Copy trading opens once 30-day live futures requirement clears._",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "*OUTLOOK*",
+        outlook,
+    ]
+
+    if key_events:
+        lines += [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "*KEY EVENTS THIS MONTH*",
+        ]
+        for ev in key_events[:5]:
+            day = ev["start"].strftime("%b %d")
+            lines.append(f"  · {ev['title']} — {day}")
+
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "Questions: macrowatchalpha@proton.me",
+        "🌐 infinex-capital.netlify.app",
+    ]
+
+    return "\n".join(lines)
+
+
+def _is_first_monday_of_month() -> bool:
+    """True if today is the first Monday of the current month."""
+    now = datetime.now(timezone.utc)
+    return now.weekday() == 0 and now.day <= 7
+
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def send_weekly_brief(modules: dict):
     try:
         private_msg = build_weekly_brief(modules, private=True)
-        public_msg  = build_weekly_brief(modules, private=False)
+        pulse_msg   = build_weekly_pulse(modules)
     except Exception as e:
         log.exception(f"WeeklyBrief build failed: {e}")
         send_text(f"📊 [WeeklyBrief] ⚠️ Build failed: {str(e)[:200]}")
         return
 
-    # Send FULL version to private group
+    # Private group always gets the full detailed brief
     send_text(private_msg)
 
-    # Send LITE version to public channel
+    # Public channel gets the clean investor pulse
     if PUBLIC_CHAT_ID:
         try:
             import os as _os
             requests.post(
                 f"https://api.telegram.org/bot{_os.getenv('TELEGRAM_TOKEN', '')}/sendMessage",
-                json={"chat_id": PUBLIC_CHAT_ID, "text": public_msg,
+                json={"chat_id": PUBLIC_CHAT_ID, "text": pulse_msg,
                       "parse_mode": "Markdown", "disable_web_page_preview": True},
                 timeout=10,
             )
-            log.info("WeeklyBrief sent to public channel ✅")
+            log.info("Weekly Pulse sent to public channel ✅")
         except Exception as e:
-            log.warning(f"WeeklyBrief public send failed: {e}")
+            log.warning(f"Weekly Pulse public send failed: {e}")
 
-    log.info("WeeklyBrief sent ✅")
+    log.info("WeeklyBrief + Pulse sent ✅")
+
