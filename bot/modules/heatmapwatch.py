@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 
 from bot.utils import send_text
+from bot.public.publisher import send_public_photo
 
 log = logging.getLogger("heatmapwatch")
 
@@ -30,7 +31,6 @@ APIFY_ACTOR_ID    = "hamdo~coinglass-liquidation-heatmap"
 APIFY_BASE        = "https://api.apify.com/v2"
 TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.getenv("CHAT_ID", "")
-PUBLIC_CHAT_ID    = os.getenv("PUBLIC_CHAT_ID", "")
 
 # Cooldown for on-demand /heatmap calls (prevents spend blowout)
 COOLDOWN_DAYS = 7
@@ -186,11 +186,10 @@ def send_heatmap(coin: str = "BTC", target: str = "private", timeframe: str = "2
             f"🔥 *Infinex Capital — {coin} Liquidation Heatmap ({tf_label})*\n"
             f"_Intelligence provided by MacroWatch 🧠_\n\n"
             f"_Source: CoinGlass · {now.strftime('%b %d, %Y')}_\n\n"
-            f"Yellow/red zones show where liquidation clusters sit. "
-            f"Price tends to gravitate toward these levels — "
-            f"especially the largest ones."
+            f"Yellow/red zones represent reported liquidation clusters. "
+            f"They are market context, not a forecast or trading signal."
         )
-        chat_id = PUBLIC_CHAT_ID
+        ok = send_public_photo(result["image_url"], caption, feature="heatmap")
     else:
         caption = (
             f"🔥 *{coin} Liquidation Heatmap ({tf_label})*\n"
@@ -198,9 +197,7 @@ def send_heatmap(coin: str = "BTC", target: str = "private", timeframe: str = "2
             f"Yellow/red = large liquidation clusters.\n"
             f"Price often sweeps these zones."
         )
-        chat_id = TELEGRAM_CHAT_ID
-
-    ok = _send_photo(chat_id, result["image_url"], caption)
+        ok = _send_photo(TELEGRAM_CHAT_ID, result["image_url"], caption)
     if not ok and target == "private":
         # Fallback: send URL as text if photo send fails
         send_text(f"🔥 {coin} Heatmap: {result['image_url']}")

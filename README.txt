@@ -1,24 +1,59 @@
-MacroWatch Clean Project (No SwingWatch)
-=======================================
+MacroWatch
+==========
 
-Contents:
-- bot/main.py             : entrypoint, only TrumpWatch + FedWatch
-- bot/utils.py            : Telegram helpers (send_text, get_updates)
-- bot/datafeed_bitget.py  : Bitget ticker fetch
-- bot/modules/trumpwatch.py       : mock-only Trump headlines (manual/interval)
-- bot/modules/trumpwatch_live.py  : real TrumpWatch (X + Truth Social, market filter)
-- bot/modules/fedwatch.py         : FedWatch (ICS + BTC/ETH reaction, Brussels time)
+MacroWatch is the market-intelligence engine behind the INFINEX private and
+public Telegram feeds.
 
-To use:
-1. Drop the `bot/` folder into your GitHub repo (or merge with your existing one).
-2. Set env vars on Render:
-   - TELEGRAM_TOKEN
-   - CHAT_ID
-   - ENABLE_TRUMPWATCH_LIVE=true
-   - ENABLE_FEDWATCH=true
-   - FED_ICS_URL=https://www.federalreserve.gov/feeds/calendar.ics
-   - TW_SOURCE_URL_X=https://nitter.net/TrumpTruthOnX/rss
-   - TW_SOURCE_NAME_X=X (Mirror)
-   - TW_SOURCE_URL_TS=https://trumpstruth.org/api/latest?limit=10
-   - TW_SOURCE_NAME_TS=Truth Social
-3. Start command on Render:  python -m bot.main
+Runtime
+-------
+- GitHub: source of truth and CI
+- Render: long-running Background Worker
+- APScheduler: polling and scheduled jobs inside the worker
+- Telegram: private trader feed + read-only public INFINEX feed
+
+Start command:
+  python -m bot.main
+
+Public Feed v2
+--------------
+The public feed is intentionally low-noise. Private modules such as TrumpWatch,
+FedWatch, VIX, funding, OI and positions continue to run independently.
+
+All public text/photo publishing is gated through bot/public/publisher.py.
+
+Default public policy:
+- Weekly Market Brief: ON
+- Strategy recap: OFF
+- Weekly Intel: OFF
+- Challenge: OFF
+- Heatmap: OFF
+- Research: OFF until implemented
+- Market alerts: OFF until implemented
+
+Render environment switches:
+  PUBLIC_ENABLED=true
+  PUBLIC_ENABLE_WEEKLY=true
+  PUBLIC_ENABLE_STRATEGY=false
+  PUBLIC_ENABLE_INTEL=false
+  PUBLIC_ENABLE_CHALLENGE=false
+  PUBLIC_ENABLE_HEATMAP=false
+
+  PUBLIC_ENABLE_RESEARCH=false
+  PUBLIC_ENABLE_MARKET_ALERTS=false
+  PUBLIC_DRY_RUN=false
+
+Emergency public kill switch:
+  PUBLIC_ENABLED=false
+
+Core Telegram environment:
+  TELEGRAM_TOKEN
+  CHAT_ID
+  PUBLIC_CHAT_ID
+
+Validation
+----------
+GitHub Actions runs on pull requests and on main/public-feed-v2:
+  python -m compileall -q bot
+  python -m unittest discover -s tests -p "test_*.py"
+
+Private-feed behavior is not changed by the public kill switch.

@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 
 from bot.utils import send_text
+from bot.public.publisher import send_public
 from bot.datafeed_bitget import (
     _signed_request, _to_float, _position_is_open,
     BITGET_PRODUCT_TYPE, BITGET_API_KEY, BITGET_BASE_URL,
@@ -27,7 +28,6 @@ from bot.datafeed_bitget import (
 
 log = logging.getLogger("strategyrecap")
 
-PUBLIC_CHAT_ID = os.getenv("PUBLIC_CHAT_ID", "")
 
 ASCENT_SYMBOLS = ["ETHUSDT"]
 
@@ -298,17 +298,8 @@ def send_strategy_recap():
     # Private group
     send_text(msg)
 
-    # Public channel
-    if PUBLIC_CHAT_ID:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN', '')}/sendMessage",
-                json={"chat_id": PUBLIC_CHAT_ID, "text": msg,
-                      "parse_mode": "Markdown", "disable_web_page_preview": True},
-                timeout=10,
-            )
-            log.info("Strategy recap sent to public ✅")
-        except Exception as e:
-            log.warning(f"Strategy recap public send failed: {e}")
+    # Public strategy posts are disabled by default and centrally gated.
+    if send_public(msg, feature="strategy"):
+        log.info("Strategy recap sent to public ✅")
 
     log.info("Strategy recap sent ✅")

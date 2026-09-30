@@ -29,6 +29,7 @@ import os
 from datetime import datetime, timezone, timedelta
 
 from bot.utils import send_text
+from bot.public.publisher import send_public
 from bot.datafeed_bitget import (
     _signed_request,
     _signed_request_elite,
@@ -397,25 +398,9 @@ def build_challenge(config: dict, send_fn=None) -> str:
 # ----- Public + Private send helper -----------------------------------------
 
 def _send_to_both(msg: str):
-    """Send to private (CHAT_ID) and public (PUBLIC_CHAT_ID) channels."""
+    """Send privately; public challenge posts remain centrally gated and off by default."""
     send_text(msg)
-    public_id = os.getenv("PUBLIC_CHAT_ID", "")
-    tg_token  = os.getenv("TELEGRAM_TOKEN", "")
-    if public_id and tg_token:
-        try:
-            import requests as _req
-            _req.post(
-                f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                json={
-                    "chat_id":      public_id,
-                    "text":         msg,
-                    "parse_mode":   "Markdown",
-                    "disable_web_page_preview": True,
-                },
-                timeout=10,
-            )
-        except Exception as e:
-            log.warning(f"Public channel send failed: {e}")
+    send_public(msg, feature="challenge")
 
 
 # ----- Entry points ---------------------------------------------------------
