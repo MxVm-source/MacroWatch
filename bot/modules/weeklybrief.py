@@ -9,7 +9,6 @@ Covers:
   - BTC/ETH/market cap weekly performance
   - S&P 500 + Nasdaq weekly change (stooq)
   - Liquidation summary (session data)
-  - Funding rate summary
   - Fear & Greed
   - Top crypto performers (CoinGecko trending)
   - ATRb v2 strategy performance (ETH)
@@ -312,15 +311,6 @@ def _fetch_liq_summary(modules: dict) -> dict:
         return {}
 
 
-def _fetch_funding_summary(modules: dict) -> dict:
-    """Pull funding rates from FundingWatch state."""
-    try:
-        rates = modules["fundingwatch"].STATE.get("last_rates", {})
-        return {k.replace("USDT", ""): v for k, v in rates.items() if v is not None}
-    except Exception:
-        return {}
-
-
 # ─── New fetchers for private version ────────────────────────────────────────
 
 def _fetch_fear_greed_history() -> list:
@@ -450,18 +440,6 @@ def _fetch_asset_structure(symbol: str) -> dict | None:
     except Exception as e:
         log.warning(f"Structure fetch failed for {symbol}: {e}")
         return None
-
-
-def _fetch_options_positioning(modules: dict) -> dict:
-    """Pull latest options snapshot from OptionsWatch for BTC + ETH."""
-    try:
-        state = modules["optionswatch"].STATE
-        return {
-            "btc": state.get("btc", {}) or {},
-            "eth": state.get("eth", {}) or {},
-        }
-    except Exception:
-        return {}
 
 
 def _fetch_stables_marketcap() -> dict:
@@ -638,7 +616,6 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
     macro_assets = _fetch_macro_assets_weekly()
     fg       = _fetch_fear_greed()
     liqs     = _fetch_liq_summary(modules)
-    funding  = _fetch_funding_summary(modules)
 
     btc = crypto.get("bitcoin", {})
     eth = crypto.get("ethereum", {})
@@ -789,19 +766,6 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
             "",
         ]
 
-    # Funding rates — PRIVATE ONLY
-    if private and funding:
-        lines += [
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "💸 *FUNDING RATES*",
-            "",
-        ]
-        for asset, rate in funding.items():
-            if rate is not None:
-                e = "🔴" if rate > 0.05 else "🟢" if rate < -0.03 else "⚪"
-                lines.append(f"  {e} {asset}: `{rate:+.4f}%`")
-        lines.append("")
-
     # ═══ SHARED SECTIONS (both public and private) ═══════════════════════════
 
     # Next Macro Calendar
@@ -896,33 +860,6 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
 
     # ═══ PRIVATE-ONLY SECTIONS ═══════════════════════════════════════════════
     if private:
-        # Options positioning (BTC + ETH with gap-to-current calc)
-        opt = _fetch_options_positioning(modules)
-        btc_opt = opt.get("btc", {}) or {}
-        eth_opt = opt.get("eth", {}) or {}
-
-        if btc_opt.get("max_pain") or eth_opt.get("max_pain"):
-            lines += [
-                "━━━━━━━━━━━━━━━━━━━━━━━━",
-                "⚙️ *OPTIONS POSITIONING*",
-                "",
-            ]
-
-            for label, data in [("BTC", btc_opt), ("ETH", eth_opt)]:
-                if not data.get("max_pain"):
-                    continue
-                pain   = data["max_pain"]
-                expiry = data.get("expiry_str", "N/A")
-                price  = data.get("price")
-
-                line = f"  *{label}*: Expiry `{expiry}` — Max Pain `${pain:,.0f}`"
-                if price:
-                    gap_pct = (price - pain) / price * 100
-                    direction = "above" if gap_pct > 0 else "below"
-                    line += f" (`{abs(gap_pct):.1f}%` {direction} current)"
-                lines.append(line)
-            lines.append("")
-
         # Stablecoin market cap
         stables = _fetch_stables_marketcap()
         if stables:
