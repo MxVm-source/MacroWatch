@@ -53,11 +53,8 @@ log = logging.getLogger("main")
 STARTED_AT_UTC = datetime.now(timezone.utc)
 
 # ─── Public channel config ───────────────────────────────────────────────────
-# PUBLIC_CHAT_ID used by challengewatch._send_to_both (ATRb v2 bot challenge)
-# and the weekly brief / strategy recap / weekly intel deep dive — all of
-# which read os.getenv("PUBLIC_CHAT_ID") directly in their own modules.
-# main.py itself no longer sends to public directly.
-PUBLIC_CHAT_ID = os.getenv("PUBLIC_CHAT_ID", "")
+# Public Telegram publishing is centralized in bot.public.publisher.
+# main.py never sends directly to PUBLIC_CHAT_ID.
 ADMIN_USER_ID  = os.getenv("ADMIN_USER_ID", "")   # Telegram user ID — /monthly_update restricted to this
 
 # ─── PositionWatch state ─────────────────────────────────────────────────────

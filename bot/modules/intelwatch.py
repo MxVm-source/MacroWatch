@@ -28,10 +28,10 @@ from datetime import datetime, timezone, timedelta
 import requests
 
 from bot.utils import send_text
+from bot.public.publisher import send_public
 
 log = logging.getLogger("intelwatch")
 
-PUBLIC_CHAT_ID   = os.getenv("PUBLIC_CHAT_ID", "")
 BITGET_BASE      = "https://api.bitget.com"
 PRODUCT_TYPE     = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
 
@@ -567,12 +567,7 @@ def send_weekly_intel(modules: dict):
     Wednesday 09:00 UTC scheduled Intel Deep Dive.
     Fires to BOTH private group and public channel.
     """
-    import os as _os
-    import requests as _req
-
     now = datetime.now(timezone.utc)
-    PUBLIC_CHAT_ID = _os.getenv("PUBLIC_CHAT_ID", "")
-    TG_TOKEN       = _os.getenv("TELEGRAM_TOKEN", "")
 
     try:
         msg = build_intel(
@@ -589,17 +584,8 @@ def send_weekly_intel(modules: dict):
     # Send text to private
     send_text(msg)
 
-    # Send text to public
-    if PUBLIC_CHAT_ID and TG_TOKEN:
-        try:
-            _req.post(
-                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                json={"chat_id": PUBLIC_CHAT_ID, "text": msg,
-                      "parse_mode": "Markdown", "disable_web_page_preview": True},
-                timeout=10,
-            )
-        except Exception as e:
-            log.warning(f"WeeklyIntel public send failed: {e}")
+    # Public intel posts are disabled by default and centrally gated.
+    send_public(msg, feature="intel")
 
     STATE["last_intel_utc"] = now
     log.info("WeeklyIntel (Wed) sent ✅")

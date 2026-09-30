@@ -2,7 +2,7 @@
 """
 MacroWatch Weekly Brief — Rich weekly market recap
 
-Published every Sunday 18:00 UTC.
+Published every Monday at 09:00 Europe/Brussels by APScheduler.
 Also available on demand via /weekly.
 
 Covers:
@@ -13,9 +13,10 @@ Covers:
   - Fear & Greed
   - Top crypto performers (CoinGecko trending)
   - ATRb v2 strategy performance (ETH)
-  - AI-generated narrative (Claude API)
+  - AI-generated narrative (OpenAI API)
 
-Fires to both private group and public channel.
+Private group receives the detailed brief. The public channel receives a separate,
+low-noise educational market brief through the central public publisher.
 """
 
 import logging
@@ -26,10 +27,10 @@ from datetime import datetime, timezone, timedelta
 import requests
 
 from bot.utils import send_text
+from bot.public.publisher import send_public
 
 log = logging.getLogger("weeklybrief")
 
-PUBLIC_CHAT_ID = os.getenv("PUBLIC_CHAT_ID", "")
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 BITGET_BASE    = "https://api.bitget.com"
 PRODUCT_TYPE   = os.getenv("BITGET_PRODUCT_TYPE", "USDT-FUTURES")
@@ -269,6 +270,34 @@ def _fetch_asset_weekly(symbol: str) -> float | None:
     except Exception as e:
         log.warning(f"Asset weekly fetch failed for {symbol}: {e}")
     return None
+
+
+def _fetch_asset_weekly_snapshot(symbol: str) -> dict:
+    """Return latest close and deterministic 7-day change from Bitget daily candles."""
+    try:
+        r = requests.get(
+            f"{BITGET_BASE}/api/v2/mix/market/candles",
+            params={"symbol": symbol, "granularity": "1D",
+                    "limit": "8", "productType": PRODUCT_TYPE},
+            timeout=8,
+        )
+        data = r.json()
+        if data.get("code") != "00000":
+            return {}
+        candles = data.get("data") or []
+        if len(candles) < 2:
+            return {}
+
+        candles = sorted(candles, key=lambda row: int(row[0]))
+        latest_close = float(candles[-1][4])
+        baseline_close = float(candles[0][4])
+        chg_7d = None
+        if baseline_close > 0:
+            chg_7d = round((latest_close - baseline_close) / baseline_close * 100, 2)
+        return {"price": latest_close, "chg_7d": chg_7d}
+    except Exception as e:
+        log.warning(f"Asset weekly snapshot failed for {symbol}: {e}")
+        return {}
 
 
 def _fetch_liq_summary(modules: dict) -> dict:
@@ -553,6 +582,29 @@ Data:
 - BTC dominance: {data.get('btc_dom', 'N/A')}%
 
 Be direct, no fluff. Max 40 words total. No emojis."""
+    return _call_openai(prompt, max_tokens=120)
+
+
+def _generate_public_narrative(data: dict) -> str:
+    """Educational public summary. It may only interpret supplied market data."""
+    prompt = f"""You write a read-only weekly market brief for general investors.
+Use only the supplied figures. Write exactly two short sentences:
+1. what changed across markets this week;
+2. why that combination can matter for investors.
+
+Do not give a trade, entry, target, forecast, recommendation, or certainty about causation.
+If a driver is not in the data, do not invent one. Plain English, max 45 words total.
+
+Data:
+BTC 7D: {data.get('btc')}%
+ETH 7D: {data.get('eth')}%
+S&P 500 7D: {data.get('sp500')}%
+Nasdaq 7D: {data.get('nasdaq')}%
+DXY 7D: {data.get('dxy')}%
+Gold 7D: {data.get('gold')}%
+Fear & Greed: {data.get('fear_greed')} ({data.get('fear_label')})
+Regime label: {data.get('regime')}
+"""
     return _call_openai(prompt, max_tokens=120)
 
 
@@ -981,86 +1033,129 @@ def _highest_touch_levels() -> tuple:
 
 
 def build_weekly_pulse(modules: dict) -> str:
-    """
-    Clean investor-facing weekly pulse — 30 seconds to read.
-    No jargon. Price, regime, key level, events this week.
-    """
-    now      = datetime.now(timezone.utc)
-    week_str = now.strftime("%b %d, %Y")
+    """Low-noise, educational weekly brief for the read-only public channel."""
+    now = datetime.now(timezone.utc)
+    week_start = (now - timedelta(days=7)).strftime("%b %d")
+    week_end = now.strftime("%b %d, %Y")
 
-    # Price snapshot
-    btc = _fetch_asset_weekly("BTCUSDT")
-    eth = _fetch_asset_weekly("ETHUSDT")
-    btc_price = f"${btc['price']:,.0f}" if btc.get("price") else "N/A"
-    eth_price = f"${eth['price']:,.2f}" if eth.get("price") else "N/A"
-    btc_chg   = btc.get("chg_7d")
-    eth_chg   = eth.get("chg_7d")
-
-    def _fmt_chg(chg):
-        if chg is None:
-            return ""
-        sign = "+" if chg >= 0 else ""
-        return f" ({sign}{chg:.1f}% 7D)"
-
-    # Regime
+    btc = _fetch_asset_weekly_snapshot("BTCUSDT")
+    eth = _fetch_asset_weekly_snapshot("ETHUSDT")
+    equities = _fetch_equity_weekly()
+    macro_assets = _fetch_macro_assets_weekly()
+    fg = _fetch_fear_greed()
     regime = _regime_simple(modules)
-    r_emoji = _regime_emoji(regime)
 
-    # Key events this week (HIGH_IMPACT only, next 7 days)
-    HIGH = {"FOMC", "CPI", "NFP", "ECB", "PPI"}
-    upcoming = _fetch_upcoming_events(modules, days=7)
-    key_events = [
-        ev for ev in upcoming
-        if ev.get("category") in HIGH
-    ]
+    def _fmt_price(value, decimals=0):
+        if value is None:
+            return "N/A"
+        return f"${value:,.{decimals}f}"
+
+    def _fmt_pct(value):
+        if value is None:
+            return "N/A"
+        return f"{value:+.2f}%"
+
+    def _regime_label(value):
+        return {
+            "BULL": "🟢 BULL",
+            "BEAR": "🔴 BEAR",
+            "CHOP": "⚪ CHOP",
+            "UNKNOWN": "⚪ UNKNOWN",
+        }.get(value, "⚪ UNKNOWN")
+
+    narrative = _generate_public_narrative({
+        "btc": btc.get("chg_7d"),
+        "eth": eth.get("chg_7d"),
+        "sp500": equities.get("sp500"),
+        "nasdaq": equities.get("nasdaq"),
+        "dxy": macro_assets.get("dxy"),
+        "gold": macro_assets.get("gold"),
+        "fear_greed": fg.get("value"),
+        "fear_label": fg.get("label"),
+        "regime": regime,
+    })
 
     lines = [
-        "⚡ *Infinex Capital — Weekly Pulse*",
-        f"📅 Week of {week_str}",
+        "📡 *INFINEX CAPITAL — WEEKLY MARKET BRIEF*",
+        "_Intelligence provided by MacroWatch 🧠_",
+        f"📅 {week_start} → {week_end}",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"₿ BTC: *{btc_price}*{_fmt_chg(btc_chg)}",
-        f"Ξ ETH: *{eth_price}*{_fmt_chg(eth_chg)}",
-        f"Regime: {r_emoji} *{regime}*",
+        "🌍 *MARKET SNAPSHOT*",
         "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"₿ BTC  *{_fmt_price(btc.get('price'))}*  `{_fmt_pct(btc.get('chg_7d'))}` 7D",
+        f"Ξ ETH  *{_fmt_price(eth.get('price'), 2)}*  `{_fmt_pct(eth.get('chg_7d'))}` 7D",
     ]
 
-    # Key events
-    if key_events:
-        lines.append("📅 *This week*")
-        for ev in key_events[:3]:
-            day = ev["start"].strftime("%a %b %d")
-            lines.append(f"  · {ev['title']} — {day}")
+    if equities.get("sp500") is not None:
+        lines.append(f"📈 S&P 500  `{_fmt_pct(equities['sp500'])}` 7D")
+    if equities.get("nasdaq") is not None:
+        lines.append(f"💻 Nasdaq   `{_fmt_pct(equities['nasdaq'])}` 7D")
+    if macro_assets.get("dxy") is not None:
+        lines.append(f"💵 DXY      `{_fmt_pct(macro_assets['dxy'])}` 7D")
+    if macro_assets.get("gold") is not None:
+        lines.append(f"🥇 Gold     `{_fmt_pct(macro_assets['gold'])}` 7D")
+
+    if fg.get("value"):
+        lines += ["", f"🎭 Fear & Greed: *{fg['value']} — {fg.get('label', 'N/A')}*"]
+    lines.append(f"Market regime: *{_regime_label(regime)}*")
+
+    if narrative:
+        lines += [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "🧠 *WHAT CHANGED — AND WHY IT MATTERS*",
+            "",
+            narrative,
+        ]
+
+    upcoming = [
+        ev for ev in _fetch_upcoming_macro(modules, days=7)
+        if ev.get("category") in {"FOMC", "CPI", "NFP", "ECB", "PPI"}
+    ]
+    lines += ["", "━━━━━━━━━━━━━━━━━━━━━━━━", "👀 *WHAT TO WATCH*"]
+    if upcoming:
+        for ev in upcoming[:4]:
+            try:
+                lines.append(f"• {ev['start'].strftime('%a %b %d')} — {ev.get('title', 'Macro event')}")
+            except Exception:
+                continue
     else:
-        lines.append("📅 *This week:* no major macro events")
+        lines.append("• No major scheduled macro event in the next 7 days.")
+
+    dxy = macro_assets.get("dxy")
+    if dxy is not None and abs(dxy) >= 0.5:
+        lesson = (
+            "The dollar is one part of global financial conditions. "
+            "A strong weekly DXY move can matter for risk assets, but it is not a standalone trading signal."
+        )
+    elif fg.get("value"):
+        lesson = (
+            "Fear & Greed measures current sentiment, not the future. "
+            "Extreme readings describe positioning and emotion; they do not guarantee a reversal."
+        )
+    else:
+        lesson = (
+            "Markets react to new information relative to expectations. "
+            "The surprise versus what was already priced in often matters more than the headline itself."
+        )
 
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "_Confluence strategy update coming once live trading qualifies._",
-        "_Copy trading opens after 30-day live futures requirement clears._",
+        "🎓 *ONE THING TO KNOW*",
         "",
-        "🌐 infinex-capital.netlify.app",
+        lesson,
+        "",
+        "_Educational market commentary — not a trading signal._",
+        "📡 INFINEX CAPITAL · MacroWatch 🧠",
     ]
-
     return "\n".join(lines)
 
 
 def _send_public(msg: str):
-    """Send a message to the public channel."""
-    if not PUBLIC_CHAT_ID:
-        return
-    try:
-        import os as _os
-        requests.post(
-            f"https://api.telegram.org/bot{_os.getenv('TELEGRAM_TOKEN', '')}/sendMessage",
-            json={"chat_id": PUBLIC_CHAT_ID, "text": msg,
-                  "parse_mode": "Markdown", "disable_web_page_preview": True},
-            timeout=10,
-        )
-    except Exception as e:
-        log.warning(f"_send_public failed: {e}")
+    """Compatibility wrapper; all public posts are centrally gated."""
+    return send_public(msg, feature="weekly")
 
 
 def build_monthly_update(modules: dict, outlook: str) -> str:
@@ -1071,8 +1166,8 @@ def build_monthly_update(modules: dict, outlook: str) -> str:
     now      = datetime.now(timezone.utc)
     month_str = now.strftime("%B %Y")
 
-    btc = _fetch_asset_weekly("BTCUSDT")
-    eth = _fetch_asset_weekly("ETHUSDT")
+    btc = _fetch_asset_weekly_snapshot("BTCUSDT")
+    eth = _fetch_asset_weekly_snapshot("ETHUSDT")
     btc_price  = f"${btc['price']:,.0f}" if btc.get("price") else "N/A"
     eth_price  = f"${eth['price']:,.2f}" if eth.get("price") else "N/A"
     btc_chg_30 = btc.get("chg_7d")   # best proxy available without 30D endpoint
@@ -1089,7 +1184,7 @@ def build_monthly_update(modules: dict, outlook: str) -> str:
 
     # Upcoming events next 30 days
     HIGH = {"FOMC", "CPI", "NFP", "ECB", "PPI"}
-    upcoming = _fetch_upcoming_events(modules, days=30)
+    upcoming = _fetch_upcoming_macro(modules, days=30)
     key_events = [ev for ev in upcoming if ev.get("category") in HIGH]
 
     lines = [
@@ -1102,14 +1197,12 @@ def build_monthly_update(modules: dict, outlook: str) -> str:
         f"Regime: {r_emoji} *{regime}*",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "*STRATEGY — CONFLUENCE*",
-        "_Live trading in progress at minimum size._",
-        "_Full-size deployment after 20–30 confirmed signals._",
-        "_Copy trading opens once 30-day live futures requirement clears._",
+        "*MARKET CONTEXT*",
+        outlook,
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "*OUTLOOK*",
-        outlook,
+        "*RESEARCH LAB*",
+        "_No systematic strategy is presented here as validated unless it has passed the Lab validation process._",
     ]
 
     if key_events:
@@ -1125,8 +1218,8 @@ def build_monthly_update(modules: dict, outlook: str) -> str:
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "Questions: macrowatchalpha@proton.me",
-        "🌐 infinex-capital.netlify.app",
+        "_Educational market commentary — not a trading signal._",
+        "📡 INFINEX CAPITAL · MacroWatch 🧠",
     ]
 
     return "\n".join(lines)
@@ -1152,19 +1245,10 @@ def send_weekly_brief(modules: dict):
     # Private group always gets the full detailed brief
     send_text(private_msg)
 
-    # Public channel gets the clean investor pulse
-    if PUBLIC_CHAT_ID:
-        try:
-            import os as _os
-            requests.post(
-                f"https://api.telegram.org/bot{_os.getenv('TELEGRAM_TOKEN', '')}/sendMessage",
-                json={"chat_id": PUBLIC_CHAT_ID, "text": pulse_msg,
-                      "parse_mode": "Markdown", "disable_web_page_preview": True},
-                timeout=10,
-            )
-            log.info("Weekly Pulse sent to public channel ✅")
-        except Exception as e:
-            log.warning(f"Weekly Pulse public send failed: {e}")
+    # Public channel gets only the centrally gated, low-noise brief.
+    if _send_public(pulse_msg):
+        log.info("Weekly public brief sent ✅")
+    else:
+        log.info("Weekly public brief suppressed or unavailable")
 
-    log.info("WeeklyBrief + Pulse sent ✅")
-
+    log.info("WeeklyBrief cycle completed ✅")
