@@ -41,10 +41,6 @@ import bot.modules.correlwatch     as correlwatch
 import bot.modules.whalewatch      as whalewatch
 import bot.modules.stratwatch      as stratwatch
 import bot.modules.challengewatch  as challengewatch
-import bot.modules.fundingwatch    as fundingwatch
-import bot.modules.oiwatch         as oiwatch
-import bot.modules.optionswatch    as optionswatch
-import bot.modules.vixwatch        as vixwatch
 import bot.modules.intelwatch      as intelwatch
 import bot.modules.reportwatch     as reportwatch
 
@@ -634,13 +630,6 @@ def _job_correlwatch():
     except Exception as e:
         _err("CorrelWatch", e)
 
-def _job_vixwatch():
-    try:
-        vixwatch.poll_once()
-    except Exception as e:
-        _err("VixWatch", e)
-
-
 def _job_whalewatch():
     try:
         whalewatch.poll_once()
@@ -648,52 +637,12 @@ def _job_whalewatch():
         _err("WhaleWatch", e)
 
 
-def _job_fundingwatch():
-    try:
-        fundingwatch.poll_once()
-    except Exception as e:
-        _err("FundingWatch", e)
-
-
-def _job_oiwatch():
-    try:
-        oiwatch.poll_once()
-    except Exception as e:
-        _err("OIWatch", e)
-
-
-def _job_optionswatch_thursday():
-    try:
-        optionswatch.run_thursday()
-    except Exception as e:
-        _err("OptionsWatch", e)
-
-
-def _job_optionswatch_friday():
-    try:
-        optionswatch.run_friday()
-    except Exception as e:
-        _err("OptionsWatch", e)
-
-
-def _job_optionswatch_refresh():
-    """Silent STATE refresh for IntelWatch consumption."""
-    try:
-        optionswatch.refresh_state()
-    except Exception as e:
-        _err("OptionsWatch-refresh", e)
-
-
 def _get_modules():
-    """Bundle all module references for IntelWatch."""
+    """Bundle active module references for briefs and IntelWatch."""
     return {
-        "fedwatch":        fedwatch,
-        "trumpwatch":      trumpwatch_live,
-        "vixwatch":        vixwatch,
-        "correlwatch":     correlwatch,
-        "fundingwatch":    fundingwatch,
-        "oiwatch":         oiwatch,
-        "optionswatch":    optionswatch,
+        "fedwatch": fedwatch,
+        "trumpwatch": trumpwatch_live,
+        "correlwatch": correlwatch,
     }
 
 
@@ -873,14 +822,6 @@ def start_scheduler():
     )
     print("📡 CorrelWatch scheduled (30min) ✅", flush=True)
 
-    # ── VixWatch — every 30 minutes
-    SCHED.add_job(
-        _job_vixwatch, "interval", minutes=30,
-        id="vixwatch", max_instances=1, misfire_grace_time=60,
-        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=35),
-    )
-    print("😱 VixWatch scheduled (30min) ✅", flush=True)
-
     # ── WhaleWatch — every 5 min
     if os.getenv("ETHERSCAN_API_KEY"):
         SCHED.add_job(
@@ -908,48 +849,11 @@ def start_scheduler():
     )
     print("🏦 FedWatch Monday push scheduled (Mon 08:00) ✅", flush=True)
 
-    # ── FundingWatch — every 30 minutes
-    SCHED.add_job(
-        _job_fundingwatch, "interval", minutes=30,
-        id="fundingwatch", max_instances=1, misfire_grace_time=60,
-        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=15),
-    )
-    print("💸 FundingWatch scheduled (30min) ✅", flush=True)
-
-    # ── OIWatch — every 30 minutes
-    SCHED.add_job(
-        _job_oiwatch, "interval", minutes=30,
-        id="oiwatch", max_instances=1, misfire_grace_time=60,
-        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=20),
-    )
-    print("📊 OIWatch scheduled (30min) ✅", flush=True)
-
-    # ── OptionsWatch — Thursday 18:00 + Friday 07:00 UTC
-    SCHED.add_job(
-        _job_optionswatch_thursday, "cron", day_of_week="thu", hour=18, minute=0,
-        id="optionswatch_thursday", max_instances=1,
-    )
-    SCHED.add_job(
-        _job_optionswatch_friday, "cron", day_of_week="fri", hour=7, minute=0,
-        id="optionswatch_friday", max_instances=1,
-    )
-    print("⚙️ OptionsWatch scheduled (Thu 18:00 + Fri 07:00 UTC) ✅", flush=True)
-
-    # ── OptionsWatch STATE refresh — every 30 min (silent, feeds IntelWatch)
-    SCHED.add_job(
-        _job_optionswatch_refresh, "interval", minutes=30,
-        id="optionswatch_refresh", max_instances=1, misfire_grace_time=60,
-        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
-    )
-    print("⚙️ OptionsWatch state refresh scheduled (30min silent) ✅", flush=True)
-
     # ── MarketStructure — 4H close + 2 min (BTC + ETH, 1 min apart)
     SCHED.start()
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
-    print("💸 FundingWatch · 📊 OIWatch · ⚙️ OptionsWatch ready ✅", flush=True)
     print("🧠 IntelWatch ready ✅", flush=True)
-    print("😱 VixWatch ready — /vix command live ✅", flush=True)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1050,44 +954,6 @@ def _build_health_msg() -> str:
         f"  Source: {'✅ OK' if fedwatch.STATE.get('source_ok') else '⚠️ Degraded'}",
     ]
 
-    # FundingWatch state
-    fw_check = fundingwatch.STATE.get("last_check")
-    fw_rates = fundingwatch.STATE.get("last_rates", {})
-    lines += [
-        "",
-        "💸 *FundingWatch*",
-        f"  Last check: {fw_check.strftime('%H:%M UTC') if fw_check else '—'}",
-        f"  BTC: {fw_rates.get('BTCUSDT', '—')}%  ETH: {fw_rates.get('ETHUSDT', '—')}%",
-    ]
-
-    # OIWatch state
-    oi_check = oiwatch.STATE.get("last_check")
-    oi_data  = oiwatch.STATE.get("last_oi", {})
-    btc_oi   = '${:.2f}B'.format(oi_data['BTCUSDT']/1e9) if oi_data.get('BTCUSDT') else '—'
-    eth_oi   = '${:.2f}B'.format(oi_data['ETHUSDT']/1e9) if oi_data.get('ETHUSDT') else '—'
-    lines += [
-        "",
-        "📊 *OIWatch*",
-        f"  Last check: {oi_check.strftime('%H:%M UTC') if oi_check else '—'}",
-        f"  BTC OI: {btc_oi}  |  ETH OI: {eth_oi}",
-    ]
-
-    # OptionsWatch state (BTC + ETH)
-    opt_last  = optionswatch.STATE.get("last_alert_utc")
-    btc_state = optionswatch.STATE.get("btc", {}) or {}
-    eth_state = optionswatch.STATE.get("eth", {}) or {}
-    btc_pain  = btc_state.get("max_pain")
-    eth_pain  = eth_state.get("max_pain")
-    btc_exp   = btc_state.get("expiry_str") or "—"
-    eth_exp   = eth_state.get("expiry_str") or "—"
-    lines += [
-        "",
-        "⚙️ *OptionsWatch*",
-        f"  Last alert: {opt_last.strftime('%Y-%m-%d %H:%M UTC') if opt_last else '—'}",
-        f"  BTC: {btc_exp}  Max pain: {'${:,.0f}'.format(btc_pain) if btc_pain else '—'}",
-        f"  ETH: {eth_exp}  Max pain: {'${:,.0f}'.format(eth_pain) if eth_pain else '—'}",
-    ]
-
     return "\n".join(lines)
 
 
@@ -1180,18 +1046,12 @@ def _handle_command(text: str, text_raw: str):
             "`/evening` — Evening recap on demand\n\n"
             "📡 *CorrelWatch*\n"
             "`/correl_diag` — DXY vs BTC last reading\n\n"
-            "💸 *FundingWatch*\n"
-            "`/funding_diag` — Current funding rates\n\n"
-            "📊 *OIWatch*\n"
-            "`/oi_diag` — Current open interest\n\n"
-            "⚙️ *OptionsWatch*\n"
-            "`/options_diag` — Last expiry analysis\n"
-            "`/options_now` — Run analysis now\n\n"
+
+
+
             "🧠 *IntelWatch*\n"
             "`/intel` — Full market intelligence briefing\n\n"
-            "😱 *VixWatch*\n"
-            "`/vix` — Current VIX reading + market context\n"
-            "`/vix_diag` — Last value + alert state\n\n"
+
             "🩺 *System*\n"
             "`/health` — Full system status\n"
             "`/restart` — Trigger clean poll of all modules\n"
@@ -1343,38 +1203,6 @@ def _handle_command(text: str, text_raw: str):
             send_text(f"📡 [CorrelWatch] Diag error: {e}")
         return
 
-    # ── /funding_diag ─────────────────────────────────────────────────────────
-    if text.startswith("/funding_diag"):
-        try:
-            fundingwatch.show_diag()
-        except Exception as e:
-            send_text(f"💸 [FundingWatch] Diag error: {e}")
-        return
-
-    # ── /oi_diag ──────────────────────────────────────────────────────────────
-    if text.startswith("/oi_diag"):
-        try:
-            oiwatch.show_diag()
-        except Exception as e:
-            send_text(f"📊 [OIWatch] Diag error: {e}")
-        return
-
-    # ── /options_diag / /options_now ─────────────────────────────────────────
-    if text.startswith("/options_now"):
-        try:
-            send_text("⚙️ Running options analysis — takes ~30s...")
-            optionswatch.run_thursday()
-        except Exception as e:
-            send_text(f"⚙️ [OptionsWatch] Error: {e}")
-        return
-
-    if text.startswith("/options_diag"):
-        try:
-            optionswatch.show_diag()
-        except Exception as e:
-            send_text(f"⚙️ [OptionsWatch] Diag error: {e}")
-        return
-
     # ── /intel ────────────────────────────────────────────────────────────────
     if text.startswith("/intel"):
         try:
@@ -1382,21 +1210,6 @@ def _handle_command(text: str, text_raw: str):
             intelwatch.show_intel(_get_modules())
         except Exception as e:
             send_text(f"🧠 [IntelWatch] Error: {e}")
-        return
-
-    # ── /vix / /vix_diag ─────────────────────────────────────────────────────
-    if text.startswith("/vix_diag"):
-        try:
-            vixwatch.show_diag()
-        except Exception as e:
-            send_text(f"😱 [VixWatch] Diag error: {e}")
-        return
-
-    if text.startswith("/vix"):
-        try:
-            vixwatch.show_vix()
-        except Exception as e:
-            send_text(f"😱 [VixWatch] Error: {e}")
         return
 
     # ── /status ───────────────────────────────────────────────────────────────

@@ -8,12 +8,8 @@ Auto-trigger: fires to public channel when 2+ signals align simultaneously.
 Pulls live data from all modules:
   - FedWatch (next macro event)
   - TrumpWatch (last score + bias)
-  - VixWatch (VIX level + regime)
   - Fear & Greed (sentiment)
   - CorrelWatch (DXY vs BTC)
-  - FundingWatch (funding rates)
-  - OIWatch (open interest)
-  - OptionsWatch (max pain)
   - LiquidationWatch (session liqs)
   - S&RWatch (nearest levels)
 
@@ -78,27 +74,6 @@ def _fetch_price_4h(symbol: str) -> tuple[float, float] | tuple[None, None]:
     except Exception as e:
         log.warning(f"{symbol} 4H price fetch failed: {e}")
         return None, None
-
-
-def _fetch_eth_price() -> float | None:
-    """Returns current ETH price."""
-    try:
-        r = requests.get(
-            f"{BITGET_BASE}/api/v2/mix/market/ticker",
-            params={"symbol": "ETHUSDT", "productType": PRODUCT_TYPE},
-            timeout=6,
-        )
-        data = r.json()
-        if data.get("code") != "00000":
-            return None
-        d = data.get("data") or {}
-        if isinstance(d, list):
-            d = d[0] if d else {}
-        price = float(d.get("lastPr") or d.get("last") or 0)
-        return round(price, 2) if price > 0 else None
-    except Exception as e:
-        log.warning(f"ETH price fetch failed: {e}")
-        return None
 
 
 # ─── Signal evaluator ─────────────────────────────────────────────────────────
@@ -175,28 +150,6 @@ def _evaluate_signals(modules: dict) -> dict:
     except Exception:
         _record("trump", "🍊 TrumpWatch: unavailable", 0, "—")
 
-    # ── VixWatch — weight: ±2 (regime indicator)
-    try:
-        vw_state = modules["vixwatch"].STATE
-        vix      = vw_state.get("last_vix")
-        if vix:
-            if vix >= 30:
-                pts, emoji, regime = -2, "🔴", "HIGH FEAR"
-            elif vix >= 25:
-                pts, emoji, regime = -2, "🟠", "ELEVATED"
-            elif vix >= 20:
-                pts, emoji, regime = -1, "🟡", "MILD CAUTION"
-            elif vix < 15:
-                pts, emoji, regime = +2, "🟢", "VERY CALM"
-            else:
-                pts, emoji, regime = +1, "🟢", "CALM"
-            label = "Bearish" if pts < 0 else "Bullish" if pts > 0 else "Neutral"
-            _record("vix", f"😱 VIX: {vix:.1f} {emoji} {regime} ({pts:+.0f})", pts, label)
-        else:
-            _record("vix", "😱 VIX: unavailable", 0, "—")
-    except Exception:
-        _record("vix", "😱 VIX: unavailable", 0, "—")
-
     # ── BTC 4H movement — weight: ±2 if ≥2% in 4H
     try:
         btc_price, btc_chg = _fetch_btc_price()
@@ -226,95 +179,6 @@ def _evaluate_signals(modules: dict) -> dict:
             _record("correl", "📡 CorrelWatch: no data", 0, "—")
     except Exception:
         _record("correl", "📡 CorrelWatch: unavailable", 0, "—")
-
-    # ── FundingWatch — weight: ±1 (extreme = squeeze risk)
-    try:
-        fw_rates = modules["fundingwatch"].STATE.get("last_rates", {})
-        btc_rate = fw_rates.get("BTCUSDT")
-        # Use BTC funding if available, otherwise ETH as proxy
-        rate = btc_rate if btc_rate is not None else fw_rates.get("ETHUSDT")
-        if rate is not None:
-            if rate >= 0.10:
-                _record("funding", f"💸 Funding: {rate:+.4f}% 🔴 Overleveraged longs (-1)", -1, "Bearish")
-            elif rate <= -0.05:
-                _record("funding", f"💸 Funding: {rate:+.4f}% 🔵 Overleveraged shorts (+1)", 1, "Bullish")
-            else:
-                _record("funding", f"💸 Funding: {rate:+.4f}% ⚪ Neutral", 0, "Neutral")
-        else:
-            _record("funding", "💸 Funding: no data", 0, "—")
-    except Exception:
-        _record("funding", "💸 Funding: unavailable", 0, "—")
-
-    # ── OIWatch — weight: ±1 if spike + price direction confirms
-    try:
-        oi_data  = modules["oiwatch"].STATE.get("last_oi", {})
-        prev_oi  = modules["oiwatch"].STATE.get("prev_oi", {})
-        oi_btc   = oi_data.get("BTCUSDT")
-        prev_btc = prev_oi.get("BTCUSDT")
-
-        # Need price direction to interpret OI move
-        _, btc_chg = _fetch_btc_price()
-        if oi_btc and prev_btc and prev_btc > 0:
-            chg_pct = (oi_btc - prev_btc) / prev_btc * 100
-            arrow   = "↑" if chg_pct > 0 else "↓"
-            oi_b    = oi_btc / 1e9
-            # OI ↑ + price ↑ = longs adding (bullish)
-            # OI ↑ + price ↓ = shorts piling in (bearish)
-            # OI ↓ + price ↑ = shorts covering (mildly bullish)
-            # OI ↓ + price ↓ = longs capitulating (mildly bullish reversal)
-            if abs(chg_pct) >= 5 and btc_chg is not None:
-                if chg_pct > 0 and btc_chg > 0:
-                    _record("oi", f"📊 OI: ${oi_b:.2f}B {arrow} ({chg_pct:+.1f}%) 🟢 Longs adding (+1)", 1, "Bullish")
-                elif chg_pct > 0 and btc_chg < 0:
-                    _record("oi", f"📊 OI: ${oi_b:.2f}B {arrow} ({chg_pct:+.1f}%) 🔴 Shorts piling in (-1)", -1, "Bearish")
-                else:
-                    _record("oi", f"📊 OI: ${oi_b:.2f}B {arrow} ({chg_pct:+.1f}%) ⚪ Position unwind", 0, "Neutral")
-            else:
-                _record("oi", f"📊 OI: ${oi_b:.2f}B {arrow} ({chg_pct:+.1f}%) ⚪ Stable", 0, "Neutral")
-        elif oi_btc:
-            _record("oi", f"📊 OI: ${oi_btc/1e9:.2f}B ⚪ Baseline", 0, "Neutral")
-        else:
-            _record("oi", "📊 OI: no data", 0, "—")
-    except Exception:
-        _record("oi", "📊 OI: unavailable", 0, "—")
-
-    # ── OptionsWatch — BTC max pain (±0.5)
-    try:
-        btc_state = modules["optionswatch"].STATE.get("btc", {})
-        btc_pain  = btc_state.get("max_pain")
-        btc_expiry = btc_state.get("expiry_str")
-        btc_price, _ = _fetch_btc_price()
-        if btc_pain and btc_price:
-            gap_pct = (btc_price - btc_pain) / btc_price * 100
-            dir_str = "above" if gap_pct > 0 else "below"
-            pts = -0.5 if gap_pct > 0 else 0.5
-            label = "Bearish" if pts < 0 else "Bullish"
-            _record("options_btc",
-                    f"   BTC: ${btc_pain/1000:.0f}k — {abs(gap_pct):.1f}% {dir_str} ({pts:+.1f})",
-                    pts, label)
-        else:
-            _record("options_btc", "   BTC: no data", 0, "—")
-    except Exception:
-        _record("options_btc", "   BTC: unavailable", 0, "—")
-
-    # ── OptionsWatch — ETH max pain (±0.5)
-    try:
-        eth_state = modules["optionswatch"].STATE.get("eth", {})
-        eth_pain  = eth_state.get("max_pain")
-        eth_expiry = eth_state.get("expiry_str")
-        eth_price = _fetch_eth_price()
-        if eth_pain and eth_price:
-            gap_pct = (eth_price - eth_pain) / eth_price * 100
-            dir_str = "above" if gap_pct > 0 else "below"
-            pts = -0.5 if gap_pct > 0 else 0.5
-            label = "Bearish" if pts < 0 else "Bullish"
-            _record("options_eth",
-                    f"   ETH: ${eth_pain:,.0f} — {abs(gap_pct):.1f}% {dir_str} ({pts:+.1f})",
-                    pts, label)
-        else:
-            _record("options_eth", "   ETH: no data", 0, "—")
-    except Exception:
-        _record("options_eth", "   ETH: unavailable", 0, "—")
 
     return {
         "signals":       signals,
@@ -368,15 +232,8 @@ def _detect_regime(modules: dict) -> str:
         recent_low  = min(lows[-7:])
         range_pct   = (recent_high - recent_low) / recent_low * 100
 
-        # VIX check for VOLATILE override
-        try:
-            vix = modules["vixwatch"].STATE.get("last_vix")
-        except Exception:
-            vix = None
-
-        # Decide regime
-        # VOLATILE wins if range > 8% in week or VIX > 22
-        if range_pct > 8 or (vix and vix > 22):
+        # Decide regime from BTC price structure only.
+        if range_pct > 8:
             return "VOLATILE"
 
         gap_to_ema = (price - ema) / ema * 100
