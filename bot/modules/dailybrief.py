@@ -75,21 +75,6 @@ def _fetch_price(symbol: str) -> float | None:
         return None
 
 
-def _fetch_funding(symbol: str) -> float | None:
-    try:
-        r = requests.get(
-            "https://api.bitget.com/api/v2/mix/market/current-fund-rate",
-            params={"symbol": symbol, "productType": "USDT-FUTURES"},
-            timeout=10,
-        )
-        data = r.json().get("data") or {}
-        if isinstance(data, list):
-            data = data[0] if data else {}
-        return float(data.get("fundingRate") or 0) or None
-    except Exception:
-        return None
-
-
 def _regime_label(modules: dict) -> str:
     """Quick regime from CorrelWatch / price context — BULL / BEAR / CHOP."""
     try:
@@ -156,17 +141,6 @@ def _events_next_7(modules: dict) -> list:
         return []
 
 
-def _vix_line(modules: dict) -> str | None:
-    try:
-        vix = modules["vixwatch"].STATE.get("last_vix")
-        if not vix:
-            return None
-        zone = modules["vixwatch"]._get_zone(vix)
-        return f"😱 VIX: {vix:.1f} {zone.get('emoji', '')} {zone.get('label', '')}"
-    except Exception:
-        return None
-
-
 def _ai_summary(context: str) -> str | None:
     """Optional AI narrative for evening recap. Falls back gracefully."""
     if not OPENAI_API_KEY:
@@ -212,16 +186,6 @@ def send_morning_brief(modules: dict):
     btc_f = f"${btc:,.0f}" if btc else "N/A"
     eth_f = f"${eth:,.2f}" if eth else "N/A"
 
-    funding_btc = _fetch_funding("BTCUSDT")
-    f_btc = f"{funding_btc*100:.4f}%/8h" if funding_btc is not None else "N/A"
-    f_apr = funding_btc * 3 * 365 * 100 if funding_btc is not None else None
-    f_crowd = ""
-    if f_apr is not None:
-        if f_apr > 8:
-            f_crowd = " ⚠️ crowded LONG"
-        elif f_apr < -8:
-            f_crowd = " ⚠️ crowded SHORT"
-
     regime  = _regime_label(modules)
     r_emoji = _regime_emoji(regime)
 
@@ -235,13 +199,7 @@ def send_morning_brief(modules: dict):
         f"₿ BTC: `{btc_f}`",
         f"Ξ ETH: `{eth_f}`",
         f"Regime: {r_emoji} *{regime}*",
-        f"💸 Funding: `{f_btc}`{f_crowd}",
     ]
-
-    # VIX
-    vix = _vix_line(modules)
-    if vix:
-        lines.append(vix)
 
     # Today's macro events
     today_events = _events_today(modules)
@@ -322,14 +280,10 @@ def send_evening_recap(modules: dict):
     fed_fired = _daily_state.get("fedwatch_fired", [])
     fed_line  = f"🏦 FedWatch: {', '.join(fed_fired)}" if fed_fired else "🏦 FedWatch: no events"
 
-    # Funding
-    funding_btc = _fetch_funding("BTCUSDT")
-    f_btc = f"{funding_btc*100:.4f}%/8h" if funding_btc is not None else "N/A"
-
     # Build context for AI summary
     context = (
         f"BTC: {btc_f}, ETH: {eth_f}, Regime: {regime}, "
-        f"Funding: {f_btc}, {trump_line}, {fed_line}"
+        f"{trump_line}, {fed_line}"
     )
     if notable:
         context += f", {notable}"
@@ -343,7 +297,6 @@ def send_evening_recap(modules: dict):
         f"₿ BTC: `{btc_f}`",
         f"Ξ ETH: `{eth_f}`",
         f"Regime: {r_emoji} *{regime}*",
-        f"💸 Funding: `{f_btc}`",
     ]
 
     if notable:
@@ -355,11 +308,6 @@ def send_evening_recap(modules: dict):
         trump_line,
         fed_line,
     ]
-
-    # VIX
-    vix = _vix_line(modules)
-    if vix:
-        lines.append(vix)
 
     if ai:
         lines += [
