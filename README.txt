@@ -50,6 +50,12 @@ Core Telegram environment:
   CHAT_ID
   PUBLIC_CHAT_ID
 
+Private feature switches:
+  ENABLE_ELITE_POSITIONWATCH=false
+
+Set ENABLE_ELITE_POSITIONWATCH=true only after valid Elite Bitget credentials
+have been restored.
+
 Validation
 ----------
 GitHub Actions runs on pull requests and on main/public-feed-v2:
