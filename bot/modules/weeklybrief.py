@@ -359,19 +359,6 @@ def _fetch_upcoming_macro(modules: dict, days: int = 14) -> list:
         return []
 
 
-def _fetch_correl(modules: dict) -> dict:
-    """Pull DXY/BTC correlation snapshot from CorrelWatch."""
-    try:
-        state = modules["correlwatch"].STATE
-        return {
-            "dxy_chg_24h": state.get("dxy_chg_24h"),
-            "btc_chg_24h": state.get("btc_chg_24h"),
-            "divergence":  state.get("divergence", ""),
-        }
-    except Exception:
-        return {}
-
-
 def _fetch_asset_structure(symbol: str) -> dict | None:
     """Fetch 50W/200W EMAs, RSI, and weekly range for an asset."""
     try:
@@ -785,22 +772,6 @@ def build_weekly_brief(modules: dict, private: bool = False) -> str:
                 lines.append(f"  {icon} {ts} — {title}")
             except Exception:
                 continue
-        lines.append("")
-
-    # CorrelWatch — DXY vs BTC
-    correl = _fetch_correl(modules)
-    if correl.get("dxy_chg_24h") is not None and correl.get("btc_chg_24h") is not None:
-        dxy_chg    = correl["dxy_chg_24h"]
-        btc_chg    = correl["btc_chg_24h"]
-        divergence = correl.get("divergence", "")
-        lines += [
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "📡 *DXY vs BTC CORRELATION*",
-            "",
-            f"  DXY: `{_pct(dxy_chg)}`  |  BTC: `{_pct(btc_chg)}`",
-        ]
-        if divergence:
-            lines.append(f"  _{divergence}_")
         lines.append("")
 
     # ═══ END SHARED SECTIONS ════════════════════════════════════════════════
