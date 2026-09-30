@@ -101,6 +101,12 @@ def _update_streak(is_win: bool) -> str:
         else:
             return ""
 
+# ─── Runtime feature flags ───────────────────────────────────────────────────
+
+ENABLE_ELITE_POSITIONWATCH = os.getenv(
+    "ENABLE_ELITE_POSITIONWATCH", "false"
+).strip().lower() in ("1", "true", "yes", "on")
+
 # ─── Scheduler (module-level so commands can inspect jobs) ───────────────────
 
 SCHED = BackgroundScheduler(timezone=os.getenv("TIMEZONE", "Europe/Brussels"))
@@ -178,9 +184,8 @@ def _poll_positions():
       No per-TP / per-SL alerts.
 
     Elite account (ELITE_API_KEY) — TraderWatch discretionary:
-      Full alerts — Position Opened, Position Closed, TP Hit, SL Hit.
-      TradeWatch enriched plan card (R:R, risk %, liq check, ratchet)
-      fires automatically 4 seconds after position opens.
+      Disabled by default. Set ENABLE_ELITE_POSITIONWATCH=true to enable.
+      When enabled: Position Opened/Closed + TP/SL monitoring.
 
     Both feed to private group only. Snapshot keyed by (account, symbol)
     so the two books never collide.
@@ -206,7 +211,7 @@ def _poll_positions():
             "symbols":      BITGET_SYMBOLS or ["ETHUSDT"],
             "rich":         False,  # lightweight alerts only
         })
-    if ELITE_API_KEY:
+    if ENABLE_ELITE_POSITIONWATCH and ELITE_API_KEY:
         accounts.append({
             "name":         "elite",
             "label":        "🎯 TraderWatch",
@@ -847,6 +852,10 @@ def start_scheduler():
         id="positionwatch", max_instances=1, misfire_grace_time=5,
     )
     print("📘 PositionWatch scheduled (10s) ✅", flush=True)
+    if ENABLE_ELITE_POSITIONWATCH:
+        print("🎯 Elite PositionWatch enabled ✅", flush=True)
+    else:
+        print("🎯 Elite PositionWatch disabled (ENABLE_ELITE_POSITIONWATCH=false) ✅", flush=True)
 
     # ── Market Open Alert — Mon–Fri 13:30 UTC (14:30 CET)
     if os.getenv("ENABLE_MARKET_OPEN", "true").lower() in ("1", "true", "yes", "on"):
