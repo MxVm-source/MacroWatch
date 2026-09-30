@@ -76,7 +76,7 @@ def _fetch_price(symbol: str) -> float | None:
 
 
 def _regime_label(modules: dict) -> str:
-    """Quick regime from CorrelWatch / price context — BULL / BEAR / CHOP."""
+    """Quick BTC price-structure regime — BULL / BEAR / CHOP."""
     try:
         import numpy as np
         r = requests.get(
