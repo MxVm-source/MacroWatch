@@ -9,7 +9,6 @@ Pulls live data from all modules:
   - FedWatch (next macro event)
   - TrumpWatch (last score + bias)
   - Fear & Greed (sentiment)
-  - CorrelWatch (DXY vs BTC)
   - LiquidationWatch (session liqs)
   - S&RWatch (nearest levels)
 
@@ -162,23 +161,6 @@ def _evaluate_signals(modules: dict) -> dict:
                 _record("btc_move", f"📊 BTC 4H: {btc_chg:+.2f}% — quiet", 0, "Neutral")
     except Exception:
         pass
-
-    # ── CorrelWatch — weight: ±1 (DXY/BTC divergence)
-    try:
-        cw_state = modules["correlwatch"].STATE
-        dxy = cw_state.get("last_dxy")
-        btc = cw_state.get("last_btc")
-        if dxy is not None and btc is not None:
-            if dxy > 0 and btc < 0:
-                _record("correl", f"📡 DXY {dxy:+.2f}% / BTC {btc:+.2f}% 🔴 Bearish (-1)", -1, "Bearish")
-            elif dxy < 0 and btc > 0:
-                _record("correl", f"📡 DXY {dxy:+.2f}% / BTC {btc:+.2f}% 🟢 Bullish (+1)", 1, "Bullish")
-            else:
-                _record("correl", f"📡 DXY {dxy:+.2f}% / BTC {btc:+.2f}% ⚪ Aligned", 0, "Neutral")
-        else:
-            _record("correl", "📡 CorrelWatch: no data", 0, "—")
-    except Exception:
-        _record("correl", "📡 CorrelWatch: unavailable", 0, "—")
 
     return {
         "signals":       signals,
