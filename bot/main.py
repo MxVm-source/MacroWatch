@@ -37,7 +37,6 @@ from bot.utils import send_text, get_updates
 import bot.modules.fedwatch        as fedwatch
 import bot.modules.dailybrief      as dailybrief
 import bot.modules.trumpwatch_live as trumpwatch_live
-import bot.modules.correlwatch     as correlwatch
 import bot.modules.whalewatch      as whalewatch
 import bot.modules.stratwatch      as stratwatch
 import bot.modules.challengewatch  as challengewatch
@@ -624,12 +623,6 @@ def _job_fedwatch_monday():
         _err("FedWatch Monday", e)
 
 
-def _job_correlwatch():
-    try:
-        correlwatch.poll_once()
-    except Exception as e:
-        _err("CorrelWatch", e)
-
 def _job_whalewatch():
     try:
         whalewatch.poll_once()
@@ -642,7 +635,6 @@ def _get_modules():
     return {
         "fedwatch": fedwatch,
         "trumpwatch": trumpwatch_live,
-        "correlwatch": correlwatch,
     }
 
 
@@ -814,14 +806,6 @@ def start_scheduler():
         )
         print("🔔 Market Open Alert scheduled (Mon–Fri 13:30 UTC) ✅", flush=True)
 
-    # ── CorrelWatch — every 30 minutes
-    SCHED.add_job(
-        _job_correlwatch, "interval", minutes=30,
-        id="correlwatch", max_instances=1, misfire_grace_time=60,
-        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=25),
-    )
-    print("📡 CorrelWatch scheduled (30min) ✅", flush=True)
-
     # ── WhaleWatch — every 5 min
     if os.getenv("ETHERSCAN_API_KEY"):
         SCHED.add_job(
@@ -930,19 +914,6 @@ def _build_health_msg() -> str:
         f"  Last alert: {ww_last.strftime('%Y-%m-%d %H:%M UTC') if ww_last else 'None yet'}",
     ]
 
-    # CorrelWatch state
-    cw_last  = correlwatch.STATE.get("last_check_utc")
-    cw_dxy   = correlwatch.STATE.get("last_dxy")
-    cw_btc   = correlwatch.STATE.get("last_btc")
-    cw_alert = correlwatch.STATE.get("last_alert_utc")
-    lines += [
-        "",
-        "📡 *CorrelWatch*",
-        f"  Last check: {cw_last.strftime('%H:%M UTC') if cw_last else '—'}",
-        f"  DXY: {f'{cw_dxy:+.2f}%' if cw_dxy is not None else '—'} | BTC: {f'{cw_btc:+.2f}%' if cw_btc is not None else '—'}",
-        f"  Last alert: {cw_alert.strftime('%Y-%m-%d %H:%M UTC') if cw_alert else 'None yet'}",
-    ]
-
     # FedWatch state
     fw_events = len(fedwatch.STATE.get("events", []))
     fw_alerts = len(fedwatch.STATE.get("alert_queue", []))
@@ -1044,8 +1015,7 @@ def _handle_command(text: str, text_raw: str):
             "📅 *Daily Briefs*\n"
             "`/morning` — Morning brief on demand\n"
             "`/evening` — Evening recap on demand\n\n"
-            "📡 *CorrelWatch*\n"
-            "`/correl_diag` — DXY vs BTC last reading\n\n"
+
 
 
 
@@ -1193,14 +1163,6 @@ def _handle_command(text: str, text_raw: str):
             _send_public(msg)
         except Exception as e:
             send_text(f"📊 [MonthlyUpdate] Error: {e}")
-        return
-
-    # ── /correl_diag ─────────────────────────────────────────────────────────
-    if text.startswith("/correl_diag"):
-        try:
-            correlwatch.show_diag()
-        except Exception as e:
-            send_text(f"📡 [CorrelWatch] Diag error: {e}")
         return
 
     # ── /intel ────────────────────────────────────────────────────────────────
