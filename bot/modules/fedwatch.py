@@ -519,6 +519,15 @@ def _send_alert(alert: dict):
     category = ev.get("category", "")
     title    = ev.get("title", "")
 
+    # Register only the T-24h item as a long-term relevance candidate.
+    # Scheduled macro events remain "needs confirmation" until an outcome is known.
+    if label == "T-24h":
+        try:
+            from bot.public.relevance import observe_fed_event
+            observe_fed_event(event=ev, stage=label)
+        except Exception as exc:
+            log.warning(f"Long-term relevance hook failed: {exc}")
+
     # ── T-24h: Full pre-event brief with AI consensus + scenarios ──────────
     if label == "T-24h":
         lines = [
