@@ -678,6 +678,19 @@ def poll_once():
         send_text(msg)
         fired += 1
 
+        # Long-Term Relevance Engine observes the same event independently.
+        # Any failure here must never interfere with the private TrumpWatch alert.
+        try:
+            from bot.public.relevance import observe_trump_event
+            observe_trump_event(
+                text=txt,
+                url=url,
+                source=src,
+                upstream_score=score,
+            )
+        except Exception as exc:
+            log.warning(f"Long-term relevance hook failed: {exc}")
+
     log.info(f"poll_once: {len(all_items)} total | {blocked} blocked | {filtered} filtered | {fired} fired")
 
 
