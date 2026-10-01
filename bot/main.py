@@ -838,6 +838,7 @@ def start_scheduler():
     print("🕒 APScheduler started ✅", flush=True)
     print("🤖 StratWatch ready — /status command live ✅", flush=True)
     print("🧠 IntelWatch ready ✅", flush=True)
+    print("🧭 Long-Term Relevance Engine ready — PREVIEW mode by default ✅", flush=True)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -924,6 +925,19 @@ def _build_health_msg() -> str:
         f"  Queued alerts: {fw_alerts}",
         f"  Source: {'✅ OK' if fedwatch.STATE.get('source_ok') else '⚠️ Degraded'}",
     ]
+
+    try:
+        from bot.public import relevance
+        lines += [
+            "",
+            "🧭 *Long-Term Relevance*",
+            f"  Mode: {'PREVIEW' if relevance.preview_only() else 'LIVE-CAPABLE'}",
+            f"  Observed: {relevance.STATE.get('observed', 0)}",
+            f"  Eligible: {relevance.STATE.get('eligible', 0)}",
+            f"  Published: {relevance.STATE.get('published', 0)}",
+        ]
+    except Exception:
+        lines += ["", "🧭 *Long-Term Relevance*: ⚠️ unavailable"]
 
     return "\n".join(lines)
 
@@ -1015,10 +1029,9 @@ def _handle_command(text: str, text_raw: str):
             "📅 *Daily Briefs*\n"
             "`/morning` — Morning brief on demand\n"
             "`/evening` — Evening recap on demand\n\n"
-
-
-
-
+            "🧭 *Long-Term Relevance*\n"
+            "`/relevance` — Latest passive-investor preview\n"
+            "`/relevance_diag` — Engine status and counters\n\n"
             "🧠 *IntelWatch*\n"
             "`/intel` — Full market intelligence briefing\n\n"
 
@@ -1163,6 +1176,23 @@ def _handle_command(text: str, text_raw: str):
             _send_public(msg)
         except Exception as e:
             send_text(f"📊 [MonthlyUpdate] Error: {e}")
+        return
+
+    # ── /relevance / /relevance_diag ──────────────────────────────────────────
+    if text.startswith("/relevance_diag"):
+        try:
+            from bot.public.relevance import diagnostics
+            send_text(diagnostics())
+        except Exception as e:
+            send_text(f"🧭 [Relevance] Diag error: {e}")
+        return
+
+    if text.startswith("/relevance"):
+        try:
+            from bot.public.relevance import latest_preview
+            send_text(latest_preview())
+        except Exception as e:
+            send_text(f"🧭 [Relevance] Preview error: {e}")
         return
 
     # ── /intel ────────────────────────────────────────────────────────────────
