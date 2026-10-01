@@ -22,6 +22,7 @@ def _flag(name: str, default: bool = False) -> bool:
 FEATURE_DEFAULTS = {
     "weekly": True,
     "market_alerts": False,
+    "relevance": False,
     "research": False,
     "strategy": False,
     "intel": False,
@@ -46,17 +47,32 @@ LEGACY_WEEKLY_TERMS = (
 )
 
 
+RELEVANCE_BLOCKED_TERMS = (
+    "buy now",
+    "sell now",
+    "go long",
+    "go short",
+    "take profit",
+    "stop loss",
+    "leverage",
+)
+
+
 def validate_public_text(text: str, feature: str, max_chars: int = 3900) -> tuple[bool, str]:
     """Apply hard publication rules before anything can reach Telegram."""
     if not text or not text.strip():
         return False, "empty message"
     if len(text) > max_chars:
         return False, f"message too long ({len(text)} > {max_chars})"
+    lowered = text.lower()
     if feature == "weekly":
-        lowered = text.lower()
         for term in LEGACY_WEEKLY_TERMS:
             if term in lowered:
                 return False, f"legacy weekly term blocked: {term}"
+    if feature == "relevance":
+        for term in RELEVANCE_BLOCKED_TERMS:
+            if term in lowered:
+                return False, f"trading-language term blocked: {term}"
     return True, ""
 
 
