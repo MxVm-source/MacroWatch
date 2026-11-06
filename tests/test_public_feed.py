@@ -28,7 +28,7 @@ class PublicPublisherTests(unittest.TestCase):
                 os.environ.pop(key, None)
             with patch.dict(os.environ, {"PUBLIC_ENABLED": "true"}, clear=False):
                 self.assertFalse(publisher.feature_enabled("strategy"))
-                self.assertTrue(publisher.feature_enabled("weekly"))
+                self.assertFalse(publisher.feature_enabled("weekly"))
         finally:
             for key, value in saved.items():
                 if value is None:
@@ -39,6 +39,7 @@ class PublicPublisherTests(unittest.TestCase):
 
     def test_weekly_policy_blocks_legacy_content(self):
         env = {
+            "PUBLIC_MANUAL_ONLY": "false",
             "PUBLIC_ENABLED": "true",
             "PUBLIC_ENABLE_WEEKLY": "true",
             "TELEGRAM_TOKEN": "test-token",

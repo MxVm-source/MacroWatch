@@ -14,6 +14,7 @@ import os
 import json
 import time
 import logging
+import threading
 import requests
 import html
 import re
@@ -213,13 +214,21 @@ def _passes_gate(text: str) -> bool:
     t = text.lower()
     # Also strip HTML before checking
     t = re.sub(r"<[^>]+>", " ", t)
-    return any(w in t for w in GATE_WORDS)
+    if re.search(r'\b(?:bitcoin|btc|crypto\w*|ethereum|eth|stablecoins?|blockchains?|defi|cbdc|'
+                 r'digital currenc\w*|binance|coinbase)\b', t):
+        traditional = (r'\b(?:nasdaq|stocks?|equities|s&p|tariffs?|inflation|treasur(?:y|ies)|'
+                       r'interest rates?|federal reserve|unemployment|semiconductors?|oil)\b')
+        if not re.search(traditional, t):
+            return False
+    return any(re.search(r'(?<!\w)' + re.escape(word) + r'(?!\w)', t) for word in GATE_WORDS)
 
 
 # ─── Stage 3: OpenAI scoring ─────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a professional macro trader and crypto market analyst.
+SYSTEM_PROMPT = """You assess traditional US markets, Nasdaq and macroeconomic news.
 Your job is to assess Trump Truth Social posts for their potential market impact.
+Exclude crypto-only commentary. A statement is not confirmation of an enacted policy.
+Do not invent numbers, consensus, price reactions or recommend trades.
 
 You must respond with ONLY a JSON object — no explanation, no markdown, no preamble.
 
@@ -227,7 +236,7 @@ JSON schema:
 {
   "score": <integer 1-10>,
   "sentiment": <"bullish" | "bearish" | "neutral">,
-  "affected_assets": <list of strings, e.g. ["BTC", "equities", "oil", "USD"]>,
+  "affected_assets": <list of strings, e.g. ["Nasdaq", "equities", "oil", "USD"]>,
   "reason": <one concise sentence explaining the market impact>
 }
 
@@ -249,7 +258,6 @@ Geopolitical escalation/de-escalation = 7-10:
 Monetary / fiscal policy = 7-10:
   - Tariff announcements (any level, any country) = 7-9
   - Fed criticism, rate demands, Powell attacks = 7-9
-  - Crypto/BTC policy (reserve, ban, strategic) = 8-10
   - Tax/spending bills, debt ceiling = 6-8
 
 Lower impact (1-5):
@@ -462,6 +470,7 @@ def _format_alert(txt: str, url: str, src: str, ai: dict) -> str:
         f"🍊 [TrumpWatch] {label} | Score: {score}/10 | {emo} {sent.title()}",
         assets_line,
         reason_line,
+        'Déclaration relayée ; application de la mesure et réaction du marché à vérifier.',
         f"🔗 {url}" if url else f"📡 {src}",
     ]))
 
@@ -591,7 +600,16 @@ def _is_too_old(ts: str) -> bool:
 
 # ─── Core poll ───────────────────────────────────────────────────────────────
 
+_POLL_LOCK = threading.RLock()
+
+
 def poll_once():
+    # The command loop and APScheduler share this worker, including the dedup cache.
+    with _POLL_LOCK:
+        return _poll_once_locked()
+
+
+def _poll_once_locked():
     rss_items = _fetch_rss()
     cnn_items = _fetch_cnn()
 
@@ -661,8 +679,11 @@ def poll_once():
             continue
 
         # ── Fire alert ────────────────────────────────────────────────
-        _dedup_mark(key)   # mark BEFORE send so a crash mid-send doesn't re-fire
         msg = _format_alert(txt, url, src, ai)
+        if not send_text(msg, parse_mode=None):
+            log.warning('Macro alert delivery failed; retained for retry')
+            continue
+        _dedup_mark(key)
         RECENT_ALERTS.appendleft(f"🕒 {now_iso} UTC\n{msg}")
         _log_sentiment(ai.get("sentiment", "neutral"), ai.get("score", 0))
 
@@ -675,7 +696,6 @@ def poll_once():
         STATE["last_text"]       = txt[:100]
         STATE["last_alert_utc"]  = datetime.now(timezone.utc)
 
-        send_text(msg)
         fired += 1
 
         # Long-Term Relevance Engine observes the same event independently.

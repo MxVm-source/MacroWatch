@@ -33,6 +33,8 @@ FEATURE_DEFAULTS = {
 
 def feature_enabled(feature: str) -> bool:
     """Return whether a public-feed feature is allowed to publish."""
+    if _flag("PUBLIC_MANUAL_ONLY", True):
+        return False
     if not _flag("PUBLIC_ENABLED", True):
         return False
     env_name = f"PUBLIC_ENABLE_{feature.upper()}"

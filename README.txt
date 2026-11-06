@@ -147,3 +147,29 @@ Ongoing automatic BLS results and official BLS calendar revalidation remain
 blocked until a usable source/network is provided. Missing sources/results are
 shown in the messages and /jj_diag. This implementation does NOT claim full
 post-publication coverage. No paid service has been added.
+
+CLEANUP — 2026-11-06
+--------------------
+All crypto trading is stopped. The entrypoint now schedules ONLY:
+- jjwatch: private JJ session prep, event reminders/confirmed outcomes and US close.
+- trumpwatch: filtered traditional-market macro statements, every60s.
+- weekly_brief: remaining-week macro calendar, Monday09h Europe/Brussels, private.
+
+Retired: BTC/ETH morning08h/evening21h, ATRb strategy recap, crypto Intel deep dive,
+position/whale/challenge polling, old fixed-hour crypto market-open snapshot and
+promotional welcomes. Legacy source files remain for reference, but commands can
+no longer trigger those crypto reports. No order/trading account action is made.
+Public publishing is paused by default (PUBLIC_MANUAL_ONLY=true); the public
+INFINEX CAPITAL group is reserved for manually shared strategy content.
+
+New /evening: latest completed cash-session recap, Nasdaq Composite/S&P500 daily
+indicative closes versus prior exchange-session closes, official agency releases
+where available. Auto-delivery close+10 minutes follows XNYS holidays, early closes
+and IANA timezones. No inference from stale quotes or unsupported news causes.
+If a course/source is unavailable, the report says so. It is not a real-time wire.
+/weekly now reports the remaining US week; /health lists the three actual jobs.
+
+One-time group-description cleanup resolves both configured groups via Telegram,
+requires distinct canonical IDs, private INFINEX/Macro title and public username
+macrowatchalpha, and edits descriptions only. No public message is sent. Success
+markers persist; permission/identity failures are logged and cause no mutation.

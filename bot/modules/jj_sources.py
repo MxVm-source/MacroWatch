@@ -261,6 +261,13 @@ def session_open(day):
     return calendar.session_open(str(day)).to_pydatetime().astimezone(UTC)
 
 
+def session_close(day):
+    calendar = _exchange()
+    if not calendar.is_session(str(day)):
+        return None
+    return calendar.session_close(str(day)).to_pydatetime().astimezone(UTC)
+
+
 def relevance_note(event):
     return {
         'employment': 'Emploi, salaires et chômage : surveiller ensemble les composantes et les révisions.',

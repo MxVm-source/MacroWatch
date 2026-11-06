@@ -1,23 +1,11 @@
-# bot/main.py  — build 2026-06-17-v5
+"""MacroWatch: private Nasdaq/JJ information, public strategy sharing stays manual.
+
+Only three jobs remain: JJ session cycle, relevant macro statements, Monday
+macro calendar. Retired crypto implementation files remain in git for reference;
+none of the old position/challenge/report jobs is scheduled or command-accessible.
 """
-MacroWatch — Entry point
-
-Polling architecture (all via APScheduler, no raw threads for polling):
-  TrumpWatch   → every 60s
-  FedWatch     → every 5min
-  CryptoWatch  → weekly cron (Sunday 18:00)
-  CryptoDaily  → daily cron  (15:28)
-  PositionWatch → every 10s (open/close/TP/SL detection)
-
-Command loop runs in a single daemon thread.
-All poll functions are wrapped so one crash never kills the scheduler.
-"""
-
-import os
-import sys
-import json
 import logging
-import platform
+import os
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -25,1263 +13,136 @@ from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.events import EVENT_JOB_ERROR
 
-# ─── Silence APScheduler's per-job INFO spam ─────────────────────────────────
-# Only show WARNING and above — errors will still surface.
-logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
-logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
-logging.getLogger("apscheduler.jobstores.default").setLevel(logging.WARNING)
+from bot.utils import get_updates
+from bot.modules import jjwatch, trumpwatch_live
+from bot.modules.jjwatch import send_private
 
-from bot.utils import send_text, get_updates
-
-
-import bot.modules.fedwatch        as fedwatch
-import bot.modules.jjwatch         as jjwatch
-import bot.modules.dailybrief      as dailybrief
-import bot.modules.trumpwatch_live as trumpwatch_live
-import bot.modules.whalewatch      as whalewatch
-import bot.modules.stratwatch      as stratwatch
-import bot.modules.challengewatch  as challengewatch
-import bot.modules.intelwatch      as intelwatch
-import bot.modules.reportwatch     as reportwatch
-
-log = logging.getLogger("main")
-
+logging.getLogger('apscheduler').setLevel(logging.WARNING)
+log = logging.getLogger('main')
 STARTED_AT_UTC = datetime.now(timezone.utc)
+SCHED = BackgroundScheduler(timezone='Europe/Brussels')
 
-# ─── Public channel config ───────────────────────────────────────────────────
-# Public Telegram publishing is centralized in bot.public.publisher.
-# main.py never sends directly to PUBLIC_CHAT_ID.
-ADMIN_USER_ID  = os.getenv("ADMIN_USER_ID", "")   # Telegram user ID — /monthly_update restricted to this
-
-# ─── PositionWatch state ─────────────────────────────────────────────────────
-# Tracks last known snapshot per symbol so we can detect changes.
-# Initialised as None — first poll just seeds the baseline, no alerts.
-from bot.datafeed_bitget import (
-    _fetch_current_futures_position,
-    _fetch_pending_tp_sl_orders,
-    _position_is_open,
-    _to_float,
-    iso_utc_now,
-    BITGET_SYMBOLS,
-)
-
-_POS_SNAPSHOT: dict = {}   # { "BTCUSDT": { has_position, side, size, entry, tp, sl }, ... }
-_POS_INITIALISED = False
-
-# ─── Trade streak tracker ─────────────────────────────────────────────────────
-_STREAK: dict = {
-    "count":     0,      # positive = win streak, negative = loss streak
-    "last_side": None,   # "win" or "loss"
-}
-
-def _update_streak(is_win: bool) -> str:
-    """Update streak and return a formatted streak line for the alert."""
-    if is_win:
-        _STREAK["count"] = max(_STREAK["count"], 0) + 1
-        _STREAK["last_side"] = "win"
-    else:
-        _STREAK["count"] = min(_STREAK["count"], 0) - 1
-        _STREAK["last_side"] = "loss"
-
-    count = abs(_STREAK["count"])
-    if _STREAK["last_side"] == "win":
-        if count >= 5:
-            return f"🔥 {count} win streak"
-        elif count >= 2:
-            return f"✅ {count} wins in a row"
-        else:
-            return ""   # single win — no streak line
-    else:
-        if count >= 3:
-            return f"⚠️ {count} losses in a row"
-        else:
-            return ""
-
-# ─── Runtime feature flags ───────────────────────────────────────────────────
-
-ENABLE_ELITE_POSITIONWATCH = os.getenv(
-    "ENABLE_ELITE_POSITIONWATCH", "false"
-).strip().lower() in ("1", "true", "yes", "on")
-
-# ─── Scheduler (module-level so commands can inspect jobs) ───────────────────
-
-SCHED = BackgroundScheduler(timezone=os.getenv("TIMEZONE", "Europe/Brussels"))
-
-
-# ─── Safe job wrappers ───────────────────────────────────────────────────────
-# Each wrapper catches its own errors so one broken module never kills others.
 
 def _job_trumpwatch():
     try:
-        before = len(trumpwatch_live.STATE.get("seen", {}))
         trumpwatch_live.poll_once()
-        after  = len(trumpwatch_live.STATE.get("seen", {}))
-        if after > before:
-            # New alerts fired — record count for daily recap
-            for _ in range(after - before):
-                dailybrief.record_trump_alert()
-    except Exception as e:
-        _err("TrumpWatch", e)
-
-def _job_fedwatch():
-    try:
-        fedwatch.poll_once()
-    except Exception as e:
-        _err("FedWatch", e)
+    except Exception as exc:
+        log.error('TrumpWatch failed error_type=%s', type(exc).__name__)
 
 
 def _job_jjwatch():
     try:
         jjwatch.poll_once()
     except Exception as exc:
-        # Keep outages in logs; avoid flooding Telegram every minute.
         log.exception('JJ poll failed error_type=%s', type(exc).__name__)
+
 
 def _job_weekly_brief():
     try:
-        from bot.modules.weeklybrief import send_weekly_brief
-        send_weekly_brief(_get_modules())
-    except Exception as e:
-        _err("WeeklyBrief", e)
-
-
-def _job_strategy_recap():
-    try:
-        from bot.modules.strategyrecap import send_strategy_recap
-        send_strategy_recap()
-    except Exception as e:
-        _err("StrategyRecap", e)
-
-
-def _job_weekly_intel():
-    try:
-        intelwatch.send_weekly_intel(_get_modules())
-    except Exception as e:
-        _err("WeeklyIntel", e)
-
-def _err(module: str, exc: Exception):
-    msg = f"⚠️ [{module}] Job error: {str(exc)[:200]}"
-    print(msg, flush=True)
-    try:
-        send_text(msg)
-    except Exception:
-        pass
-
-
-# ─── Scheduler setup ─────────────────────────────────────────────────────────
-
-def _job_positionwatch():
-    try:
-        _poll_positions()
-    except Exception as e:
-        _err("PositionWatch", e)
-
-
-
-def _poll_positions():
-    """
-    Dual-account PositionWatch.
-
-    Main / sub-account (BITGET_API_KEY) — ATRb v2 systematic bot:
-      Lightweight alerts only — Position Opened + Position Closed.
-      No TradeWatch plan card (bot has its own internal risk discipline).
-      No per-TP / per-SL alerts.
-
-    Elite account (ELITE_API_KEY) — TraderWatch discretionary:
-      Disabled by default. Set ENABLE_ELITE_POSITIONWATCH=true to enable.
-      When enabled: Position Opened/Closed + TP/SL monitoring.
-
-    Both feed to private group only. Snapshot keyed by (account, symbol)
-    so the two books never collide.
-    """
-    global _POS_INITIALISED, _POS_SNAPSHOT
-
-    from bot.datafeed_bitget import (
-        _fetch_current_futures_position,
-        _fetch_pending_tp_sl_orders,
-        _fetch_current_futures_position_elite,
-        _fetch_pending_tp_sl_orders_elite,
-        BITGET_API_KEY,
-        ELITE_API_KEY,
-    )
-
-    accounts = []
-    if BITGET_API_KEY:
-        accounts.append({
-            "name":         "main",
-            "label":        "🤖 ATRb v2",
-            "fetch_pos":    _fetch_current_futures_position,
-            "fetch_orders": _fetch_pending_tp_sl_orders,
-            "symbols":      BITGET_SYMBOLS or ["ETHUSDT"],
-            "rich":         False,  # lightweight alerts only
-        })
-    if ENABLE_ELITE_POSITIONWATCH and ELITE_API_KEY:
-        accounts.append({
-            "name":         "elite",
-            "label":        "🎯 TraderWatch",
-            "fetch_pos":    _fetch_current_futures_position_elite,
-            "fetch_orders": _fetch_pending_tp_sl_orders_elite,
-            "symbols":      ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
-            "rich":         True,   # TradeWatch plan + TP/SL alerts
-        })
-
-    for acct in accounts:
-        for sym in acct["symbols"]:
-            sym = sym.strip().upper()
-            try:
-                pos    = acct["fetch_pos"](sym)
-                orders = acct["fetch_orders"](sym) or {}
-                tps    = sorted([_to_float(x) for x in (orders.get("tp") or [])])
-                sls    = sorted([_to_float(x) for x in (orders.get("sl") or [])])
-                is_open = _position_is_open(pos)
-
-                cur = {
-                    "has_position": is_open,
-                    "side":  (pos.get("holdSide") or "").upper() if pos else "",
-                    "size":  _to_float(pos.get("total") or pos.get("available") or 0) if pos else 0.0,
-                    "entry": _to_float(pos.get("openPriceAvg") or pos.get("openPrice") or 0) if pos else 0.0,
-                    "lev":   pos.get("leverage", "?") if pos else "?",
-                    "tp":    tps,
-                    "sl":    sls,
-                }
-
-                key  = (acct["name"], sym)
-                prev = _POS_SNAPSHOT.get(key)
-
-                # First pass — seed baseline silently
-                if not _POS_INITIALISED or prev is None:
-                    _POS_SNAPSHOT[key] = cur
-                    continue
-
-                side_emoji = "🟢" if cur["side"] == "LONG" else "🔴"
-                label      = acct["label"]
-                rich       = acct["rich"]
-
-                # ── Position opened ──────────────────────────────────────
-                if not prev["has_position"] and cur["has_position"]:
-                    cur["opened_at"] = datetime.now(timezone.utc)
-                    send_text(
-                        f"*{label} — Position Opened*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Pair: {sym}\n"
-                        f"Side: {side_emoji} {cur['side']}\n"
-                        f"Entry: {cur['entry']:.2f}\n"
-                        f"Size: {cur['size']}\n"
-                        f"Leverage: {cur['lev']}x\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🕐 {iso_utc_now()}"
-                    )
-                    if rich:
-                        pass  # TradeWatch plan card removed
-
-                # ── Position closed ──────────────────────────────────────
-                elif prev["has_position"] and not cur["has_position"]:
-                    prev_side  = prev.get("side") or "?"
-                    prev_emoji = "🟢" if prev_side == "LONG" else "🔴"
-                    entry      = prev.get("entry", 0.0)
-
-                    # Fetch last price for PnL estimate
-                    try:
-                        from bot.datafeed_bitget import get_ticker
-                        last_px = get_ticker(sym) or 0.0
-                    except Exception:
-                        last_px = 0.0
-
-                    pnl_pct_line = ""
-                    leveraged    = 0.0
-                    if entry and last_px:
-                        raw = (last_px - entry) / entry * 100
-                        if prev_side == "SHORT":
-                            raw = -raw
-                        leveraged = raw * _to_float(prev.get("lev") or 1)
-                        sign      = "🟢 +" if leveraged >= 0 else "🔴 "
-                        pnl_pct_line = f"\nEst. PnL: {sign}{leveraged:.1f}% (@ {last_px:.2f})"
-
-                    duration_line = ""
-                    opened_at = prev.get("opened_at")
-                    if opened_at:
-                        delta = datetime.now(timezone.utc) - opened_at
-                        h, rem = divmod(int(delta.total_seconds()), 3600)
-                        m = rem // 60
-                        duration_line = f"\nHeld: {h}h {m:02d}m"
-
-                    streak_line = ""
-                    if rich and entry and last_px:
-                        s = _update_streak(leveraged >= 0)
-                        if s:
-                            streak_line = f"\n{s}"
-
-                    send_text(
-                        f"*{label} — Position Closed*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Pair: {sym}\n"
-                        f"Side: {prev_emoji} {prev_side}"
-                        f"{pnl_pct_line}"
-                        f"{duration_line}"
-                        f"{streak_line}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🕐 {iso_utc_now()}"
-                    )
-
-                # ── TP / SL hit detection (Elite only) ───────────────────
-                elif rich and cur["has_position"] and prev["has_position"]:
-                    prev_tps = prev.get("tp") or []
-                    cur_tps  = cur.get("tp") or []
-                    prev_sls = prev.get("sl") or []
-                    cur_sls  = cur.get("sl") or []
-
-                    # TP hit — a TP price disappeared
-                    for tp in prev_tps:
-                        if tp not in cur_tps:
-                            send_text(
-                                f"✅ *{label} — TP Hit*\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"Pair: {sym}\n"
-                                f"Side: {side_emoji} {cur['side']}\n"
-                                f"TP: {tp}\n"
-                                f"🕐 {iso_utc_now()}"
-                            )
-
-                    # SL hit — a SL price disappeared and position still open
-                    for sl in prev_sls:
-                        if sl not in cur_sls:
-                            send_text(
-                                f"❌ *{label} — SL Moved/Hit*\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"Pair: {sym}\n"
-                                f"Side: {side_emoji} {cur['side']}\n"
-                                f"SL: {sl}\n"
-                                f"🕐 {iso_utc_now()}"
-                            )
-
-                # Preserve opened_at across snapshots
-                if cur["has_position"] and prev and prev.get("opened_at"):
-                    cur["opened_at"] = prev["opened_at"]
-
-                _POS_SNAPSHOT[key] = cur
-
-            except Exception as e:
-                log.warning(f"PositionWatch {acct['name']} {sym}: {e}")
-
-    # Mark initialised after first full pass
-    if not _POS_INITIALISED:
-        _POS_INITIALISED = True
-        print("📘 PositionWatch baseline set ✅", flush=True)
-
-
-# ─── Challenge updates ───────────────────────────────────────────────────────
-
-def _job_challenge_update():
-    """Tuesday 09:15 — fire both challenges to their respective channels."""
-    # Bot challenge -> public + private
-    try:
-        challengewatch.show_bot_challenge()
-    except Exception as e:
-        _err("BotChallengeUpdate", e)
-
-    # Live (TraderWatch discretionary) challenge -> private only
-    try:
-        challengewatch.show_live_challenge()
-    except Exception as e:
-        _err("LiveChallengeUpdate", e)
-
-
-def _job_weekly_perf():
-    try:
-        _send_weekly_perf()
-    except Exception as e:
-        _err("WeeklyPerf", e)
-
-
-def _send_weekly_perf():
-    """
-    Monday 09:00 — Weekly performance recap.
-    Pulls closed trades from Bitget for the past 7 days and summarises results.
-    Falls back to ETH price change if no API credentials.
-    """
-    from bot.datafeed_bitget import (
-        _signed_request, _to_float,
-        BITGET_PRODUCT_TYPE, BITGET_API_KEY
-    )
-
-    sym = os.getenv("INFINEX_SYMBOL", "ETHUSDT")
-    now = datetime.now(timezone.utc)
-    week_start_dt = now - timedelta(days=7)
-    week_start_str = week_start_dt.strftime("%b %d")
-    week_end_str   = (now - timedelta(days=1)).strftime("%b %d")
-
-    # ── ETH 7D price context ─────────────────────────────────────────────────
-    eth_line = ""
-    try:
-        r = requests.get(
-            "https://api.bitget.com/api/v2/mix/market/candles",
-            params={"symbol": sym, "granularity": "4H", "limit": "42",
-                    "productType": BITGET_PRODUCT_TYPE},
-            timeout=8,
-        )
-        data   = (r.json().get("data") or []) if r.ok else []
-        closes = [float(row[4]) for row in data if isinstance(row, (list,tuple)) and len(row) >= 5]
-        if closes:
-            chg = (closes[-1] - closes[0]) / closes[0] * 100
-            e   = "📈" if chg >= 0 else "📉"
-            s   = "+" if chg >= 0 else ""
-            eth_line = f"ETH/USDT: {e} {s}{chg:.1f}% this week\n"
-    except Exception:
-        pass
-
-    # ── Closed trades (authenticated) ────────────────────────────────────────
-    trades_section = ""
-    if BITGET_API_KEY:
-        try:
-            start_ms = int(week_start_dt.timestamp() * 1000)
-            end_ms   = int(now.timestamp() * 1000)
-
-            res = _signed_request(
-                "GET",
-                "/api/v2/mix/order/history",
-                params={
-                    "symbol":      sym,
-                    "productType": BITGET_PRODUCT_TYPE,
-                    "startTime":   str(start_ms),
-                    "endTime":     str(end_ms),
-                    "limit":       "100",
-                }
-            )
-            orders = ((res.get("data") or {}).get("orderList") or [])
-
-            # Only filled closing orders with a realised PnL
-            closed = []
-            for o in orders:
-                state     = (o.get("state") or "").lower()
-                trade_side = (o.get("tradeSide") or o.get("side") or "").lower()
-                pnl_raw   = o.get("pnl") or o.get("realizedPL") or o.get("profit") or ""
-                if state != "filled":
-                    continue
-                if "close" not in trade_side and "reduce" not in trade_side:
-                    continue
-                try:
-                    pnl = float(pnl_raw)
-                except Exception:
-                    continue
-
-                # Trade date
-                try:
-                    ctime = int(o.get("cTime") or o.get("uTime") or 0)
-                    dt    = datetime.fromtimestamp(ctime / 1000, tz=timezone.utc).strftime("%b %d")
-                except Exception:
-                    dt = "—"
-
-                side = (o.get("holdSide") or trade_side or "").upper()
-                closed.append({"pnl": pnl, "date": dt, "side": side})
-
-            if closed:
-                lines    = []
-                net_pnl  = sum(t["pnl"] for t in closed)
-                wins     = sum(1 for t in closed if t["pnl"] > 0)
-                losses   = sum(1 for t in closed if t["pnl"] <= 0)
-                net_sign = "🟢 +" if net_pnl >= 0 else "🔴 "
-
-                for t in closed:
-                    e = "🟢" if t["pnl"] >= 0 else "🔴"
-                    s = "+" if t["pnl"] >= 0 else ""
-                    lines.append(f"{e} {t['side']} closed {s}${t['pnl']:.2f} — {t['date']}")
-
-                trades_section = (
-                    f"\nTrades this week: {len(closed)} "
-                    f"({wins}W / {losses}L)\n"
-                    + "\n".join(lines)
-                    + f"\n\nNet week: {net_sign}${abs(net_pnl):.2f}"
-                )
-            else:
-                trades_section = "\nNo closed trades this week."
-
-        except Exception as e:
-            trades_section = f"\nTrade history unavailable: {str(e)[:80]}"
-
-    # ── Text-only weekly recap (image module removed for memory) ───────────
-    send_text(
-        f"🤖 *ATRb v2 — Weekly Recap*\n"
-        f"📅 {week_start_str} → {week_end_str}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{eth_line}"
-        f"{trades_section}"
-    )
-
-
-def _job_monthly_perf():
-    try:
-        _send_monthly_perf()
-    except Exception as e:
-        _err("MonthlyPerf", e)
-
-
-def _send_monthly_perf():
-    """
-    First Monday of each month at 09:30 — 30-day closed trade recap.
-    Personal trading performance only — no strategy names or links.
-    """
-    from bot.datafeed_bitget import (
-        _signed_request, _to_float,
-        BITGET_PRODUCT_TYPE, BITGET_API_KEY
-    )
-
-    sym = os.getenv("INFINEX_SYMBOL", "ETHUSDT")
-    now = datetime.now(timezone.utc)
-    month_start_dt  = now - timedelta(days=30)
-    month_start_str = month_start_dt.strftime("%b %d")
-    month_end_str   = (now - timedelta(days=1)).strftime("%b %d")
-
-    # ── ETH 30D price context ────────────────────────────────────────────────
-    eth_line = ""
-    try:
-        r = requests.get(
-            "https://api.bitget.com/api/v2/mix/market/candles",
-            params={"symbol": sym, "granularity": "4H", "limit": "180",
-                    "productType": BITGET_PRODUCT_TYPE},
-            timeout=8,
-        )
-        data   = (r.json().get("data") or []) if r.ok else []
-        closes = [float(row[4]) for row in data if isinstance(row, (list,tuple)) and len(row) >= 5]
-        if closes:
-            chg = (closes[-1] - closes[0]) / closes[0] * 100
-            e   = "📈" if chg >= 0 else "📉"
-            s   = "+" if chg >= 0 else ""
-            eth_line = f"ETH/USDT: {e} {s}{chg:.1f}% this month\n"
-    except Exception:
-        pass
-
-    # ── Closed trades (authenticated) ────────────────────────────────────────
-    trades_section = ""
-    if BITGET_API_KEY:
-        try:
-            start_ms = int(month_start_dt.timestamp() * 1000)
-            end_ms   = int(now.timestamp() * 1000)
-
-            res = _signed_request(
-                "GET",
-                "/api/v2/mix/order/history",
-                params={
-                    "symbol":      sym,
-                    "productType": BITGET_PRODUCT_TYPE,
-                    "startTime":   str(start_ms),
-                    "endTime":     str(end_ms),
-                    "limit":       "100",
-                }
-            )
-            orders = ((res.get("data") or {}).get("orderList") or [])
-
-            closed = []
-            for o in orders:
-                state      = (o.get("state") or "").lower()
-                trade_side = (o.get("tradeSide") or o.get("side") or "").lower()
-                pnl_raw    = o.get("pnl") or o.get("realizedPL") or o.get("profit") or ""
-                if state != "filled":
-                    continue
-                if "close" not in trade_side and "reduce" not in trade_side:
-                    continue
-                try:
-                    pnl = float(pnl_raw)
-                except Exception:
-                    continue
-                try:
-                    ctime = int(o.get("cTime") or o.get("uTime") or 0)
-                    dt    = datetime.fromtimestamp(ctime / 1000, tz=timezone.utc).strftime("%b %d")
-                except Exception:
-                    dt = "—"
-                side = (o.get("holdSide") or trade_side or "").upper()
-                closed.append({"pnl": pnl, "date": dt, "side": side})
-
-            if closed:
-                net_pnl   = sum(t["pnl"] for t in closed)
-                wins      = sum(1 for t in closed if t["pnl"] > 0)
-                losses    = sum(1 for t in closed if t["pnl"] <= 0)
-                best      = max(closed, key=lambda x: x["pnl"])
-                worst     = min(closed, key=lambda x: x["pnl"])
-                win_rate  = round(wins / len(closed) * 100)
-                net_sign  = "📈 +" if net_pnl >= 0 else "📉 "
-
-                trades_section = (
-                    f"\nTrades: {len(closed)} ({wins}W / {losses}L) — {win_rate}% win rate\n"
-                    f"Net PnL: {net_sign}${abs(net_pnl):.2f}\n"
-                    f"Best:  📈 +${best['pnl']:.2f} — {best['date']}\n"
-                    f"Worst: 📉 ${worst['pnl']:.2f} — {worst['date']}"
-                )
-            else:
-                trades_section = "\nNo closed trades this month."
-
-        except Exception as e:
-            trades_section = f"\nTrade history unavailable: {str(e)[:80]}"
-
-    send_text(
-        f"🤖 *ATRb v2 — Monthly Recap*\n"
-        f"📅 {month_start_str} → {month_end_str}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{eth_line}"
-        f"{trades_section}"
-    )
-
-
-def _job_fedwatch_monday():
-    """Monday 08:00 — push current rate probability to the group."""
-    try:
-        if hasattr(fedwatch, "show_rate_probability"):
-            fedwatch.show_rate_probability()
-        else:
-            fedwatch.show_next_event()
-    except Exception as e:
-        _err("FedWatch Monday", e)
-
-
-def _job_whalewatch():
-    try:
-        whalewatch.poll_once()
-    except Exception as e:
-        _err("WhaleWatch", e)
-
-
-def _get_modules():
-    """Bundle active module references for briefs and IntelWatch."""
-    return {
-        "fedwatch": fedwatch,
-        "trumpwatch": trumpwatch_live,
-    }
-
-
-
-def _job_market_open():
-    try:
-        _send_market_open()
-    except Exception as e:
-        _err("MarketOpen", e)
-
-
-def _send_market_open():
-    """Mon–Fri 14:30 CET — US market open snapshot."""
-    from bot.datafeed_bitget import BITGET_PRODUCT_TYPE
-
-    def _ticker(sym):
-        try:
-            r = requests.get(
-                "https://api.bitget.com/api/v2/mix/market/ticker",
-                params={"symbol": sym, "productType": BITGET_PRODUCT_TYPE},
-                timeout=6,
-            )
-            raw   = r.json() if r.ok else {}
-            items = (raw or {}).get("data") or {}
-            if isinstance(items, list):
-                items = items[0] if items else {}
-            def _f(k):
-                v = items.get(k)
-                try: return float(v) if v not in (None, "") else None
-                except: return None
-            return {
-                "last":    _f("lastPr"),
-                "chg24h":  _f("change24h"),
-                "high":    _f("high24h"),
-                "low":     _f("low24h"),
-                "funding": _f("fundingRate"),
-            }
-        except Exception:
-            return None
-
-    btc = _ticker("BTCUSDT")
-    eth = _ticker("ETHUSDT")
-    now = datetime.now(timezone.utc)
-
-    if not btc and not eth:
-        return
-
-    lines = [f"🔔 *US Market Open — {now.strftime('%b %d, %H:%M')} UTC*\n"]
-
-    if btc:
-        chg  = btc["chg24h"] or 0
-        sign = "+" if chg >= 0 else ""
-        e    = "📈" if chg >= 0 else "📉"
-        fund = f" | Funding: {'positive' if (btc['funding'] or 0) > 0 else 'negative'}" if btc["funding"] is not None else ""
-        lines.append(
-            f"₿ BTC  ${btc['last']:,.0f} | {e} {sign}{chg:.2f}%"
-            f" | H {btc['high']:,.0f} / L {btc['low']:,.0f}{fund}"
-        )
-
-    if eth:
-        chg  = eth["chg24h"] or 0
-        sign = "+" if chg >= 0 else ""
-        e    = "📈" if chg >= 0 else "📉"
-        fund = f" | Funding: {'positive' if (eth['funding'] or 0) > 0 else 'negative'}" if eth["funding"] is not None else ""
-        # ETH vs BTC performance
-        if btc and btc["chg24h"] is not None:
-            rel = "outperformed" if chg > (btc["chg24h"] or 0) else "underperformed"
-            lines.append(
-                f"Ξ ETH  ${eth['last']:,.2f} | {e} {sign}{chg:.2f}%"
-                f" | {rel} BTC{fund}"
-            )
-        else:
-            lines.append(f"Ξ ETH  ${eth['last']:,.2f} | {e} {sign}{chg:.2f}%{fund}")
-
-    # Overall bias
-    btc_chg = (btc["chg24h"] or 0) if btc else 0
-    eth_chg = (eth["chg24h"] or 0) if eth else 0
-    avg_chg = (btc_chg + eth_chg) / 2
-
-    if avg_chg > 1.5:
-        bias = "🟢 Bullish open"
-    elif avg_chg > 0:
-        bias = "🟡 Cautious open"
-    elif avg_chg > -1.5:
-        bias = "🟠 Soft open"
-    else:
-        bias = "🔴 Bearish open"
-
-    lines.append(f"\nBias: {bias}")
-
-    send_text("\n".join(lines))
+        jjwatch.show_weekly()
+    except Exception as exc:
+        log.error('Weekly macro brief failed error_type=%s', type(exc).__name__)
 
 
 def _on_job_error(event):
-    print(f"[APScheduler] Job {event.job_id} raised: {event.exception}", flush=True)
+    log.error('Scheduler job=%s failed error_type=%s', event.job_id, type(event.exception).__name__)
+
+
+def _cleanup_group_descriptions():
+    from bot.group_maintenance import update_descriptions
+    update_descriptions(jjwatch.engine())
+    from bot.modules import jj_sources as src, marketbrief
+    now = datetime.now(timezone.utc)
+    day = now.astimezone(src.NEW_YORK).date()
+    while not src.session_close(day) or src.session_close(day) > now:
+        day -= timedelta(days=1)
+    for name, symbol in marketbrief.SYMBOLS.items():
+        available = marketbrief.fetch_close(symbol, day, now) is not None
+        log.warning('Close source probe index=%s available=%s session=%s', name, available, day)
+
 
 def start_scheduler():
     SCHED.add_listener(_on_job_error, EVENT_JOB_ERROR)
-
-    # ── TrumpWatch — 60s (was a raw thread with run_loop, now clean APScheduler)
-    if os.getenv("ENABLE_TRUMPWATCH_LIVE", "true").lower() in ("1", "true", "yes", "on"):
-        SCHED.add_job(
-            _job_trumpwatch, "interval", seconds=60,
-            id="trumpwatch", max_instances=1, misfire_grace_time=15,
-        )
-        print("🍊 TrumpWatch scheduled (60s) ✅", flush=True)
-
-    # ── FedWatch — every 5 min (was a blocking schedule_loop thread)
+    if os.getenv('ENABLE_TRUMPWATCH_LIVE', 'true').lower() in ('1', 'true', 'yes', 'on'):
+        SCHED.add_job(_job_trumpwatch, 'interval', seconds=60, id='trumpwatch',
+                      max_instances=1, coalesce=True, misfire_grace_time=30)
     if jjwatch.enabled():
-        SCHED.add_job(
-            _job_jjwatch, 'interval', seconds=60,
-            id='jjwatch', max_instances=1, coalesce=True, misfire_grace_time=30,
-        )
-        print('🚦 JJ scheduled (60s, private, sourced, persistent dedup) ✅', flush=True)
-    elif os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
-        SCHED.add_job(
-            _job_fedwatch, "interval", minutes=5,
-            id="fedwatch", max_instances=1, misfire_grace_time=60,
-        )
-        print("🏦 FedWatch scheduled (5min) ✅", flush=True)
-
-    # ── MacroWatch Weekly Brief — Monday 09:00 (market report)
-    SCHED.add_job(
-        _job_weekly_brief, "cron", day_of_week="mon", hour=9, minute=0,
-        id="weekly_brief", max_instances=1,
-    )
-    print("📊 MacroWatch Weekly Brief scheduled (Mon 09:00) ✅", flush=True)
-
-    # ── Daily Morning Brief — 08:00 Brussels (private only)
-    SCHED.add_job(
-        lambda: dailybrief.send_morning_brief(_get_modules()),
-        "cron", hour=8, minute=0,
-        id="morning_brief", max_instances=1,
-    )
-    print("🌅 Morning Brief scheduled (daily 08:00 Brussels) ✅", flush=True)
-
-    # ── Daily Evening Recap — 21:00 Brussels (private only)
-    SCHED.add_job(
-        lambda: dailybrief.send_evening_recap(_get_modules()),
-        "cron", hour=21, minute=0,
-        id="evening_recap", max_instances=1,
-    )
-    print("🌙 Evening Recap scheduled (daily 21:00 Brussels) ✅", flush=True)
-
-    # ── Strategy Recap — Friday 09:00 (trades + positioning)
-    SCHED.add_job(
-        _job_strategy_recap, "cron", day_of_week="fri", hour=9, minute=0,
-        id="strategy_recap", max_instances=1,
-    )
-    print("🤖 Strategy Recap scheduled (Fri 09:00) ✅", flush=True)
-
-    # ── Weekly Intel Deep Dive — Wednesday 09:00
-    SCHED.add_job(
-        _job_weekly_intel, "cron", day_of_week="wed", hour=9, minute=0,
-        id="weekly_intel", max_instances=1,
-    )
-    print("🧠 Weekly Intel Deep Dive scheduled (Wed 09:00) ✅", flush=True)
-
-    # ── PositionWatch — every 10s
-    SCHED.add_job(
-        _job_positionwatch, "interval", seconds=10,
-        id="positionwatch", max_instances=1, misfire_grace_time=5,
-    )
-    print("📘 PositionWatch scheduled (10s) ✅", flush=True)
-    if ENABLE_ELITE_POSITIONWATCH:
-        print("🎯 Elite PositionWatch enabled ✅", flush=True)
-    else:
-        print("🎯 Elite PositionWatch disabled (ENABLE_ELITE_POSITIONWATCH=false) ✅", flush=True)
-
-    # ── Market Open Alert — Mon–Fri 13:30 UTC (14:30 CET)
-    if not jjwatch.enabled() and os.getenv("ENABLE_MARKET_OPEN", "true").lower() in ("1", "true", "yes", "on"):
-        SCHED.add_job(
-            _job_market_open, "cron", day_of_week="mon-fri", hour=13, minute=30,
-            id="market_open", max_instances=1,
-        )
-        print("🔔 Market Open Alert scheduled (Mon–Fri 13:30 UTC) ✅", flush=True)
-
-    # ── WhaleWatch — every 5 min
-    if os.getenv("ETHERSCAN_API_KEY"):
-        SCHED.add_job(
-            _job_whalewatch, "interval", minutes=5,
-            id="whalewatch", max_instances=1, misfire_grace_time=30,
-        )
-        print("🐋 WhaleWatch scheduled (5min) ✅", flush=True)
-    else:
-        print("🐋 WhaleWatch disabled (ETHERSCAN_API_KEY not set)", flush=True)
-
-    # ── Challenge update — PAUSED (Tuesday 09:15)
-    # Temporarily disabled — ATRb v2 challenge paused pending strategy review.
-    # Re-enable by uncommenting the block below.
-    # if os.getenv("PUBLIC_CHAT_ID"):
-    #     SCHED.add_job(
-    #         _job_challenge_update, "cron", day_of_week="tue", hour=9, minute=15,
-    #         id="challenge_update", max_instances=1,
-    #     )
-    #     print("🎯 Challenge Update scheduled (Tue 09:15) ✅", flush=True)
-
-    # ── FedWatch Monday rate probability push — Monday 08:00
-    SCHED.add_job(
-        (lambda: jjwatch.show_brief()) if jjwatch.enabled() else _job_fedwatch_monday,
-        "cron", day_of_week="mon", hour=8, minute=0,
-        id="fedwatch_monday", max_instances=1,
-    )
-    print("🏦 FedWatch Monday push scheduled (Mon 08:00) ✅", flush=True)
-
-    # ── MarketStructure — 4H close + 2 min (BTC + ETH, 1 min apart)
+        SCHED.add_job(_job_jjwatch, 'interval', seconds=60, id='jjwatch',
+                      max_instances=1, coalesce=True, misfire_grace_time=30)
+        SCHED.add_job(_job_weekly_brief, 'cron', day_of_week='mon', hour=9, minute=0,
+                      timezone='Europe/Brussels', id='weekly_brief', max_instances=1,
+                      misfire_grace_time=300)
     SCHED.start()
-    print("🕒 APScheduler started ✅", flush=True)
-    print("🤖 StratWatch ready — /status command live ✅", flush=True)
-    print("🧠 IntelWatch ready ✅", flush=True)
-    print("🧭 Long-Term Relevance Engine ready — PREVIEW mode by default ✅", flush=True)
+    log.warning('MacroWatch cleanup-v2 running jobs=%s crypto_jobs=off public_posts=manual_only',
+                ','.join(job.id for job in SCHED.get_jobs()))
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
-def _fmt_uptime() -> str:
-    delta = datetime.now(timezone.utc) - STARTED_AT_UTC
-    h, rem = divmod(int(delta.total_seconds()), 3600)
-    return f"{h:02d}:{rem // 60:02d}:{rem % 60:02d}"
-
-def _compute_levels_from_candles(candles, lookback=48):
-    if not candles:
-        return None
-    lb = candles[-lookback:] if len(candles) > lookback else candles
-    return {
-        "support":    min(c["low"]   for c in lb),
-        "resistance": max(c["high"]  for c in lb),
-        "last":       candles[-1]["close"],
-    }
-
-def _atr_simple(candles, period=14):
-    if len(candles) < period + 1:
-        return 0.0
-    trs = [
-        max(candles[i]["high"] - candles[i]["low"],
-            abs(candles[i]["high"] - candles[i-1]["close"]),
-            abs(candles[i]["low"]  - candles[i-1]["close"]))
-        for i in range(-period, 0)
-    ]
-    return sum(trs) / len(trs) if trs else 0.0
-
-
-
-
-# ─── Health summary ──────────────────────────────────────────────────────────
-
-def _build_health_msg() -> str:
-    lines = [
-        "🩺 *MacroWatch Health*",
-        f"⏱ Uptime: {_fmt_uptime()}",
-        f"🕐 Started: {STARTED_AT_UTC.strftime('%Y-%m-%d %H:%M:%S')} UTC",
-        f"🐍 Python {sys.version.split()[0]} | {platform.system()} {platform.release()}",
-        "",
-        "📅 *Scheduler Jobs*",
-    ]
-
+def _build_health_msg():
+    worker = jjwatch.engine()
+    age = int((datetime.now(timezone.utc) - STARTED_AT_UTC).total_seconds())
+    lines = ['🩺 MacroWatch — Nasdaq/JJ', f'En service depuis {age // 60} min',
+             'Crypto : anciens envois et surveillance arrêtés',
+             'INFINEX CAPITAL : publications manuelles uniquement', '', worker.diagnostics(), '',
+             'Tâches programmées :']
     for job in SCHED.get_jobs():
-        next_run = job.next_run_time
-        next_str = next_run.strftime("%H:%M:%S UTC") if next_run else "paused"
-        lines.append(f"  ✅ `{job.id}` — next: {next_str}")
-
-    # TrumpWatch state
-    tw_seen  = len(trumpwatch_live.STATE.get("seen", {}))
-    tw_health = trumpwatch_live.STATE.get("source_health", {})
-    tw_src_ok = all(h.get("ok") for h in tw_health.values()) if tw_health else False
-    lines += [
-        "",
-        "🍊 *TrumpWatch*",
-        f"  Sources: {'✅ All OK' if tw_src_ok else '⚠️ Degraded'}",
-        f"  Dedup cache: {tw_seen} entries",
-        f"  Buffered alerts: {len(trumpwatch_live.RECENT_ALERTS)}",
-    ]
-
-    # WhaleWatch state
-    ww_check = whalewatch.STATE.get("last_check_utc")
-    ww_fired = whalewatch.STATE.get("total_fired", 0)
-    ww_last  = whalewatch.STATE.get("last_alert_utc")
-    ww_key   = "✅ Configured" if os.getenv("ETHERSCAN_API_KEY") else "❌ ETHERSCAN_API_KEY not set"
-    lines += [
-        "",
-        "🐋 *WhaleWatch*",
-        f"  API: {ww_key}",
-        f"  Last check: {ww_check.strftime('%H:%M UTC') if ww_check else '—'}",
-        f"  Alerts fired: {ww_fired}",
-        f"  Last alert: {ww_last.strftime('%Y-%m-%d %H:%M UTC') if ww_last else 'None yet'}",
-    ]
-
-    # FedWatch state
-    fw_events = len(fedwatch.STATE.get("events", []))
-    fw_alerts = len(fedwatch.STATE.get("alert_queue", []))
-    lines += [
-        "",
-        "🏦 *FedWatch*",
-        f"  Events loaded: {fw_events}",
-        f"  Queued alerts: {fw_alerts}",
-        f"  Source: {'✅ OK' if fedwatch.STATE.get('source_ok') else '⚠️ Degraded'}",
-    ]
-
-    try:
-        from bot.public import relevance
-        lines += [
-            "",
-            "🧭 *Long-Term Relevance*",
-            f"  Mode: {'PREVIEW' if relevance.preview_only() else 'LIVE-CAPABLE'}",
-            f"  Observed: {relevance.STATE.get('observed', 0)}",
-            f"  Eligible: {relevance.STATE.get('eligible', 0)}",
-            f"  Published: {relevance.STATE.get('published', 0)}",
-        ]
-    except Exception:
-        lines += ["", "🧭 *Long-Term Relevance*: ⚠️ unavailable"]
-
-    return "\n".join(lines)
+        when = getattr(job, 'next_run_time', None)
+        lines.append(job.id + ' : ' + (when.isoformat() if when else 'en attente'))
+    return '\n'.join(lines)
 
 
-# ─── Command loop ─────────────────────────────────────────────────────────────
+def _handle_command(text, text_raw):
+    command = text.split(None, 1)[0].split('@', 1)[0]
+    if command in ('/help', '/start'):
+        return send_private('🚦 MacroWatch — Nasdaq/JJ\n'
+            '/jj — préparation de la session US\n'
+            '/jj_diag — état des sources\n'
+            '/evening — dernier bilan de clôture US\n'
+            '/weekly — calendrier macro de la semaine\n'
+            '/health — état du service\n'
+            '/trumpwatch — vérifier les déclarations macro récentes\n'
+            'Les anciennes fonctions crypto sont en pause. INFINEX CAPITAL reste manuel.')
+    if command in ('/jj', '/fedwatch', '/morning'):
+        return jjwatch.show_brief()
+    if command in ('/jj_diag', '/fed_diag'):
+        return jjwatch.show_brief(diagnostic=True)
+    if command == '/weekly':
+        return jjwatch.show_weekly()
+    if command == '/evening':
+        return jjwatch.show_close()
+    if command == '/health':
+        return send_private(_build_health_msg())
+    if command == '/trumpwatch':
+        _job_trumpwatch()
+        return send_private('Vérification des déclarations terminée. Seules les nouveautés pertinentes sont envoyées.')
+    if command in ('/status', '/bot_challenge', '/live_challenge', '/challenge',
+                    '/report', '/intel', '/monthly_update', '/pulse', '/challenge_diag'):
+        return send_private('Cette ancienne fonction crypto est en pause. Utilise /jj, /evening ou /weekly.')
+
 
 def command_loop():
-    offset     = None
-    chat_allow = str(os.getenv("CHAT_ID") or "")
-
+    offset = None
     while True:
         try:
-            data = get_updates(offset=offset, timeout=20)
-            for upd in data.get("result", []):
-                offset   = upd["update_id"] + 1
-
-                # Button taps ignored: the approve/skip execution loop is gone.
-                if upd.get("callback_query"):
+            chat_allow = os.getenv('CHAT_ID', '').strip()
+            for upd in get_updates(offset=offset, timeout=20).get('result', []):
+                offset = upd['update_id'] + 1
+                msg = upd.get('message') or {}
+                chat = str((msg.get('chat') or {}).get('id') or '')
+                # Commands are private-only and fail closed if no destination is configured.
+                if not chat_allow or chat != chat_allow:
                     continue
-
-                msg      = upd.get("message") or {}
-                text_raw = (msg.get("text") or "").strip()
-                if not text_raw:
-                    continue
-                text = text_raw.lower()
-                chat = str((msg.get("chat") or {}).get("id") or "")
-                if chat_allow and chat != chat_allow:
-                    continue
-
-                # ── New member welcome ───────────────────────────────
-                new_members = msg.get("new_chat_members") or []
-                for member in new_members:
-                    if member.get("is_bot"):
-                        continue
-                    username = member.get("username")
-                    first    = member.get("first_name", "")
-                    mention  = f"@{username}" if username else first
-                    send_text(
-                        f"🤖 Welcome {mention}!\n\n"
-                        f"You just joined Infinex Capital HQ —\n"
-                        f"home of ATRb v2, a fully automated trading strategy\n"
-                        f"running 24/7 on ETH (4H timeframe).\n\n"
-                        f"No charts. No noise. No emotion.\n"
-                        f"Just the system doing its work.\n\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Here's what to do:\n\n"
-                        f"1. Read the pinned message\n"
-                        f"2. Type /status to see the strategy live\n"
-                        f"3. Type /bot_challenge for the ATRb v2 $1k → $100k journey\n"
-                        f"4. Activate copy trading on Bitget to mirror every trade\n\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🚀 Copy trading live May 1, 2026\n"
-                        f"https://www.bitget.com/copy-trading/futures-trader-v1/bcb7467487b53c5fa395?clacCode=4Y4MLFF1"
-                    )
-
-                if not text:
-                    continue
-
-                try:
-                    _handle_command(text, text_raw)
-                except Exception as e:
-                    send_text(f"⚠️ Command error: {str(e)[:200]}")
-
-        except Exception as e:
-            # Never let the command loop die — log and keep going
-            print(f"[command_loop] Error: {e}", flush=True)
-            time.sleep(5)
+                raw = (msg.get('text') or '').strip()
+                if raw.startswith('/'):
+                    _handle_command(raw.lower(), raw)
+        except Exception as exc:
+            log.error('Command loop failed error_type=%s', type(exc).__name__)
+            time.sleep(3)
 
 
-def _handle_command(text: str, text_raw: str):
-    if text.split('@', 1)[0].split(' ', 1)[0] in ('/jj', '/jj_diag'):
-        if jjwatch.enabled():
-            jjwatch.show_brief(diagnostic=text.startswith('/jj_diag'))
-        return
-
-    # ── /help ────────────────────────────────────────────────────────────────
-    if text.startswith("/help"):
-        send_text(
-            "🤖 *MacroWatch — Command Guide*\n\n"
-            "🍊 *TrumpWatch*\n"
-            "`/trumpwatch` — Trigger immediate live poll\n"
-            "`/tw_recent` — Last 10 alerts\n"
-            "`/tw_diag` — Source health + dedup stats\n"
-            "`/tw_clear` — Clear dedup cache (re-enables old posts)\n\n"
-            "🏦 *FedWatch*\n"
-            "`/fedwatch` — Next Fed event\n"
-            "`/fed_diag` — Calendar + rate probability\n\n"
-            "📊 *MacroWatch Weekly*\n"
-            "`/weekly` — Full weekly market brief (private)\n"
-            "`/pulse` — Investor weekly pulse (preview)\n"
-            "`/monthly_update` — Send monthly investor update (admin only)\n\n"
-            "📅 *Daily Briefs*\n"
-            "`/jj` — Briefing JJ sourcé pour la session US\n"
-            "`/jj_diag` — Santé des sources JJ\n"
-            "`/morning` — Morning brief on demand\n"
-            "`/evening` — Evening recap on demand\n\n"
-            "🧭 *Long-Term Relevance*\n"
-            "`/relevance` — Latest passive-investor preview\n"
-            "`/relevance_diag` — Engine status and counters\n\n"
-            "🧠 *IntelWatch*\n"
-            "`/intel` — Full market intelligence briefing\n\n"
-
-            "🩺 *System*\n"
-            "`/health` — Full system status\n"
-            "`/restart` — Trigger clean poll of all modules\n"
-            "`/status` — ATRb v2 live strategy status (indicators + regime)\n"
-            "`/bot_challenge` — ATRb v2 $1k → $100k progress\n"
-            "`/live_challenge` — TraderWatch $1k → $10k progress\n"
-            "`/report` — Last 7 days trades + P&L\n"
-        )
-        return
-
-    # ── /health ───────────────────────────────────────────────────────────────
-    if text.startswith("/health"):
-        send_text(_build_health_msg())
-        return
-
-    # ── /restart ──────────────────────────────────────────────────────────────
-    if text.startswith("/restart"):
-        send_text("🔄 Triggering clean poll of all modules...")
-        results = []
-        for label, fn in [
-            ("TrumpWatch", _job_trumpwatch),
-            ("FedWatch",   _job_fedwatch),
-        ]:
-            try:
-                fn()
-                results.append(f"✅ {label}")
-            except Exception as e:
-                results.append(f"❌ {label}: {str(e)[:80]}")
-        send_text("🔄 Poll complete:\n" + "\n".join(results))
-        return
-
-    # ── /tw_diag ──────────────────────────────────────────────────────────────
-    if text.startswith("/tw_diag"):
-        try:
-            trumpwatch_live.run_diag()
-        except Exception as e:
-            send_text(f"🍊 [TrumpWatch] Diag error: {e}")
-        return
-
-    # ── /tw_clear ─────────────────────────────────────────────────────────────
-    if text.startswith("/tw_clear"):
-        try:
-            mem_count   = len(trumpwatch_live.STATE["seen"])
-            trumpwatch_live.STATE["seen"].clear()
-            redis_count = trumpwatch_live._redis_flush()
-            total       = mem_count + redis_count
-            send_text(
-                f"🍊 [TrumpWatch] Dedup cache cleared\n"
-                f"• Memory: {mem_count} entries removed\n"
-                f"• Redis: {redis_count} keys deleted\n"
-                f"Next poll will re-evaluate all recent posts."
-            )
-        except Exception as e:
-            send_text(f"🍊 [TrumpWatch] Clear error: {e}")
-        return
-
-    # ── /trumpwatch ───────────────────────────────────────────────────────────
-    if text.startswith("/trumpwatch"):
-        try:
-            trumpwatch_live.poll_once()
-            send_text("🍊 [TrumpWatch] Live poll executed.")
-        except Exception as e:
-            send_text(f"🍊 [TrumpWatch] Poll error: {e}")
-        return
-
-    if text.startswith("/tw_recent"):
-        try:
-            trumpwatch_live.show_recent()
-        except Exception as e:
-            send_text(f"🍊 [TrumpWatch] Recent error: {e}")
-        return
-
-    if text.startswith("/tw_sentiment"):
-        try:
-            trumpwatch_live.show_sentiment()
-        except Exception as e:
-            send_text(f"🍊 [TrumpWatch] Sentiment error: {e}")
-        return
-
-    # ── /fedwatch ─────────────────────────────────────────────────────────────
-    if text.startswith("/fedwatch"):
-        jjwatch.show_brief() if jjwatch.enabled() else fedwatch.show_next_event()
-        return
-
-    if text.startswith("/fed_diag"):
-        jjwatch.show_brief(diagnostic=True) if jjwatch.enabled() else fedwatch.show_diag()
-        return
-
-    # ── /weekly ───────────────────────────────────────────────────────────────
-    if text.startswith("/weekly"):
-        try:
-            send_text("📊 Building weekly brief — takes ~15s...")
-            from bot.modules.weeklybrief import send_weekly_brief
-            send_weekly_brief(_get_modules())
-        except Exception as e:
-            send_text(f"📊 [WeeklyBrief] Error: {e}")
-        return
-
-    # ── /pulse — investor weekly pulse (on-demand preview) ───────────────────
-    if text.startswith("/pulse"):
-        try:
-            from bot.modules.weeklybrief import build_weekly_pulse
-            send_text(build_weekly_pulse(_get_modules()))
-        except Exception as e:
-            send_text(f"⚡ [Pulse] Error: {e}")
-        return
-
-    # ── /morning — on-demand morning brief ───────────────────────────────────
-    if text.startswith("/morning"):
-        try:
-            dailybrief.send_morning_brief(_get_modules())
-        except Exception as e:
-            send_text(f"🌅 [Morning] Error: {e}")
-        return
-
-    # ── /evening — on-demand evening recap ───────────────────────────────────
-    if text.startswith("/evening"):
-        try:
-            dailybrief.send_evening_recap(_get_modules())
-        except Exception as e:
-            send_text(f"🌙 [Evening] Error: {e}")
-        return
-
-    # ── /monthly_update [outlook text] — admin only ───────────────────────────
-    if text.startswith("/monthly_update"):
-        user_id = str(upd.get("message", {}).get("from", {}).get("id", ""))
-        if ADMIN_USER_ID and user_id != ADMIN_USER_ID:
-            send_text("⚠️ This command is restricted.")
-            return
-        try:
-            parts    = text_raw.split(None, 1)
-            outlook  = parts[1].strip() if len(parts) > 1 else ""
-            if not outlook:
-                send_text("Usage: `/monthly_update Your outlook paragraph here`")
-                return
-            from bot.modules.weeklybrief import build_monthly_update, _send_public
-            msg = build_monthly_update(_get_modules(), outlook)
-            send_text(msg)
-            _send_public(msg)
-        except Exception as e:
-            send_text(f"📊 [MonthlyUpdate] Error: {e}")
-        return
-
-    # ── /relevance / /relevance_diag ──────────────────────────────────────────
-    if text.startswith("/relevance_diag"):
-        try:
-            from bot.public.relevance import diagnostics
-            send_text(diagnostics())
-        except Exception as e:
-            send_text(f"🧭 [Relevance] Diag error: {e}")
-        return
-
-    if text.startswith("/relevance"):
-        try:
-            from bot.public.relevance import latest_preview
-            send_text(latest_preview())
-        except Exception as e:
-            send_text(f"🧭 [Relevance] Preview error: {e}")
-        return
-
-    # ── /intel ────────────────────────────────────────────────────────────────
-    if text.startswith("/intel"):
-        try:
-            send_text("🧠 Compiling full market briefing...")
-            intelwatch.show_intel(_get_modules())
-        except Exception as e:
-            send_text(f"🧠 [IntelWatch] Error: {e}")
-        return
-
-    # ── /status ───────────────────────────────────────────────────────────────
-    if text.startswith("/status"):
-        try:
-            send_text("🤖 Fetching strategy status...")
-            stratwatch.show_status()
-        except Exception as e:
-            send_text(f"🤖 [StratWatch] Error: {e}")
-        return
-
-    # ── /challenge_diag (must come first - longest prefix wins) ──────────────
-    if text.startswith("/challenge_diag"):
-        try:
-            challengewatch.show_challenge_diag()
-        except Exception as e:
-            send_text(f"🎯 [Diag] Error: {e}")
-        return
-
-    # ── /bot_challenge → ATRb v2 systematic ($1k → $100k) ─────────────────────
-    if text.startswith("/bot_challenge"):
-        try:
-            challengewatch.show_bot_challenge()
-        except Exception as e:
-            send_text(f"🤖 [Bot Challenge] Error: {e}")
-        return
-
-    # ── /live_challenge → TraderWatch discretionary ($1k → $10k) ───────────────────
-    if text.startswith("/live_challenge"):
-        try:
-            challengewatch.show_live_challenge()
-        except Exception as e:
-            send_text(f"🎯 [Live Challenge] Error: {e}")
-        return
-
-    # ── /challenge (legacy alias) → defaults to LIVE challenge ───────────────
-    if text.startswith("/challenge"):
-        try:
-            challengewatch.show_challenge()
-        except Exception as e:
-            send_text(f"🎯 [Challenge] Error: {e}")
-        return
-
-    # ── /report ───────────────────────────────────────────────────────────────
-    if text.startswith("/report"):
-        try:
-            reportwatch.show_report()
-        except Exception as e:
-            send_text(f"🤖 [Report] Error: {e}")
-        return
-
-
-# ─── Entrypoint ──────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
     start_scheduler()
+    threading.Thread(target=_cleanup_group_descriptions, daemon=True).start()
     threading.Thread(target=command_loop, daemon=True).start()
-    print("💬 Command loop started ✅", flush=True)
-
-    # Keep process alive
     while True:
-        time.sleep(3600)
+        time.sleep(60)

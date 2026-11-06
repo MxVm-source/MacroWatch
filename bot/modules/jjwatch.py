@@ -14,7 +14,7 @@ from bot.utils import send_text
 
 log = logging.getLogger('jjwatch')
 UTC = timezone.utc
-VERSION = '2026-11-06-jj-v1'
+VERSION = '2026-11-06-cleanup-v2'
 BLS_CACHE_URL = 'https://raw.githubusercontent.com/MxVm-source/MacroWatch/main/data/bls-official-cache.json'
 
 
@@ -154,7 +154,8 @@ class Engine:
                                     timedelta(hours=2))
             self.releases.extend(items)
         with sqlite3.connect(self.db) as conn:
-            conn.execute('DELETE FROM sent WHERE at < ?', ((now - timedelta(days=30)).isoformat(),))
+            conn.execute("DELETE FROM sent WHERE at < ? AND key NOT LIKE 'description:%' "
+                         "AND key NOT LIKE 'activation:%'", ((now - timedelta(days=30)).isoformat(),))
 
     def deliver(self, key, text, now):
         with self.lock:
@@ -240,6 +241,14 @@ class Engine:
         opening = src.session_open(us_day)
         if opening and timedelta(0) <= now - (opening - timedelta(minutes=15)) < timedelta(minutes=5):
             self.deliver('preopen:' + str(us_day), self.brief(us_day, 'Préouverture', now), now)
+        closing = src.session_close(us_day)
+        if closing and timedelta(minutes=10) <= now - closing < timedelta(minutes=15):
+            key = 'close:' + str(us_day)
+            with sqlite3.connect(self.db) as conn:
+                already_sent = conn.execute('SELECT 1 FROM sent WHERE key=?', (key,)).fetchone()
+            if not already_sent:
+                from bot.modules.marketbrief import build_close
+                self.deliver(key, build_close(self, us_day, now), now)
         groups = {}
         for event in self.events:
             groups.setdefault((event['group'], event['start']), []).append(event)
@@ -294,18 +303,21 @@ class Engine:
             now = datetime.now(UTC) if live else now
             self.tick(now)
             self.deliver('activation:' + VERSION,
-                         '🚦 JJ — suivi activé dans ce groupe privé.\n'
+                         '🚦 MacroWatch — nettoyage activé dans ce groupe privé.\n'
+                         'Anciens rapports crypto, ATRb, challenges et surveillance des positions arrêtés.\n'
+                         'INFINEX CAPITAL : publications manuelles uniquement.\n'
                          'Veille à 19h Bruxelles, rappels T−30 min, publication officielle confirmée, '
-                         'synthèse 15 min avant l’ouverture US.\n'
+                         'synthèse 15 min avant l’ouverture US et bilan 10 min après la clôture cash.\n'
                          'Attentes sourcées ; chiffres manquants signalés. '
                          'Résultats live limités aux flux officiels disponibles ; '
                          'pas de mesure du Nasdaq/taux/dollar ni de couverture exhaustive des entreprises/géopolitique.\n'
-                         'Commandes : /jj et /jj_diag.\n' + self.diagnostics(), now)
+                         'Commandes : /jj, /jj_diag, /evening, /weekly, /health.\n' + self.diagnostics(), now)
 
     def diagnostics(self):
         lines = [f'JJ {VERSION}', f'Événements chargés : {len(self.events)}',
                  'Destination : groupe privé configuré uniquement',
                  '19h Bruxelles veille | T−30m | publication confirmée | ouverture US−15m',
+                 'Bilan US : clôture réelle+10m | semaine macro : lundi09h Bruxelles',
                  'Contrôle : 60s ; publication selon délai de la source ; pas de garantie instantanée.']
         lines.extend(f"{name} : {'OK' if ok else 'INDISPONIBLE / cache'}"
                      + (f" ({self.transports[name]})" if name in self.transports else '')
@@ -338,3 +350,47 @@ def show_brief(diagnostic=False):
         worker.refresh(now)
         text = worker.diagnostics() if diagnostic else worker.brief(now.astimezone(src.NEW_YORK).date(), 'À la demande', now)
         return send_private(text)
+
+
+def show_weekly():
+    worker = engine()
+    now = datetime.now(UTC)
+    with worker.lock:
+        worker.refresh(now)
+        day = now.astimezone(src.NEW_YORK).date()
+        monday = day - timedelta(days=day.weekday())
+        lines = ['📅 MacroWatch — semaine US du ' + str(monday)]
+        for offset in range(5):
+            target = monday + timedelta(days=offset)
+            if target < day:
+                continue
+            opening = src.session_open(target)
+            if not opening:
+                lines.append(str(target) + ' : marché cash fermé')
+                continue
+            if not worker.complete_calendar(target, now):
+                lines.append(str(target) + ' : couverture du calendrier incomplète')
+            events = [e for e in worker.events if e['start'].astimezone(src.NEW_YORK).date() == target]
+            for event in events[:5]:
+                lines.append(event['start'].astimezone(src.BRUSSELS).strftime('%a %d/%m %H:%M %Z')
+                             + ' — ' + event['title'])
+            if len(events) > 5:
+                lines.append(f'… {len(events) - 5} autre(s) publication(s) : consulter le calendrier source.')
+            if not events and worker.complete_calendar(target, now):
+                lines.append(str(target) + ' : aucune annonce retenue dans le calendrier suivi')
+        lines += ['Source secondaire : ' + src.CALENDAR_URL,
+                  'Horaires BLS non revérifiés si la source est indisponible.',
+                  'Préparation uniquement ; pas de prévision directionnelle ni de suivi de stratégie crypto.']
+        return send_private('\n'.join(lines)[:4000])
+
+
+def show_close():
+    from bot.modules.marketbrief import build_close
+    worker = engine()
+    now = datetime.now(UTC)
+    day = now.astimezone(src.NEW_YORK).date()
+    while not src.session_close(day) or src.session_close(day) > now:
+        day -= timedelta(days=1)
+    with worker.lock:
+        worker.refresh(now)
+        return send_private(build_close(worker, day, now))
