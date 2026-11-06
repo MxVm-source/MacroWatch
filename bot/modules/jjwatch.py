@@ -15,6 +15,7 @@ from bot.utils import send_text
 log = logging.getLogger('jjwatch')
 UTC = timezone.utc
 VERSION = '2026-11-06-jj-v1'
+BLS_CACHE_URL = 'https://raw.githubusercontent.com/MxVm-source/MacroWatch/main/data/bls-official-cache.json'
 
 
 def enabled():
@@ -38,6 +39,7 @@ class Engine:
         self.events = []
         self.releases = []
         self.health = {}
+        self.transports = {}
         self.calendar_checked = self.calendar_success = None
         self.coverage = None
         self.attempts = {}
@@ -65,12 +67,23 @@ class Engine:
                 with sqlite3.connect(self.db) as conn:
                     conn.execute('INSERT OR REPLACE INTO cache VALUES (?, ?, ?)', (name, body, now.isoformat()))
                 self.health[name] = True
+                self.transports[name] = 'direct'
                 log.info('JJ source=%s ok=true items=%d', name, len(parsed))
                 return parsed, fetched
             except Exception as exc:
                 # Avoid URLs/errors containing user credentials or message bodies.
                 log.warning('JJ source=%s ok=false error_type=%s', name, type(exc).__name__)
                 self.health[name] = False
+                if name.startswith('BLS '):
+                    fallback = self._official_cache(name, url, parser, now, max_age)
+                    if fallback is not None:
+                        parsed, body, fetched = fallback
+                        with sqlite3.connect(self.db) as conn:
+                            conn.execute('INSERT OR REPLACE INTO cache VALUES (?, ?, ?)', (name, body, fetched.isoformat()))
+                        self.health[name] = True
+                        self.transports[name] = 'cache officiel GitHub'
+                        log.info('JJ source=%s ok=true transport=official_cache items=%d', name, len(parsed))
+                        return parsed, fetched
         elif name not in self.health:
             self.health[name] = bool(fetched and now - fetched < ttl)
         if not fetched or now - fetched > max_age:
@@ -80,6 +93,25 @@ class Engine:
         except Exception:
             self.health[name] = False
             return [], None
+
+    def _official_cache(self, name, url, parser, now, max_age):
+        try:
+            response = requests.get(BLS_CACHE_URL, timeout=10)
+            response.raise_for_status()
+            payload = json.loads(response.text)['sources'][name]
+            fetched = datetime.fromisoformat(payload['fetched_at'])
+            limit = min(max_age, timedelta(hours=6 if name == 'BLS schedule' else 2))
+            if (fetched.tzinfo is None or fetched > now + timedelta(minutes=1)
+                    or now - fetched > limit or payload['url'] != url):
+                return None
+            body = payload['body']
+            parsed = parser(body)
+            if not parsed:
+                return None
+            return parsed, body, fetched
+        except Exception as exc:
+            log.warning('JJ official cache unavailable source=%s error_type=%s', name, type(exc).__name__)
+            return None
 
     def refresh(self, now):
         def calendar_parser(text):
@@ -275,7 +307,9 @@ class Engine:
                  'Destination : groupe privé configuré uniquement',
                  '19h Bruxelles veille | T−30m | publication confirmée | ouverture US−15m',
                  'Contrôle : 60s ; publication selon délai de la source ; pas de garantie instantanée.']
-        lines.extend(f"{name} : {'OK' if ok else 'INDISPONIBLE / cache'}" for name, ok in self.health.items())
+        lines.extend(f"{name} : {'OK' if ok else 'INDISPONIBLE / cache'}"
+                     + (f" ({self.transports[name]})" if name in self.transports else '')
+                     for name, ok in self.health.items())
         return '\n'.join(lines)
 
 

@@ -1,0 +1,41 @@
+name: Official BLS input cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/refresh_bls_cache.py
+      - .github/workflows/bls-cache.yml
+  schedule:
+    - cron: '*/5 11-21 * * 1-5'
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bls-official-cache
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r bot/requirements.txt
+      - run: python scripts/refresh_bls_cache.py
+      - name: Save only public official inputs
+        run: |
+          git add data/bls-official-cache.json
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Refresh public BLS cache [skip ci] [skip render]'
+          git push origin HEAD:main

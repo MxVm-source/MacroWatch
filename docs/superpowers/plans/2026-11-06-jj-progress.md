@@ -29,3 +29,12 @@ Deployment finding: Render defaults this older service to Python 3.13.4, while
 existing numpy==1.26.4 has no compatible wheel (build attempted from source).
 Pin .python-version to the locally verified Python 3.12.14, matching CI major/minor.
 No change to trading dependencies or service pricing is needed.
+
+Production verification: cfc5ff4 live, Python 3.12.14, JJ scheduled, Telegram
+activation acknowledgement confirmed in worker logs at 2026-11-06T15:51:43Z.
+Calendar/BEA/Fed healthy; BLS blocks Render's IP (all four direct HTTP errors).
+Add public official-input cache via GitHub Actions with original-source/time
+validation and strict age limits. No secrets/private data; public repository
+verified. Separate regression cases prove fallback and reject stale/wrong origin
+payloads. Local cache-hit regression caught and fixed before publishing fallback.
+46 tests pass; fallback deployment and scheduled fetch checks pending.

@@ -133,3 +133,14 @@ unverified rate-probability output are disabled. No additional paid data service
 
 Validation: python -m unittest discover -s tests -p 'test_*.py'
             python -m compileall -q bot
+
+BLS NETWORK FALLBACK
+Render may be refused direct BLS access. The public-data-only GitHub workflow
+Official BLS input cache fetches the four official inputs every five minutes
+weekdays 11–21 UTC and every six hours otherwise. It preserves original URLs,
+bodies and retrieval timestamps in data/bls-official-cache.json. Changed bodies
+are saved immediately; unchanged data is re-verified hourly. Commits skip CI and
+Render deployment to avoid a deployment loop. No private bot/trading data enters
+this file. Render uses the cache only when direct fetching fails, refuses wrong
+origins/future timestamps and rejects feeds older than two hours (calendar six).
+GitHub schedule delays can add to delivery latency; this is not a real-time wire.
