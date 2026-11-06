@@ -165,15 +165,8 @@ def _compute_rate_probability() -> dict:
 
 
 def _rate_prob_line() -> str:
-    """One-line summary for alert messages."""
-    p = _compute_rate_probability()
-    if p["implied_rate"] is None:
-        return "📊 Market consensus: unavailable"
-    return (
-        f"📊 Market consensus: {p['consensus']}\n"
-        f"   (Implied rate: {p['implied_rate']:.2f}% | "
-        f"Cut {p['cut_pct']}% / Hold {p['hold_pct']}% / Hike {p['hike_pct']}%)"
-    )
+    """Legacy probability calculation is not a verified CME probability."""
+    return "📊 Consensus de taux indisponible — aucune probabilité CME vérifiée."
 
 
 # ─── FOMC Calendar (Fed HTML) ────────────────────────────────────────────────
@@ -435,52 +428,8 @@ OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
 def _ai_pre_event_brief(ev: dict) -> dict:
-    """
-    Generate AI analyst view for pre-event brief.
-    Returns dict with: consensus, scenarios (bull/neutral/bear), trader_notes
-    """
-    if not OPENAI_API_KEY:
-        return {}
-
-    category = ev.get("category", "")
-    title    = ev.get("title", "")
-
-    prompt = f"""You are a macro analyst writing a pre-event brief for crypto traders.
-Event: {title}
-Category: {category}
-Date: {ev['start'].strftime('%A %b %d, %Y at %H:%M UTC')}
-
-Generate a concise pre-event brief in JSON format with these fields:
-{{
-  "consensus": "1-2 sentences on what markets expect (consensus view, key numbers if applicable)",
-  "scenario_bullish": "1 short sentence on what triggers bullish reaction for crypto",
-  "scenario_neutral": "1 short sentence on what would be priced-in / muted reaction",
-  "scenario_bearish": "1 short sentence on what triggers bearish reaction for crypto",
-  "trader_note": "1 short tactical note for crypto traders (history of similar events, what to watch)"
-}}
-
-Be specific. No fluff. No emojis. No disclaimers. JSON only."""
-
-    try:
-        import requests as _req
-        import json
-        r = _req.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-            json={
-                "model":       OPENAI_MODEL,
-                "temperature": 0.4,
-                "max_tokens":  400,
-                "response_format": {"type": "json_object"},
-                "messages":    [{"role": "user", "content": prompt}],
-            },
-            timeout=15,
-        )
-        text = r.json()["choices"][0]["message"]["content"].strip()
-        return json.loads(text)
-    except Exception as e:
-        log.warning(f"AI pre-event brief failed: {e}")
-        return {}
+    """Disabled: an LLM without a sourced consensus must not invent expectations."""
+    return {}
 
 
 # ─── Category emoji ──────────────────────────────────────────────────────────
@@ -505,92 +454,20 @@ def _cat_emoji(ev: dict) -> str:
 
 
 def _send_alert(alert: dict):
-    ev      = alert["event"]
-    label   = alert["label"]
-    ev_id   = alert["event_id"]
-    fire_key = (ev_id, label)
-
-    if fire_key in STATE["fired_alerts"]:
+    """Legacy fallback only; JJ owns sourced scheduled alerts by default."""
+    ev = alert["event"]
+    key = (alert["event_id"], alert["label"])
+    if key in STATE["fired_alerts"]:
         return
-    STATE["fired_alerts"].add(fire_key)
-    _save_persisted_state()
-
-    emoji    = _cat_emoji(ev)
-    category = ev.get("category", "")
-    title    = ev.get("title", "")
-
-    # Register only the T-24h item as a long-term relevance candidate.
-    # Scheduled macro events remain "needs confirmation" until an outcome is known.
-    if label == "T-24h":
-        try:
-            from bot.public.relevance import observe_fed_event
-            observe_fed_event(event=ev, stage=label)
-        except Exception as exc:
-            log.warning(f"Long-term relevance hook failed: {exc}")
-
-    # ── T-24h: Full pre-event brief with AI consensus + scenarios ──────────
-    if label == "T-24h":
-        lines = [
-            f"{emoji} *FedWatch — Event Setup*",
-            f"📅 *{title}* in 24h",
-            f"🕒 {_fmt(ev['start'])}",
-            "",
-        ]
-
-        brief = _ai_pre_event_brief(ev)
-        if brief:
-            lines += [
-                "━━━━━━━━━━━━━━━━━━━━━━━━",
-                "📊 *Market Expectations*",
-                f"_{brief.get('consensus', '')}_",
-                "",
-            ]
-
-            if category == "FOMC":
-                lines.append(_rate_prob_line())
-                lines.append("")
-
-            lines += [
-                "━━━━━━━━━━━━━━━━━━━━━━━━",
-                "🎯 *Scenarios*",
-                f"🟢 *Bullish:* {brief.get('scenario_bullish', '—')}",
-                f"⚪ *Neutral:* {brief.get('scenario_neutral', '—')}",
-                f"🔴 *Bearish:* {brief.get('scenario_bearish', '—')}",
-                "",
-            ]
-
-            note = brief.get('trader_note', '')
-            if note:
-                lines += [
-                    "━━━━━━━━━━━━━━━━━━━━━━━━",
-                    "📌 *Trader Note*",
-                    f"_{note}_",
-                    "",
-                ]
-
-            lines.append("_AI analyst view. Verify with primary sources._")
-        else:
-            if category == "FOMC":
-                lines.append(_rate_prob_line())
-            lines.append("_High-impact event ahead — expect volatility._")
-
-        send_text("\n".join(lines))
-        return
-
-    # ── T-15m: Quick final reminder ────────────────────────────────────────
-    if label == "T-15m":
-        lines = [
-            f"⚠️ *{title}* in 15 minutes",
-            f"🕒 {_fmt(ev['start'])}",
-        ]
-        if category == "FOMC":
-            lines.append("")
-            lines.append(_rate_prob_line())
-        lines.append("")
-        lines.append("_Strap in._ 🎢")
-
-        send_text("\n".join(lines))
-        return
+    label = alert["label"]
+    text = (
+        f"🏦 FedWatch — {ev['title']} — {label}\n"
+        f"Horaire ancien calendrier, à revérifier : {_fmt(ev['start'])}\n"
+        "Consensus indisponible : aucune attente générée par IA.\n"
+        "Consulter /jj pour le calendrier sourcé et les attentes disponibles."
+    )
+    if send_text(text):
+        STATE["fired_alerts"].add(key)
 
 
 # ─── poll_once — called by APScheduler ───────────────────────────────────────

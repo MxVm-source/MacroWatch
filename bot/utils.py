@@ -15,10 +15,10 @@ _MAX_LEN = 4096
 _MAX_RETRIES = 3
 
 
-def send_text(text: str):
+def send_text(text: str, *, parse_mode="Markdown") -> bool:
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print("send_text (dry-run):", text)
-        return
+        return False
 
     # Truncate gracefully if over Telegram's limit
     if len(text) > _MAX_LEN:
@@ -27,9 +27,10 @@ def send_text(text: str):
     payload = {
         "chat_id":                CHAT_ID,
         "text":                   text,
-        "parse_mode":             "Markdown",   # all modules use *bold*, `code`, _italic_
         "disable_web_page_preview": True,        # suppress link previews (cleaner alerts)
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
 
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
@@ -39,8 +40,8 @@ def send_text(text: str):
                 timeout=10,
             )
 
-            if resp.ok:
-                return
+            if resp.ok and resp.json().get("ok"):
+                return True
 
             # 429 — Telegram rate limit: honour retry_after
             if resp.status_code == 429:
@@ -51,7 +52,7 @@ def send_text(text: str):
 
             # Any other error — log and give up
             print(f"send_text error {resp.status_code}: {resp.text[:200]}")
-            return
+            return False
 
         except Exception as e:
             print(f"send_text exception (attempt {attempt}): {e}")
@@ -59,6 +60,7 @@ def send_text(text: str):
                 time.sleep(2)
 
     print("send_text: gave up after max retries")
+    return False
 
 
 def get_updates(offset=None, timeout=20):

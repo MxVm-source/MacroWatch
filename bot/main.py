@@ -35,6 +35,7 @@ from bot.utils import send_text, get_updates
 
 
 import bot.modules.fedwatch        as fedwatch
+import bot.modules.jjwatch         as jjwatch
 import bot.modules.dailybrief      as dailybrief
 import bot.modules.trumpwatch_live as trumpwatch_live
 import bot.modules.whalewatch      as whalewatch
@@ -127,6 +128,14 @@ def _job_fedwatch():
         fedwatch.poll_once()
     except Exception as e:
         _err("FedWatch", e)
+
+
+def _job_jjwatch():
+    try:
+        jjwatch.poll_once()
+    except Exception as exc:
+        # Keep outages in logs; avoid flooding Telegram every minute.
+        log.exception('JJ poll failed error_type=%s', type(exc).__name__)
 
 def _job_weekly_brief():
     try:
@@ -743,7 +752,13 @@ def start_scheduler():
         print("🍊 TrumpWatch scheduled (60s) ✅", flush=True)
 
     # ── FedWatch — every 5 min (was a blocking schedule_loop thread)
-    if os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
+    if jjwatch.enabled():
+        SCHED.add_job(
+            _job_jjwatch, 'interval', seconds=60,
+            id='jjwatch', max_instances=1, coalesce=True, misfire_grace_time=30,
+        )
+        print('🚦 JJ scheduled (60s, private, sourced, persistent dedup) ✅', flush=True)
+    elif os.getenv("ENABLE_FEDWATCH", "true").lower() in ("1", "true", "yes", "on"):
         SCHED.add_job(
             _job_fedwatch, "interval", minutes=5,
             id="fedwatch", max_instances=1, misfire_grace_time=60,
@@ -799,7 +814,7 @@ def start_scheduler():
         print("🎯 Elite PositionWatch disabled (ENABLE_ELITE_POSITIONWATCH=false) ✅", flush=True)
 
     # ── Market Open Alert — Mon–Fri 13:30 UTC (14:30 CET)
-    if os.getenv("ENABLE_MARKET_OPEN", "true").lower() in ("1", "true", "yes", "on"):
+    if not jjwatch.enabled() and os.getenv("ENABLE_MARKET_OPEN", "true").lower() in ("1", "true", "yes", "on"):
         SCHED.add_job(
             _job_market_open, "cron", day_of_week="mon-fri", hour=13, minute=30,
             id="market_open", max_instances=1,
@@ -828,7 +843,8 @@ def start_scheduler():
 
     # ── FedWatch Monday rate probability push — Monday 08:00
     SCHED.add_job(
-        _job_fedwatch_monday, "cron", day_of_week="mon", hour=8, minute=0,
+        (lambda: jjwatch.show_brief()) if jjwatch.enabled() else _job_fedwatch_monday,
+        "cron", day_of_week="mon", hour=8, minute=0,
         id="fedwatch_monday", max_instances=1,
     )
     print("🏦 FedWatch Monday push scheduled (Mon 08:00) ✅", flush=True)
@@ -1008,7 +1024,10 @@ def command_loop():
 
 
 def _handle_command(text: str, text_raw: str):
-
+    if text.split('@', 1)[0].split(' ', 1)[0] in ('/jj', '/jj_diag'):
+        if jjwatch.enabled():
+            jjwatch.show_brief(diagnostic=text.startswith('/jj_diag'))
+        return
 
     # ── /help ────────────────────────────────────────────────────────────────
     if text.startswith("/help"):
@@ -1027,6 +1046,8 @@ def _handle_command(text: str, text_raw: str):
             "`/pulse` — Investor weekly pulse (preview)\n"
             "`/monthly_update` — Send monthly investor update (admin only)\n\n"
             "📅 *Daily Briefs*\n"
+            "`/jj` — Briefing JJ sourcé pour la session US\n"
+            "`/jj_diag` — Santé des sources JJ\n"
             "`/morning` — Morning brief on demand\n"
             "`/evening` — Evening recap on demand\n\n"
             "🧭 *Long-Term Relevance*\n"
@@ -1116,11 +1137,11 @@ def _handle_command(text: str, text_raw: str):
 
     # ── /fedwatch ─────────────────────────────────────────────────────────────
     if text.startswith("/fedwatch"):
-        fedwatch.show_next_event()
+        jjwatch.show_brief() if jjwatch.enabled() else fedwatch.show_next_event()
         return
 
     if text.startswith("/fed_diag"):
-        fedwatch.show_diag()
+        jjwatch.show_brief(diagnostic=True) if jjwatch.enabled() else fedwatch.show_diag()
         return
 
     # ── /weekly ───────────────────────────────────────────────────────────────

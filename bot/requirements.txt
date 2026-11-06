@@ -5,3 +5,4 @@ tzlocal==5.2
 python-dateutil==2.9.0.post0
 numpy==1.26.4
 pandas==2.2.3
+exchange-calendars==4.13.2
