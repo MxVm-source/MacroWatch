@@ -6,6 +6,23 @@ from bot import group_maintenance as groups
 
 
 class GroupCleanupTests(unittest.TestCase):
+    def test_public_access_failure_does_not_block_verified_private_description(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker = Engine(directory, sender=lambda _: True)
+            private = {'id': -1, 'title': 'INFINEX Capital MacroWatch'}
+            unavailable = Mock(ok=False, status_code=400,
+                json=lambda: {'ok': False, 'description': 'Bad Request: chat not found'})
+            unavailable.raise_for_status.side_effect = RuntimeError('HTTP error')
+            responses = [Mock(json=lambda: {'ok': True, 'result': private}), unavailable,
+                         Mock(json=lambda: {'ok': True})]
+            with patch.object(groups, 'API_BASE', 'test'), patch.object(groups, 'CHAT_ID', '-1'), \
+                 patch.dict(groups.os.environ, {'PUBLIC_CHAT_ID': '@macrowatchalpha'}), \
+                 patch.object(groups.requests, 'post', side_effect=responses) as post:
+                groups.update_descriptions(worker)
+            edits = [call for call in post.call_args_list if call.args[0].endswith('/setChatDescription')]
+            self.assertEqual(len(edits), 1)
+            self.assertEqual(edits[0].kwargs['json']['chat_id'], -1)
+
     def test_verified_destinations_updated_once_without_posting_messages(self):
         with tempfile.TemporaryDirectory() as directory:
             worker = Engine(directory, sender=lambda _: True)

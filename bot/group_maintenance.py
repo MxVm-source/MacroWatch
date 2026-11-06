@@ -28,32 +28,39 @@ def update_descriptions(worker):
             'SELECT 1 FROM sent WHERE key=?', ('description:' + VERSION + ':' + role,)).fetchone()]
         if not todo:
             return
-        def call(method, data):
+        def call(method, data, role):
             response = requests.post(API_BASE + '/' + method, json=data, timeout=10)
-            response.raise_for_status()
-            return response.json()
+            result = response.json()
+            if not response.ok or not result.get('ok'):
+                description = str(result.get('description', '')).lower()
+                reason = next((tag.replace(' ', '_') for tag in (
+                    'chat not found', 'not enough rights', 'not a member', 'was kicked', 'was blocked')
+                    if tag in description), 'telegram_refused')
+                log.warning('Group request refused method=%s role=%s status=%s reason=%s',
+                            method, role, response.status_code, reason)
+                return {'ok': False}
+            return result
         try:
             resolved = {}
             for role, target in [('private', CHAT_ID), ('public', public_id)]:
-                result = call('getChat', {'chat_id': target})
+                result = call('getChat', {'chat_id': target}, role)
                 if result.get('ok'):
                     resolved[role] = result['result']
-            if len(resolved) != 2 or resolved['private']['id'] == resolved['public']['id']:
-                log.warning('Group description cleanup skipped: destinations unresolved or identical')
+            if len(resolved) == 2 and resolved['private']['id'] == resolved['public']['id']:
+                log.warning('Group description cleanup skipped: destinations identical')
                 return
-            private_title = resolved['private'].get('title', '').casefold()
-            if not ('infinex' in private_title and 'macro' in private_title):
-                log.warning('Group description cleanup skipped: private identity not verified')
-                return
-            if resolved['public'].get('username', '').casefold() != 'macrowatchalpha':
-                log.warning('Group description cleanup skipped: public identity not verified')
-                return
+            private_title = resolved.get('private', {}).get('title', '').casefold()
+            verified = {'private': 'infinex' in private_title and 'macro' in private_title,
+                        'public': resolved.get('public', {}).get('username', '').casefold() == 'macrowatchalpha'}
             for role in todo:
+                if not verified[role]:
+                    log.warning('Group description cleanup skipped role=%s identity not verified', role)
+                    continue
                 chat = resolved[role]
                 if chat.get('description') == DESCRIPTIONS[role]:
                     ok = True
                 else:
-                    ok = call('setChatDescription', {'chat_id': chat['id'], 'description': DESCRIPTIONS[role]}).get('ok')
+                    ok = call('setChatDescription', {'chat_id': chat['id'], 'description': DESCRIPTIONS[role]}, role).get('ok')
                 if ok:
                     conn.execute('INSERT OR REPLACE INTO sent VALUES (?, ?)',
                                  ('description:' + VERSION + ':' + role, datetime.now(timezone.utc).isoformat()))
