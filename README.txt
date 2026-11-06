@@ -134,13 +134,16 @@ unverified rate-probability output are disabled. No additional paid data service
 Validation: python -m unittest discover -s tests -p 'test_*.py'
             python -m compileall -q bot
 
-BLS NETWORK FALLBACK
-Render may be refused direct BLS access. The public-data-only GitHub workflow
-Official BLS input cache fetches the four official inputs every five minutes
-weekdays 11–21 UTC and every six hours otherwise. It preserves original URLs,
-bodies and retrieval timestamps in data/bls-official-cache.json. Changed bodies
-are saved immediately; unchanged data is re-verified hourly. Commits skip CI and
-Render deployment to avoid a deployment loop. No private bot/trading data enters
-this file. Render uses the cache only when direct fetching fails, refuses wrong
-origins/future timestamps and rejects feeds older than two hours (calendar six).
-GitHub schedule delays can add to delivery latency; this is not a real-time wire.
+BLS NETWORK ACCESS — NOT FULLY OPERATIONAL
+Render and GitHub runners both receive HTTP errors for the four official BLS
+inputs. The cache refresh workflow has NO schedule or push trigger; its initial
+test failed, so automatic retries were disabled. It can be run manually only.
+A one-time verified public BLS snapshot is in data/bls-official-cache.json.
+Render's fallback validates original URL and retrieval time and refuses feeds
+older than two hours (calendar six), so this snapshot is NOT an ongoing feed.
+
+Calendar-based briefings/reminders and Fed/BEA publication monitoring are live.
+Ongoing automatic BLS results and official BLS calendar revalidation remain
+blocked until a usable source/network is provided. Missing sources/results are
+shown in the messages and /jj_diag. This implementation does NOT claim full
+post-publication coverage. No paid service has been added.

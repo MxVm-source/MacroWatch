@@ -38,3 +38,12 @@ validation and strict age limits. No secrets/private data; public repository
 verified. Separate regression cases prove fallback and reject stale/wrong origin
 payloads. Local cache-hit regression caught and fixed before publishing fallback.
 46 tests pass; fallback deployment and scheduled fetch checks pending.
+
+Final runtime state: c2ea95a live; calendar, Fed and BEA verified in production.
+Telegram activation delivery acknowledged. All46 tests and GitHub CI pass.
+Official BLS cache workflow test failed on GitHub's network too (four HTTP errors).
+Removed all schedule/push triggers from that workflow; manual-only, no automatic
+failed-job loop. Existing public snapshot expires safely. Ongoing BLS results
+and calendar source checks are NOT operational; explicitly report this blocker.
+No paid source/account created. Primary briefing and reminder goal operational;
+complete live results coverage remains limited by external source access.

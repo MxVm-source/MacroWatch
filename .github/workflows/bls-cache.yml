@@ -1,14 +1,8 @@
-name: Official BLS input cache
+name: Manual official BLS input cache
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - scripts/refresh_bls_cache.py
-      - .github/workflows/bls-cache.yml
-  schedule:
-    - cron: '*/5 11-21 * * 1-5'
-    - cron: '0 */6 * * *'
+  # No schedule: BLS refused both Render and GitHub runner networks in production.
+  # Keep an explicit manual refresh for a future network/source-access change.
   workflow_dispatch:
 
 permissions:
