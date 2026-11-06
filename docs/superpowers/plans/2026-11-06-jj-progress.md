@@ -24,3 +24,8 @@ in deployment. Telegram acknowledgement + persistence cannot guarantee exactly-o
 when a network failure happens after Telegram accepts a message.
 
 Task 3: local verification complete; deployment/runtime checks pending.
+
+Deployment finding: Render defaults this older service to Python 3.13.4, while
+existing numpy==1.26.4 has no compatible wheel (build attempted from source).
+Pin .python-version to the locally verified Python 3.12.14, matching CI major/minor.
+No change to trading dependencies or service pricing is needed.
